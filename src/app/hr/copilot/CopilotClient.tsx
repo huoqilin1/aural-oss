@@ -26,6 +26,8 @@ export default function HrCopilotPage() {
   const [oneRound, setOneRound] = useState("");
   const [saved, setSaved] = useState("");
   const [analysisError, setAnalysisError] = useState("");
+  const [contextStatus, setContextStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [contextError, setContextError] = useState("");
   const [round1Count, setRound1Count] = useState<number | null>(null); // 一面题数:null=未加载,0=该候选人没真做过一面
   const [proctoring, setProctoring] = useState<{ cheat_risk?: string; evidence?: string } | null>(null); // 一面作弊标记,顶部常驻
   const [dialog, setDialog] = useState<{ role: string; text: string }[]>([]); // 一面问答记录
@@ -54,9 +56,9 @@ export default function HrCopilotPage() {
     const p = new URLSearchParams(window.location.search);
     const cid = p.get("cid");
     cidRef.current = cid;
-    if (!cid) { const name = p.get("name"); if (name) setMeta((m) => ({ ...m, name })); return; }
+    if (!cid) { const name = p.get("name"); if (name) setMeta((m) => ({ ...m, name })); setContextStatus("ready"); return; }
     fetch(`/api/hr-copilot/context?cid=${encodeURIComponent(cid)}`).then((r) => r.json()).then((d) => {
-      if (!d || d.success === false) return;
+      if (!d || d.success === false) { setContextStatus("error"); setContextError(d?.error || "候选人资料加载失败"); return; }
       if (d.name) setMeta((m) => ({ ...m, name: d.name }));
       if (typeof d.position === "string") setMeta((m) => ({ ...m, position: d.position }));
       if (typeof d.resume_text === "string") resumeRef.current = d.resume_text;
@@ -75,7 +77,9 @@ export default function HrCopilotPage() {
       else if (Array.isArray(d.checklist)) setRound1Count(d.checklist.length);
       if (Array.isArray(d.one_round_dialog)) setDialog(d.one_round_dialog);
       if (d.proctoring && d.proctoring.cheat_risk) setProctoring(d.proctoring);
-    }).catch(() => {});
+      setContextError("");
+      setContextStatus("ready");
+    }).catch(() => { setContextStatus("error"); setContextError("候选人资料加载失败，可先录音，稍后刷新重试"); });
   }, []);
 
   const onTranscript = useCallback((full: string) => { transcriptRef.current = full; setTranscript(full); }, []);
@@ -172,7 +176,7 @@ export default function HrCopilotPage() {
           <span className="text-sm text-muted-foreground">二面 · HR 陪面台(AI 军师)</span>
         </div>
         <div className="flex items-center gap-3 text-sm">
-          <span className="text-muted-foreground">候选人 <b className="text-foreground">{meta.name}</b></span>
+          <span className="text-muted-foreground">候选人 <b className="text-foreground">{contextStatus === "loading" ? "资料加载中…" : meta.name}</b></span>
           {meta.position && <span className="rounded-md border border-border px-2 py-1 text-xs text-muted-foreground">应聘 {meta.position}</span>}
           {saved && <span className="text-xs text-primary">{saved}</span>}
           <button onClick={genConclusion} disabled={genBusy} className="rounded-full bg-primary/90 px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary disabled:opacity-50">{genBusy ? "生成中…" : "生成二面结果"}</button>
@@ -181,6 +185,17 @@ export default function HrCopilotPage() {
             : <button onClick={start} className="rounded-full bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground">● 开始录音</button>}
         </div>
       </header>
+      {contextStatus === "loading" && (
+        <div className="shrink-0 border-b border-primary/30 bg-primary/5 px-5 py-2 text-xs text-muted-foreground">
+          候选人资料加载中，录音可以先开始；资料到达后会自动补全岗位、一面结论和问题清单。
+        </div>
+      )}
+      {contextStatus === "error" && (
+        <div className="flex shrink-0 items-center justify-between border-b border-amber-400/40 bg-amber-400/10 px-5 py-2 text-xs text-amber-200">
+          <span>{contextError || "候选人资料加载失败"}，录音仍可正常使用。</span>
+          <button onClick={() => window.location.reload()} className="rounded border border-amber-300/50 px-2 py-0.5 hover:bg-amber-300/10">刷新重试</button>
+        </div>
+      )}
 
       {proctoring && proctoring.cheat_risk && proctoring.cheat_risk !== "low" && (
         <div className={`shrink-0 border-b px-5 py-2 text-xs font-medium ${proctoring.cheat_risk === "high" ? "border-destructive/40 bg-destructive/10 text-destructive" : "border-amber-400/40 bg-amber-400/10 text-amber-200"}`}>
