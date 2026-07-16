@@ -40,10 +40,9 @@ describe("server/voice-relay.ts reconnect & lifecycle (source checks)", () => {
 
   it("marks interviews done and detaches ASR listeners when the browser closes", () => {
     const src = readVoiceRelaySource();
-    assert.ok(
-      src.includes(`browserWs.on("close", () => {
-    log.info("Browser disconnected");
-    interviewDone = true;`),
+    assert.match(
+      src,
+      /browserWs\.on\("close", \(\) => \{\r?\n\s+log\.info\("Browser disconnected"\);\r?\n\s+interviewDone = true;/,
     );
     assert.ok(src.includes("asrWs?.removeAllListeners();"));
   });

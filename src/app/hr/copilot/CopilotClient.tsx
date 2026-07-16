@@ -49,6 +49,9 @@ export default function HrCopilotPage() {
   const resumeRef = useRef("");
   const oneRoundRef = useRef("");
   const cidRef = useRef<string | null>(null);
+  const sessionIdRef = useRef("");
+  const revisionRef = useRef(0);
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const cardsEndRef = useRef<HTMLDivElement | null>(null);
 
@@ -79,10 +82,53 @@ export default function HrCopilotPage() {
       if (d.proctoring && d.proctoring.cheat_risk) setProctoring(d.proctoring);
       setContextError("");
       setContextStatus("ready");
+      if (d.draft && typeof d.draft.transcript === "string" && !transcriptRef.current) {
+        const restored = d.draft.transcript;
+        transcriptRef.current = restored;
+        setTranscript(restored);
+        lastLenRef.current = restored.length;
+        sessionIdRef.current = String(d.draft.session_id || "");
+        revisionRef.current = Number(d.draft.revision || 0);
+        if (restored) setSaved("Recovered autosaved transcript");
+      }
     }).catch(() => { setContextStatus("error"); setContextError("候选人资料加载失败，可先录音，稍后刷新重试"); });
   }, []);
 
-  const onTranscript = useCallback((full: string) => { transcriptRef.current = full; setTranscript(full); }, []);
+  const persistDraft = useCallback(async (text = transcriptRef.current) => {
+    const cid = cidRef.current;
+    if (!cid) return false;
+    if (!sessionIdRef.current) {
+      sessionIdRef.current = crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now().toString(16).slice(-8).padStart(8, "0")}-0000-4000-8000-${Math.random().toString(16).slice(2, 14).padEnd(12, "0")}`;
+    }
+    const revision = revisionRef.current + 1;
+    revisionRef.current = revision;
+    const response = await fetch(`/api/hr-copilot/context?cid=${encodeURIComponent(cid)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      keepalive: true,
+      body: JSON.stringify({
+        session_id: sessionIdRef.current,
+        revision,
+        transcript: text,
+      }),
+    });
+    return response.ok;
+  }, []);
+
+  const scheduleDraft = useCallback((full: string) => {
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => {
+      void persistDraft(full).catch(() => undefined);
+    }, 1200);
+  }, [persistDraft]);
+
+  const onTranscript = useCallback((full: string) => {
+    transcriptRef.current = full;
+    setTranscript(full);
+    scheduleDraft(full);
+  }, [scheduleDraft]);
   const relay = useRelayAsrInput({ language: "zh", onTranscript });
 
   useEffect(() => {
@@ -117,11 +163,29 @@ export default function HrCopilotPage() {
     return () => clearInterval(timer);
   }, [listening]);
 
+  useEffect(() => {
+    const flush = () => { void persistDraft().catch(() => undefined); };
+    window.addEventListener("pagehide", flush);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+      flush();
+    };
+  }, [persistDraft]);
+
   useEffect(() => { if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight; }, [transcript]);
   useEffect(() => { cardsEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [cards]);
 
-  const start = () => { setListening(true); try { relay.start(""); } catch { /* */ } };
-  const stop = () => { setListening(false); try { relay.stop(); } catch { /* */ } };
+  const start = () => {
+    setListening(true);
+    try { void relay.start(transcriptRef.current); } catch { /* */ }
+  };
+  const stop = () => {
+    setListening(false);
+    try { relay.stop(); } catch { /* */ }
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    void persistDraft().catch(() => undefined);
+  };
   const addQuestion = () => { const t = newQ.trim(); if (!t) return; setQuestions((prev) => [...prev, { id: `hr-${Date.now()}`, text: t, status: "active", kind: "hr" }]); setNewQ(""); };
   const setStatus = (id: string, status: QStatus) => setQuestions((prev) => prev.map((q) => (q.id === id ? { ...q, status } : q)));
   const toggleShow = (k: QStatus) => setShow((s) => ({ ...s, [k]: !s[k] }));
@@ -153,8 +217,9 @@ export default function HrCopilotPage() {
     const cid = cidRef.current;
     if (!cid) { setSaved("无候选人 id"); return; }
     setSaved("存储中…");
+    await persistDraft();
     try {
-      const r = await fetch(`/api/hr-copilot/context?cid=${encodeURIComponent(cid)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ transcript: transcriptRef.current, hr_note: `岗位:${metaRef.current.position}|已答题 ${questions.filter((q) => q.status === "done").length}`, recommendation: editRec, ai_summary: editText }) });
+      const r = await fetch(`/api/hr-copilot/context?cid=${encodeURIComponent(cid)}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionIdRef.current, transcript: transcriptRef.current, hr_note: `岗位:${metaRef.current.position}|已答题 ${questions.filter((q) => q.status === "done").length}`, recommendation: editRec, ai_summary: editText }) });
       const d = await r.json();
       if (d.success) { setSaved(`已存入候选人档案(round ${d.interview_round})`); setShowConcl(false); }
       else setSaved(`存储失败:${d.error || ""}`);

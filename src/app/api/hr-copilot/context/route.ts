@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
 
@@ -106,6 +107,32 @@ export async function GET(req: Request) {
 }
 
 // 二面结论存回 OpRun(转发,带运营 token)
+export async function PUT(req: Request) {
+  const cid = new URL(req.url).searchParams.get("cid");
+  if (!cid) return NextResponse.json({ success: false, error: "Missing cid" }, { status: 400 });
+  try {
+    const payload = await req.json().catch(() => ({}));
+    const lr = await fetch(`${OPRUN}/v1/auth/login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ account_id: OP_ID, password: OP_PASS, account_type: "operator" }),
+    });
+    const ld: any = await lr.json().catch(() => ({}));
+    const token = ld.token || ld?.data?.token || ld.access_token;
+    if (!token) return NextResponse.json({ success: false, error: "Operator login failed" }, { status: 502 });
+
+    const sr = await fetch(`${OPRUN}/v1/recruit/copilot/session/${encodeURIComponent(cid)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify(payload),
+    });
+    const sd = await sr.json().catch(() => ({}));
+    return NextResponse.json(sd, { status: sr.status });
+  } catch (e) {
+    return NextResponse.json({ success: false, error: String(e).slice(0, 200) }, { status: 500 });
+  }
+}
+
 export async function POST(req: Request) {
   const cid = new URL(req.url).searchParams.get("cid");
   if (!cid) return NextResponse.json({ success: false, error: "缺少 cid" }, { status: 400 });
