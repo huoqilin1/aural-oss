@@ -1,0 +1,37 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+policy="$repo_root/DEPLOYMENT_POLICY.md"
+
+if [ ! -f "$policy" ]; then
+  echo "BLOCKED: DEPLOYMENT_POLICY.md is missing." >&2
+  exit 1
+fi
+
+branch=$(git symbolic-ref --quiet --short HEAD || true)
+head_sha=$(git rev-parse HEAD)
+origin_main=$(git rev-parse refs/remotes/origin/main 2>/dev/null || true)
+
+if [ "$branch" != "main" ]; then
+  echo "BLOCKED: production may only deploy from main." >&2
+  exit 1
+fi
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "BLOCKED: production deploy requires a clean Git worktree." >&2
+  exit 1
+fi
+
+if [ -z "$origin_main" ] || [ "$head_sha" != "$origin_main" ]; then
+  echo "BLOCKED: HEAD must exactly match origin/main before deployment." >&2
+  exit 1
+fi
+
+if [ "${OPRUN_USER_APPROVED:-}" != "YES" ] || [ "${OPRUN_APPROVED_ACTION:-}" != "deploy" ] || [ "${OPRUN_APPROVED_SHA:-}" != "$head_sha" ]; then
+  echo "BLOCKED: deployment requires the user's explicit approval for $head_sha." >&2
+  echo "Approval variables are technical gates, not substitutes for consent." >&2
+  exit 1
+fi
+
+echo "DEPLOYMENT_GATE_PASSED revision=$head_sha"

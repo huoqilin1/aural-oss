@@ -33,7 +33,7 @@ export function IntervieweeHelpPopover({
           variant="ghost"
           size="icon"
           className="h-8 w-8 text-muted-foreground hover:text-foreground"
-          title="How It Works"
+          title="测试说明"
         >
           <HelpCircle className="h-4 w-4" />
         </Button>
@@ -46,9 +46,9 @@ export function IntervieweeHelpPopover({
         {/* Header with inline navigation */}
         <div className="flex items-center justify-between px-4 py-3">
           <div>
-            <h4 className="text-sm font-semibold">Interface Guide</h4>
+            <h4 className="text-sm font-semibold">界面说明</h4>
             <p className="mt-0.5 text-xs text-muted-foreground">
-              {index + 1} of {items.length}
+              {index + 1} / {items.length}
             </p>
           </div>
           <div className="flex items-center gap-1">

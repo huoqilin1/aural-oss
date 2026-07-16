@@ -1,6 +1,5 @@
 "use client";
 
-import { micLevelForDisplay } from "@/lib/audio-level-display";
 import {
     mergeAsrFinal,
     mergeClientAsrInterim,
@@ -161,7 +160,7 @@ export function useRelayAsrInput({
         let sumSq = 0;
         for (let i = 0; i < input.length; i++) sumSq += input[i] * input[i];
         const rms = Math.sqrt(sumSq / input.length);
-        onAudioLevelRef.current?.(micLevelForDisplay(rms));
+        onAudioLevelRef.current?.(Math.min(1, rms * 5));
 
         const pcm = new Int16Array(input.length);
         for (let i = 0; i < input.length; i++) {

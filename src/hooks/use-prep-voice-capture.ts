@@ -2,7 +2,6 @@
 
 import { useRelayAsrInput } from "@/hooks/use-relay-asr-input";
 import { useToast } from "@/hooks/use-toast";
-import { micLevelForDisplay } from "@/lib/audio-level-display";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 type SpeechRecognitionInstance = {
@@ -106,15 +105,13 @@ export function usePrepVoiceCapture({
       source.connect(analyser);
       const data = new Uint8Array(analyser.frequencyBinCount);
       const tick = () => {
-        if (!usesRelayRef.current) {
-          analyser.getByteTimeDomainData(data);
-          let sum = 0;
-          for (let i = 0; i < data.length; i++) {
-            const v = (data[i] - 128) / 128;
-            sum += v * v;
-          }
-          setAudioLevel(micLevelForDisplay(Math.sqrt(sum / data.length)));
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) {
+          const v = (data[i] - 128) / 128;
+          sum += v * v;
         }
+        setAudioLevel(Math.min(1, Math.sqrt(sum / data.length) * 4));
         levelAnimRef.current = requestAnimationFrame(tick);
       };
       levelAnimRef.current = requestAnimationFrame(tick);
@@ -212,7 +209,8 @@ export function usePrepVoiceCapture({
     recorderRef.current = recorder;
   }, []);
 
-  const startBrowserAsr = useCallback(() => {
+  const startBrowserAsr = useCallback(
+    () => {
       const speechWindow = window as SpeechWindow;
       const Recognition =
         speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
@@ -295,10 +293,9 @@ export function usePrepVoiceCapture({
         }, 200);
 
         if (relay.isRelayAvailable) {
+          usesRelayRef.current = true;
           const ok = await relay.start(baseTextRef.current, stream);
-          if (ok) {
-            usesRelayRef.current = true;
-          } else {
+          if (!ok) {
             usesRelayRef.current = false;
             toast({
               title: "Voice relay unavailable",

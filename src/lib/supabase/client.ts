@@ -15,6 +15,7 @@ export function createClient() {
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
       auth: {
+        storageKey: "sb-oprun-auth-token",
         // Bypass navigator.locks to prevent AbortError on public pages
         lock: <R,>(
           _name: string,

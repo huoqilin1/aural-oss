@@ -5,8 +5,8 @@ import { type LLMProvider, type GenerationParams, type LLMResponse, type LLMMess
 export class DeepSeekProvider implements LLMProvider {
   id = "deepseek";
   name = "DeepSeek";
-  models = ["deepseek-v4-flash", "deepseek-v4-pro"];
-  defaultModel = "deepseek-v4-flash";
+  models = ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro", "deepseek-v4-flash"];
+  defaultModel = "deepseek-chat";
 
   private client: OpenAI;
 
@@ -18,28 +18,20 @@ export class DeepSeekProvider implements LLMProvider {
   }
 
   private toOpenAIMessages(messages: LLMMessage[]): ChatCompletionMessageParam[] {
-    return messages.map((message) => ({
-      role: message.role,
-      content: message.content as string & Array<unknown>,
+    return messages.map((m) => ({
+      role: m.role,
+      content: m.content as string & Array<unknown>,
     })) as ChatCompletionMessageParam[];
   }
 
-  private request(params: GenerationParams & { model?: string }, stream = false) {
+  async generateResponse(params: GenerationParams & { model?: string }): Promise<LLMResponse> {
     const model = params.model ?? this.defaultModel;
-    return {
+    const response = await this.client.chat.completions.create({
       model,
       messages: this.toOpenAIMessages(params.messages),
+      temperature: params.temperature ?? 0.7,
       max_tokens: params.maxTokens ?? 2048,
-      ...(model === "deepseek-v4-flash" ? { temperature: params.temperature ?? 0.2 } : {}),
-      thinking: { type: model === "deepseek-v4-flash" ? "disabled" : "enabled" },
-      ...(stream ? { stream: true } : {}),
-    };
-  }
-
-  async generateResponse(
-    params: GenerationParams & { model?: string }
-  ): Promise<LLMResponse> {
-    const response = await this.client.chat.completions.create(this.request(params) as any);
+    });
     const choice = response.choices[0];
     return {
       content: choice.message.content ?? "",
@@ -54,13 +46,20 @@ export class DeepSeekProvider implements LLMProvider {
     };
   }
 
-  async *streamResponse(
-    params: GenerationParams & { model?: string }
-  ): AsyncIterable<string> {
-    const stream = await this.client.chat.completions.create(this.request(params, true) as any);
-    for await (const chunk of stream as any) {
+  async *streamResponse(params: GenerationParams & { model?: string }): AsyncIterable<string> {
+    const model = params.model ?? this.defaultModel;
+    const stream = await this.client.chat.completions.create({
+      model,
+      messages: this.toOpenAIMessages(params.messages),
+      temperature: params.temperature ?? 0.7,
+      max_tokens: params.maxTokens ?? 2048,
+      stream: true,
+    });
+    for await (const chunk of stream) {
       const content = chunk.choices[0]?.delta?.content;
-      if (content) yield content;
+      if (content) {
+        yield content;
+      }
     }
   }
 }

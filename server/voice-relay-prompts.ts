@@ -97,8 +97,8 @@ export const SPOKEN = {
 
   greeting(aiName: string, title: string, count: number, spokenQuestion: string): BiText {
     return {
-      zh: `你好，我是${aiName}，今天由我来和你聊聊"${title}"这个话题，一共${count}个问题。我们开始吧！第一个问题：${spokenQuestion}`,
-      en: `Hi, I'm ${aiName}. Today we'll chat about "${title}" — I have ${count} questions. Let's begin! Here is the first question: ${spokenQuestion}`,
+      zh: `你好，我是${aiName}，这次测试大概 20 到 25 分钟，咱们开始吧。${spokenQuestion}`,
+      en: `Hi, I'm ${aiName}. This will take about 20 to 25 minutes. Let's begin. ${spokenQuestion}`,
     };
   },
 
@@ -354,6 +354,13 @@ ${guardZh}
 请根据受访者最新的发言，生成一个回应。
 **首先判断受访者是否在跟你说话（问问题、打招呼、请求帮助、确认你是否在听等）。如果是，你必须直接回答他们的问题或请求，不能忽视。**
 直接输出你要说的话，不要加任何前缀、标签、引号或解释。
+
+【追问策略 · 你是该领域资深、极其挑剔的专家考官,难度对标高标准真实面试】
+- 绝不接受泛泛、正确的废话、教科书式回答。对方一答得空、含糊、套话,立刻点破并逼他具体化。
+- 层层加码:每答出一层就再深一层——具体怎么做的→用什么方法或工具、为什么这么选→量化指标(多少条、多少天、几个人、准确率/错误率/成本)→行业术语和规范→边界和异常怎么处理→踩过的坑、失败或返工的真实案例→换个更难的约束你会怎么做。一直追到触及他能力的真实边界(明显答不上来或心虚)为止。
+- 用 STAR 锁死细节:当时情况、你的任务、你"亲手"做了什么(不是团队做了什么)、结果和数字。哪一环虚就死追哪一环。
+- 真做过的人:答得出具体、给得出数字、前后对得上、讲得清取舍和失败。夸大的人:越追越空、给不出数字、把"团队做的"说成"我做的"、前后打架。揪住破绽继续逼。
+- 一个点没问透绝不转下一题。每次只问一个问题,短、狠、准,像顶级面试官一样咄咄逼人但有礼。
 
 ${p.followUpInstruction}
 

@@ -524,60 +524,6 @@ export type Database = {
         };
         Relationships: [];
       };
-      prep_answer_bank: {
-        Row: {
-          id: string;
-          userId: string;
-          interviewId: string | null;
-          questionId: string | null;
-          attemptId: string | null;
-          interviewTitle: string;
-          questionText: string;
-          questionType: string | null;
-          answerText: string;
-          score: number | null;
-          feedback: Json;
-          audioPath: string | null;
-          note: string | null;
-          createdAt: string;
-          updatedAt: string;
-        };
-        Insert: {
-          id?: string;
-          userId: string;
-          interviewId?: string | null;
-          questionId?: string | null;
-          attemptId?: string | null;
-          interviewTitle?: string;
-          questionText: string;
-          questionType?: string | null;
-          answerText: string;
-          score?: number | null;
-          feedback?: Json;
-          audioPath?: string | null;
-          note?: string | null;
-          createdAt?: string;
-          updatedAt?: string;
-        };
-        Update: {
-          id?: string;
-          userId?: string;
-          interviewId?: string | null;
-          questionId?: string | null;
-          attemptId?: string | null;
-          interviewTitle?: string;
-          questionText?: string;
-          questionType?: string | null;
-          answerText?: string;
-          score?: number | null;
-          feedback?: Json;
-          audioPath?: string | null;
-          note?: string | null;
-          createdAt?: string;
-          updatedAt?: string;
-        };
-        Relationships: [];
-      };
       api_keys: {
         Row: {
           id: string;

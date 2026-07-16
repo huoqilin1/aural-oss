@@ -146,22 +146,9 @@ export function useInterviewRecording({
         setScreenStream(null);
         screenStreamRef.current = null;
       });
-    } else if (!wasScreenSkipped()) {
-      try {
-        const screen = await navigator.mediaDevices.getDisplayMedia({
-          video: true,
-        });
-        setScreenStream(screen);
-        screenStreamRef.current = screen;
-
-        screen.getVideoTracks()[0]?.addEventListener("ended", () => {
-          setScreenStream(null);
-          screenStreamRef.current = null;
-        });
-      } catch (err) {
-        log.warn("Screen share not available:", err);
-      }
     }
+    // 招聘语音面:不录屏、不弹屏幕共享授权框(王总 2026-06-21)。
+    // 切走检测/多屏检测/禁粘贴在 use-anti-cheating.ts,不依赖屏幕共享,照常生效。
   }, []);
 
   /** Pipe a mic MediaStream into the recording mixer. */

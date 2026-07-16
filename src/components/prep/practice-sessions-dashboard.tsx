@@ -55,7 +55,6 @@ import {
     CirclePlay,
     Clock,
     Download,
-    FileText,
     Loader2,
     Search,
     Sparkles,
@@ -146,9 +145,6 @@ function formatDate(date: string | null | undefined): string {
 }
 
 function practiceSessionHref(row: PracticeSessionSummary): string {
-  if (row.status === "COMPLETED") {
-    return `/practices/${row.id}`;
-  }
   const base = `/practice/${row.interviewId}`;
   if (row.status === "IN_PROGRESS") {
     return `${base}?session=${row.id}`;
@@ -157,8 +153,19 @@ function practiceSessionHref(row: PracticeSessionSummary): string {
 }
 
 function practiceSessionActionLabel(row: PracticeSessionSummary): string {
-  if (row.status === "COMPLETED") return "View report";
+  if (row.status === "COMPLETED") return "Session completed";
   return row.status === "IN_PROGRESS" ? "Resume practice" : "Practice again";
+}
+
+function practiceSessionDisabledReason(row: PracticeSessionSummary): string {
+  if (row.status === "COMPLETED") {
+    return "This session is completed and cannot be resumed.";
+  }
+  return practiceSessionActionLabel(row);
+}
+
+function isPracticeSessionActionDisabled(row: PracticeSessionSummary): boolean {
+  return row.status === "COMPLETED";
 }
 
 function effectiveDuration(row: PracticeSessionSummary): number | null {
@@ -614,7 +621,7 @@ export function PracticeSessionsDashboard({
                             />
                           ) : null}
                           <span
-                            className="group inline-flex cursor-pointer select-none items-center gap-1 whitespace-nowrap hover:text-foreground"
+                            className="inline-flex cursor-pointer select-none items-center gap-1 whitespace-nowrap hover:text-foreground"
                             onClick={() => handleSort("interview")}
                           >
                             Interview
@@ -625,7 +632,7 @@ export function PracticeSessionsDashboard({
                                 <ArrowDown className="h-3.5 w-3.5" />
                               )
                             ) : (
-                              <ArrowUpDown className="h-3.5 w-3.5 opacity-0 transition-opacity group-hover:opacity-40" />
+                              <ArrowUpDown className="h-3.5 w-3.5 opacity-40" />
                             )}
                           </span>
                         </div>
@@ -779,37 +786,44 @@ export function PracticeSessionsDashboard({
                         {formatDate(row.completedAt)}
                       </TableCell>
                       <TableCell className="text-right">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              asChild
-                              variant="ghost"
-                              size="icon"
-                              className="h-8 w-8"
-                            >
-                              <Link
-                                href={practiceSessionHref(row)}
-                                target={
-                                  row.status === "COMPLETED"
-                                    ? undefined
-                                    : "_blank"
-                                }
-                              >
-                                {row.status === "COMPLETED" ? (
-                                  <FileText className="h-4 w-4" />
-                                ) : (
+                        {isPracticeSessionActionDisabled(row) ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex">
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-8 w-8"
+                                  disabled
+                                  aria-label={practiceSessionActionLabel(row)}
+                                >
                                   <CirclePlay className="h-4 w-4" />
-                                )}
-                                <span className="sr-only">
-                                  {practiceSessionActionLabel(row)}
-                                </span>
-                              </Link>
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent side="left">
-                            {practiceSessionActionLabel(row)}
-                          </TooltipContent>
-                        </Tooltip>
+                                </Button>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="left">
+                              {practiceSessionDisabledReason(row)}
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          <Button
+                            asChild
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8"
+                            title={practiceSessionActionLabel(row)}
+                          >
+                            <Link
+                              href={practiceSessionHref(row)}
+                              target="_blank"
+                            >
+                              <CirclePlay className="h-4 w-4" />
+                              <span className="sr-only">
+                                {practiceSessionActionLabel(row)}
+                              </span>
+                            </Link>
+                          </Button>
+                        )}
                       </TableCell>
                     </TableRow>
                   ))}

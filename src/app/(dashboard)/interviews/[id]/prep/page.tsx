@@ -29,8 +29,6 @@ export default function FocusedPrepPage() {
   const searchParams = useSearchParams();
   const interviewId = params.id as string;
   const resumeSessionId = searchParams.get("session");
-  /** Question to open first (e.g. "Practice this question" from the answer bank). */
-  const startQuestionId = searchParams.get("question");
   const { toast } = useToast();
   const utils = trpc.useUtils();
 
@@ -38,9 +36,6 @@ export default function FocusedPrepPage() {
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [practiceCompleted, setPracticeCompleted] = useState(false);
-  const [completedSessionId, setCompletedSessionId] = useState<string | null>(
-    null,
-  );
   const [activeQuestions, setActiveQuestions] = useState<PrepQuestion[]>([]);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const timerCompletedRef = useRef(false);
@@ -55,7 +50,7 @@ export default function FocusedPrepPage() {
     () => (bundleQuery.data?.attempts ?? []).map(normalizeAttempt),
     [bundleQuery.data?.attempts],
   );
-  const planTier = bundleQuery.data?.planTier ?? "Free";
+  const planTier = bundleQuery.data?.planTier ?? "Self-hosted";
   const mediaRetentionDays = bundleQuery.data?.mediaRetention?.retentionDays ?? 7;
 
   const startSession = trpc.prep.startSession.useMutation({
@@ -78,8 +73,7 @@ export default function FocusedPrepPage() {
   });
 
   const endSession = trpc.prep.endSession.useMutation({
-    onSuccess: (_data, variables) => {
-      setCompletedSessionId(variables.sessionId);
+    onSuccess: () => {
       setSessionId(null);
       setRemainingSeconds(null);
       setActiveQuestions([]);
@@ -157,12 +151,6 @@ export default function FocusedPrepPage() {
       <PracticeCompletedScreen
         interviewId={interviewId}
         interviewTitle={interview.title}
-        sessionId={completedSessionId}
-        onPracticeAgain={() => {
-          setCompletedSessionId(null);
-          setPracticeCompleted(false);
-          startAttemptedRef.current = false;
-        }}
       />
     );
   }
@@ -249,7 +237,6 @@ export default function FocusedPrepPage() {
           utils.prep.getBundle.invalidate({ interviewId })
         }
         questions={activeQuestions}
-        initialQuestionId={startQuestionId}
         mode={DEFAULT_MODE}
         remainingSeconds={remainingSeconds}
         attempts={attempts}

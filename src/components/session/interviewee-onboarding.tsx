@@ -64,9 +64,8 @@ interface IntervieweeOnboardingProps {
 type OnboardingStep = "info" | "checklist" | "howItWorks";
 
 const STEPS = [
-  { key: "info" as const, label: "Interview Info" },
-  { key: "checklist" as const, label: "Checklist" },
-  { key: "enter" as const, label: "Start" },
+  { key: "info" as const, label: "测试信息" },
+  { key: "enter" as const, label: "开始" },
 ];
 
 function WelcomeIllustration() {
@@ -263,7 +262,7 @@ function CameraCheck({
       setPhoto(null);
       setStreaming(true);
     } catch {
-      setError("Unable to access camera. Please check permissions.");
+      setError("无法访问摄像头,请检查浏览器权限。");
     }
   }, []);
 
@@ -310,7 +309,7 @@ function CameraCheck({
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={photo}
-                alt="Captured photo"
+                alt="已拍照片"
                 className="h-full w-full object-cover"
               />
             ) : streaming ? (
@@ -325,7 +324,7 @@ function CameraCheck({
               <div className="flex h-full w-full flex-col items-center justify-center gap-2">
                 <User className="h-10 w-10 text-muted-foreground/30" />
                 <span className="text-[11px] text-muted-foreground/50">
-                  Keep your eyes on the camera
+                  请正对摄像头
                 </span>
               </div>
             )}
@@ -333,51 +332,49 @@ function CameraCheck({
           {!photo && !streaming && !done && (
             <Button size="sm" onClick={startCamera} className="w-full">
               <Camera className="mr-1.5 h-3.5 w-3.5" />
-              Start Collecting
+              开启摄像头
             </Button>
           )}
           {streaming && (
             <Button size="sm" onClick={capture} className="w-full">
-              Capture
+              拍照
             </Button>
           )}
           {photo && (
             <Button size="sm" variant="outline" onClick={retake} className="w-full">
               <RefreshCw className="mr-1 h-3 w-3" />
-              Retake
+              重拍
             </Button>
           )}
         </div>
 
         <div className="flex-1 space-y-2">
           <p className="text-sm font-medium">
-            The photo will be compared with snapshots during the interview, so
-            please keep your face visible.
+            测试过程中会不定时截图与这张照片比对,请保持正脸清晰可见。
           </p>
           <p className="text-xs text-muted-foreground">
-            Photo collection requires authorization, please operate according to
-            browser prompts.
+            拍照需要摄像头授权,请按浏览器提示点「允许」。
           </p>
           {error && (
             <div className="flex items-center gap-1.5 rounded-md bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
               <AlertCircle className="h-3.5 w-3.5 shrink-0" />
               <span>{error}</span>
               <button type="button" className="ml-auto font-medium underline" onClick={startCamera}>
-                Retry
+                重试
               </button>
             </div>
           )}
           {allowSkip && !error && !photo && !streaming && !done && (
             <p className="text-xs text-muted-foreground">
-              No camera?{" "}
+              没有摄像头?{" "}
               <button type="button" className="font-medium text-primary hover:underline" onClick={() => setShowSkipDialog(true)}>
-                Skip
+                跳过
               </button>
             </p>
           )}
           {!allowSkip && !error && !photo && !streaming && !done && (
             <p className="text-xs text-amber-600 dark:text-amber-400">
-              Camera is required for this interview.
+              本场测试需要开启摄像头。
             </p>
           )}
         </div>
@@ -386,12 +383,12 @@ function CameraCheck({
           {done ? (
             <span className="flex items-center gap-1.5 text-sm font-medium text-secondary-600 dark:text-secondary-400">
               <CheckCircle2 className="h-4 w-4" />
-              Collect photo
+              摄像头采集
             </span>
           ) : (
             <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
               <div className="h-4 w-4 rounded-full border-2" />
-              Collect photo
+              摄像头采集
             </span>
           )}
         </div>
@@ -400,17 +397,15 @@ function CameraCheck({
       <AlertDialog open={showSkipDialog} onOpenChange={setShowSkipDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Skip photo collection?</AlertDialogTitle>
+            <AlertDialogTitle>跳过摄像头采集?</AlertDialogTitle>
             <AlertDialogDescription>
-              Skipping photo collection is not recommended. The photo is used to
-              verify your identity during the interview. Skipping may affect your
-              interview results.
+              不建议跳过摄像头采集。这张照片用于测试中核对身份,跳过可能影响测试结果。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Go back</AlertDialogCancel>
+            <AlertDialogCancel>返回</AlertDialogCancel>
             <AlertDialogAction onClick={() => { setCameraSkipped(true); onDone(); }}>
-              Skip anyway
+              仍然跳过
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -816,7 +811,7 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
               <div className="flex flex-col items-center gap-1">
                 <div className="flex gap-1">
                   <div className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
-                  <span className="text-[11px] font-medium text-destructive">Listening...</span>
+                  <span className="text-[11px] font-medium text-destructive">聆听中…</span>
                 </div>
                 {transcript && (
                   <span className="max-w-[10rem] truncate text-[10px] text-muted-foreground">
@@ -826,105 +821,104 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
               </div>
             )}
             {phase === "analyzing" && (
-              <span className="text-[11px] text-muted-foreground">Analyzing...</span>
+              <span className="text-[11px] text-muted-foreground">分析中…</span>
             )}
             {phase === "idle" && !done && (
               <span className="text-[11px] text-muted-foreground/50">
-                Speaker &amp; Microphone
+                扬声器和麦克风
               </span>
             )}
             {done && !skipped && (
               <span className="text-xs font-medium text-secondary-600 dark:text-secondary-400">
-                Audio confirmed
+                音频正常
               </span>
             )}
           </div>
           {phase === "idle" && !done && (
             <Button size="sm" onClick={playTTS} className="w-full">
               <Mic className="mr-1.5 h-3.5 w-3.5" />
-              Test Microphone
+              测试麦克风
             </Button>
           )}
           {phase === "requesting" && (
             <Button size="sm" disabled className="w-full">
               <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-              Requesting access...
+              正在请求权限…
             </Button>
           )}
           {phase === "playing" && (
             <Button size="sm" variant="outline" onClick={() => { stopAll(); setPhase("idle"); }} className="w-full">
-              Stop
+              停止
             </Button>
           )}
           {phase === "listening" && (
             <Button size="sm" variant="outline" disabled className="w-full">
               <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-              Listening...
+              聆听中…
             </Button>
           )}
           {phase === "analyzing" && (
             <Button size="sm" disabled className="w-full">
               <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-              Analyzing...
+              分析中…
             </Button>
           )}
           {phase === "confirm" && !done && (
             <Button size="sm" onClick={playTTS} className="w-full">
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
-              Play again
+              再播一次
             </Button>
           )}
         </div>
 
         <div className="flex-1 space-y-2">
           <p className="text-sm font-medium">
-            Test your speaker and microphone to ensure audio is working
-            properly.
+            测试一下扬声器和麦克风,确保声音正常。
           </p>
           <p className="text-xs text-muted-foreground">
             {phase === "idle" && !done &&
-              "Click \"Test Microphone\" to hear a message from the voice agent. Then speak your response to confirm the audio works — just like in the actual interview."}
+              "点\"测试麦克风\",你会听到一句语音;然后开口回一句,确认麦克风能被听到——和正式测试一样。"}
             {phase === "requesting" &&
-              "Granting microphone access..."}
+              "正在获取麦克风权限…"}
             {phase === "playing" &&
-              "The voice agent is speaking — listen carefully..."}
+              "语音正在播放,请仔细听…"}
             {phase === "listening" &&
-              "Please say \"yes\" or \"I can hear you\" to confirm."}
+              "请说\"你好\"或\"能听到\"来确认。"}
             {phase === "analyzing" &&
-              "Checking your response..."}
+              "正在检测你的回答…"}
             {phase === "confirm" && !done && allowSkip &&
-              "We couldn't detect your voice. Try again, or "}
+              "没检测到你的声音,再试一次,或"}
             {phase === "confirm" && !done && allowSkip && (
               <button type="button" className="font-medium text-primary hover:underline" onClick={() => setShowSkipDialog(true)}>
-                skip this step
+                跳过这一步
               </button>
             )}
-            {phase === "confirm" && !done && allowSkip && "."}
+            {phase === "confirm" && !done && allowSkip && "。"}
             {phase === "confirm" && !done && !allowSkip &&
-              "We couldn't detect your voice. Please try again."}
+              "没检测到你的声音,请再试一次。"}
             {done &&
-              "Audio test passed. Your speaker and microphone are working."}
+              "音频测试通过,扬声器和麦克风正常。"}
           </p>
           {error && (
             <div className="flex items-center gap-1.5 rounded-md bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive">
               <AlertCircle className="h-3.5 w-3.5 shrink-0" />
               <span>{error}</span>
               <button type="button" className="ml-auto font-medium underline" onClick={playTTS}>
-                Retry
+                重试
               </button>
             </div>
           )}
           {allowSkip && !error && phase === "idle" && !done && (
             <p className="text-xs text-muted-foreground">
-              No microphone?{" "}
+              没有麦克风?{" "}
               <button type="button" className="font-medium text-primary hover:underline" onClick={() => setShowSkipDialog(true)}>
-                Skip
+                跳过
               </button>
             </p>
           )}
           {!allowSkip && !error && phase === "idle" && !done && (
             <p className="text-xs text-amber-600 dark:text-amber-400">
-              Microphone is required for this interview.
+              本次测试需要麦克风。
             </p>
           )}
         </div>
@@ -933,12 +927,12 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
           {done ? (
             <span className="flex items-center gap-1.5 text-sm font-medium text-secondary-600 dark:text-secondary-400">
               <CheckCircle2 className="h-4 w-4" />
-              Microphone
+              麦克风
             </span>
           ) : (
             <span className="flex items-center gap-1.5 text-sm text-muted-foreground">
               <div className="h-4 w-4 rounded-full border-2" />
-              Microphone
+              麦克风
             </span>
           )}
         </div>
@@ -946,17 +940,15 @@ function MicCheck({ done, onDone, language, allowSkip = true }: { done: boolean;
       <AlertDialog open={showSkipDialog} onOpenChange={setShowSkipDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Skip microphone test?</AlertDialogTitle>
+            <AlertDialogTitle>跳过麦克风测试?</AlertDialogTitle>
             <AlertDialogDescription>
-              Skipping the microphone test is not recommended. If your speaker or
-              microphone is not working properly, it may affect your interview
-              experience and results.
+              不建议跳过麦克风测试。如果扬声器或麦克风工作不正常,可能会影响你的测试体验和结果。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Go back</AlertDialogCancel>
+            <AlertDialogCancel>返回</AlertDialogCancel>
             <AlertDialogAction onClick={() => { setPhase("idle"); setSkipped(true); onDone(); }}>
-              Skip anyway
+              仍要跳过
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -1183,7 +1175,8 @@ export function IntervieweeOnboarding({
   const [screenDone, setScreenDone] = useState(false);
   const [starting, setStarting] = useState(false);
 
-  const allChecksDone = cameraDone && micDone && screenDone;
+  // 摄像头 + 麦克风都要检测(只去掉屏幕录制那步)
+  const allChecksDone = cameraDone && micDone;
 
   const handleComplete = useCallback(() => {
     setStarting(true);
@@ -1194,7 +1187,7 @@ export function IntervieweeOnboarding({
     <header className="sticky top-0 z-50 flex h-14 items-center border-b bg-card px-4 sm:px-6">
       <div className="flex items-center gap-1">
         <AuralLogo size={28} className="shrink-0" />
-        <span className="font-heading text-base font-bold tracking-[2px]">AURAL</span>
+        <span className="font-heading text-base font-bold tracking-[2px]">数君</span>
       </div>
     </header>
   );
@@ -1211,94 +1204,59 @@ export function IntervieweeOnboarding({
 
               <div className="mt-4 flex gap-6 text-sm">
                 <div>
-                  <span className="font-medium">Description</span>
+                  <span className="font-medium">说明</span>
                   <p className="mt-1 text-muted-foreground">
-                    {interviewDescription || "No additional description."}
+                    {interviewDescription || "AI 会根据你的简历和岗位即时提问。"}
                   </p>
                 </div>
               </div>
 
               <div className="mt-2 text-sm text-muted-foreground">
-                {questionCount} questions &middot;{" "}
+                {questionCount > 0 ? `${questionCount} 道题` : "AI 对话式测试"} &middot;{" "}
                 {timeLimitMinutes
-                  ? `${timeLimitMinutes} min`
-                  : "No time limit"}
+                  ? `${timeLimitMinutes} 分钟`
+                  : "不限时"}
               </div>
             </CardContent>
           </Card>
 
           <Card className="mt-4">
             <CardContent className="space-y-3 p-4 sm:p-6">
-              <h3 className="font-semibold">Integrity Notices</h3>
+              <h3 className="font-semibold">测试须知</h3>
               {antiCheatingEnabled ? (
                 <>
                   <div className="rounded-md bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
-                    To ensure fairness, the following integrity measures will be
-                    actively enforced throughout this session.
+                    为保证测试公平,以下监考措施将在本次测试全程生效。
                   </div>
                   <ol className="list-inside list-decimal space-y-2 text-sm text-muted-foreground">
+                    <li>为保证测试顺利进行,请使用最新版 Chrome 浏览器。</li>
+                    <li>答完每道题后,请确认已提交所有题目的回答,否则会影响成绩。</li>
                     <li>
-                      To ensure that the interview runs properly, please use the
-                      latest version of Chrome.
+                      <span className="font-medium text-foreground">切屏检测:</span>{" "}
+                      离开测试页面或切换到其他窗口会被自动检测并记录;离开超过{" "}
+                      <span className="font-medium text-primary">3</span> 次,本次测试会被标记复核。
                     </li>
                     <li>
-                      After completing your answers, please make sure that you have
-                      submitted them to all questions. Otherwise it will affect your
-                      results.
+                      <span className="font-medium text-foreground">禁止外部粘贴:</span>{" "}
+                      不允许从测试页面以外粘贴内容;页面内可正常复制粘贴。
                     </li>
                     <li>
-                      <span className="font-medium text-foreground">Tab switching and focus tracking:</span>{" "}
-                      Leaving the interview page or switching to another window will
-                      be automatically detected and recorded. If you leave more
-                      than{" "}
-                      <span className="font-medium text-primary">3</span> times,
-                      your session will be flagged for review.
+                      <span className="font-medium text-foreground">多屏检测:</span>{" "}
+                      系统会检测是否连接了多块显示器,开始前请拔掉或关闭多余的屏幕。
                     </li>
-                    <li>
-                      <span className="font-medium text-foreground">External paste blocked:</span>{" "}
-                      Pasting content from outside the interview page is not
-                      allowed. You can copy and paste freely within the page.
-                    </li>
-                    <li>
-                      <span className="font-medium text-foreground">Multiple screen detection:</span>{" "}
-                      The system will detect if you have multiple monitors connected.
-                      Please unplug or turn off additional screens before starting.
-                    </li>
-                    <li>
-                      This interview requires a camera to collect your registration
-                      photo and capture your behavior. All photos are privacy
-                      protected.
-                    </li>
-                    <li>
-                      The interview will screen capture throughout. Screen capture
-                      requires authorization.
-                    </li>
+                    <li>本次测试需要摄像头采集登记照并记录测试行为,所有照片均做隐私保护。</li>
                   </ol>
                 </>
               ) : (
                 <ol className="list-inside list-decimal space-y-2 text-sm text-muted-foreground">
                   <li>
-                    To ensure that the interview runs properly, please use the
-                    latest version of Chrome.
+                    为保证测试正常进行,请使用最新版 Chrome 浏览器。
                   </li>
                   <li>
-                    After completing your answers, please make sure that you have
-                    submitted them to all questions. Otherwise it will affect your
-                    results.
+                    本次为语音对话测试,请在安静环境下进行,并确保麦克风正常、声音能被听清。
                   </li>
                   <li>
-                    Before the interview starts, please shut down any software or
-                    web page with ads, message pop-ups. Please do not leave the
-                    interview page during the whole process.
-                  </li>
-                  <li>
-                    This interview requires a camera to collect your registration
-                    photo and capture your behavior. All photos are privacy
-                    protected.
-                  </li>
-                  <li>
-                    The interview will screen capture throughout. Screen capture
-                    requires authorization.
+                    测试过程中请勿离开本页面,并关闭其他带广告、弹窗的软件或网页。
                   </li>
                 </ol>
               )}
@@ -1311,14 +1269,14 @@ export function IntervieweeOnboarding({
                 checked={agreed}
                 onCheckedChange={(v) => setAgreed(v === true)}
               />
-              I agree to the above notice and interview guidelines
+              我已阅读并同意以上测试须知
             </label>
             <Button
               disabled={!agreed}
-              onClick={() => setStep("checklist")}
+              onClick={() => handleComplete()}
               className="w-40"
             >
-              Next
+              进入测试
             </Button>
           </div>
         </div>
@@ -1377,24 +1335,20 @@ export function IntervieweeOnboarding({
       <div className="mx-auto w-full max-w-2xl flex-1 space-y-4 px-4 pb-8">
         <CameraCheck done={cameraDone} onDone={() => setCameraDone(true)} allowSkip={!antiCheatingEnabled} />
         <MicCheck done={micDone} onDone={() => setMicDone(true)} language={language} allowSkip={!antiCheatingEnabled} />
-        <ScreenCheck done={screenDone} onDone={() => setScreenDone(true)} allowSkip={!antiCheatingEnabled} />
 
         <div className="flex items-center justify-center gap-3 pt-4">
           <Button variant="outline" onClick={() => setStep("info")}>
-            Back
+            上一步
           </Button>
           <Button
             disabled={!allChecksDone}
-            onClick={() => {
-              if (voiceEnabled) setStep("howItWorks");
-              else onComplete();
-            }}
+            onClick={() => handleComplete()}
           >
-            Next
+            进入测试
           </Button>
         </div>
         <p className="text-center text-xs text-muted-foreground">
-          Chrome is recommended for a better experience.
+          建议使用 Chrome 浏览器以获得更好体验。
         </p>
       </div>
     </div>

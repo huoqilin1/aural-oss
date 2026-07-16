@@ -32,14 +32,12 @@ export default function SlugSessionPage() {
   const router = useRouter();
   const slug = params.slug as string;
   const sidParam = searchParams.get("sid");
-
   const isPreview = searchParams.get("preview") === "true";
-  const previewQuestionId = searchParams.get("question");
 
   const [completed, setCompleted] = useState(false);
   const [completionReason, setCompletionReason] = useState<string | undefined>();
   const [onboardingDone, setOnboardingDone] = useState(isPreview);
-  const [previewTourDone, setPreviewTourDone] = useState(Boolean(previewQuestionId));
+  const [previewTourDone, setPreviewTourDone] = useState(false);
 
   const handleComplete = (reason?: string) => {
     setCompletionReason(reason);
@@ -74,27 +72,27 @@ export default function SlugSessionPage() {
 
   if (session.data.status === "COMPLETED" || completed) {
     try { localStorage.removeItem(STORAGE_PREFIX + slug); } catch { /* noop */ }
-    const isTimeLimit = completionReason === "TIME_LIMIT_EXCEEDED";
     return (
       <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
         <Card className="w-full max-w-md">
           <CardContent className="py-12 text-center">
             <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
-            <h2 className="mt-4 text-2xl font-bold">Thank you!</h2>
-            {isTimeLimit && (
+            <h2 className="mt-4 text-2xl font-bold">测试已完成</h2>
+            {completionReason === "TIME_LIMIT_EXCEEDED" && (
               <p className="mt-2 text-sm text-amber-600">
-                The session time limit has been reached and the interview was ended automatically.
+                测试时间已到,系统自动结束了本次测试。
               </p>
             )}
             <p className="mt-2 text-muted-foreground">
-              Your interview has been completed successfully. We appreciate your
-              time and thoughtful responses.
+              你的测试已顺利完成,感谢你的时间和用心的回答。
             </p>
           </CardContent>
         </Card>
       </div>
     );
   }
+
+  const antiCheatingEnabled = !isPreview && !!interview.data.antiCheatingEnabled;
 
   if (!onboardingDone) {
     return (
@@ -104,7 +102,7 @@ export default function SlugSessionPage() {
         questionCount={interview.data.questions.length}
         timeLimitMinutes={interview.data.timeLimitMinutes}
         language={interview.data.language}
-        antiCheatingEnabled={!!interview.data.antiCheatingEnabled}
+        antiCheatingEnabled={antiCheatingEnabled}
         voiceEnabled={!!interview.data.voiceEnabled}
         chatEnabled={!!interview.data.chatEnabled}
         aiName={interview.data.aiName}
@@ -122,15 +120,10 @@ export default function SlugSessionPage() {
       const idx = interview.data.questions.findIndex((q: any) => q.id === currentQuestionId);
       if (idx >= 0) return idx;
     }
-    if (previewQuestionId) {
-      const idx = interview.data.questions.findIndex((q: any) => q.id === previewQuestionId);
-      if (idx >= 0) return idx;
-    }
     return 0;
   })();
 
   const isResuming = resumeMessages && resumeMessages.length > 0;
-  const hasSessionQuestion = Boolean(session.data.currentQuestionId || previewQuestionId);
 
   const resumeTextMessages = resumeMessages
     ?.filter((m: any) => m.contentType === "TEXT")
@@ -147,9 +140,7 @@ export default function SlugSessionPage() {
   const useVoice = interview.data.voiceEnabled;
 
   const showPreviewTour = isPreview && !previewTourDone && useVoice;
-  const antiCheatingEnabled = !isPreview && !!interview.data.antiCheatingEnabled;
 
-  // Show mock tour interface before loading the real session
   if (showPreviewTour) {
     const mode = useVoice ? "voice" : "chat";
     const mockContext: InterviewContext = {
@@ -214,7 +205,7 @@ export default function SlugSessionPage() {
       aiTone: interview.data.aiTone,
       language: interview.data.language,
       followUpDepth: interview.data.followUpDepth,
-      startQuestionIndex: hasSessionQuestion ? resumeQuestionIndex : undefined,
+      startQuestionIndex: isResuming ? resumeQuestionIndex : undefined,
       questions: interview.data.questions.map((q: any) => ({
         text: q.text,
         type: q.type,
@@ -267,7 +258,7 @@ export default function SlugSessionPage() {
             content: m.content,
             timestamp: m.timestamp.toString(),
           }))}
-        initialQuestionIndex={hasSessionQuestion ? resumeQuestionIndex : undefined}
+        initialQuestionIndex={isResuming ? resumeQuestionIndex : undefined}
         onComplete={handleComplete}
       />
     </>

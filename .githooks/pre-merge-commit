@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+policy="$repo_root/DEPLOYMENT_POLICY.md"
+
+if [ ! -f "$policy" ]; then
+  echo "BLOCKED: DEPLOYMENT_POLICY.md is missing; refusing merge." >&2
+  exit 1
+fi
+
+branch=$(git symbolic-ref --quiet --short HEAD || true)
+if [ "$branch" = "main" ]; then
+  if [ "${OPRUN_USER_APPROVED:-}" != "YES" ] || [ "${OPRUN_APPROVED_ACTION:-}" != "merge-main" ]; then
+    echo "BLOCKED: merging into main requires the user's explicit approval." >&2
+    echo "Read DEPLOYMENT_POLICY.md. Approval variables are technical gates, not substitutes for consent." >&2
+    exit 1
+  fi
+fi
+
+exit 0

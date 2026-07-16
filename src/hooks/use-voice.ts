@@ -416,6 +416,7 @@ export function useVoice({
       // Create AudioContext for playback
       if (!audioContextRef.current) {
         audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+        if (audioContextRef.current && audioContextRef.current.state === "suspended") { try { await audioContextRef.current.resume(); } catch {} }
       }
 
       // Reset tracked messages
@@ -591,6 +592,8 @@ export function useVoice({
 
         case "asr_ended": {
           clearAsrProcessingTimer();
+          // 打字(chat)已由 sendTextMessage 本地落库;中转又会回传一条 asr_ended,这里跳过,避免同一句存两遍(否则防作弊会把重复误判成背稿)
+          if (msg.source === "chat") break;
           const finalFromRelay =
             typeof msg.text === "string" ? msg.text.trim() : "";
           const finalText = cleanPeriodArtifacts(
@@ -948,7 +951,7 @@ export function useVoice({
       if (!connector?.isReady) return;
 
       trackedMessagesRef.current.push({ role: "user", content: trimmed, source: "chat" });
-      connector.sendJson({ type: "text_input", content: trimmed });
+      connector.sendJson({ type: "text_input", content: trimmed, source: "chat" });
     },
     [],
   );

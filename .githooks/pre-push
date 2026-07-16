@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel)
+policy="$repo_root/DEPLOYMENT_POLICY.md"
+
+if [ ! -f "$policy" ]; then
+  echo "BLOCKED: DEPLOYMENT_POLICY.md is missing; refusing push." >&2
+  exit 1
+fi
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ]; then
+    if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+      echo "BLOCKED: deleting main is forbidden." >&2
+      exit 1
+    fi
+    if [ "${OPRUN_USER_APPROVED:-}" != "YES" ] || [ "${OPRUN_APPROVED_SHA:-}" != "$local_sha" ]; then
+      echo "BLOCKED: pushing main requires the user's explicit approval for commit $local_sha." >&2
+      echo "Read DEPLOYMENT_POLICY.md. Do not set approval variables without current explicit consent." >&2
+      exit 1
+    fi
+  fi
+done
+
+exit 0

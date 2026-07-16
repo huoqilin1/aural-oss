@@ -69,15 +69,14 @@ export default function InviteSessionPage() {
         <Card className="w-full max-w-md">
           <CardContent className="py-12 text-center">
             <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
-            <h2 className="mt-4 text-2xl font-bold">Thank you!</h2>
+            <h2 className="mt-4 text-2xl font-bold">测试已完成</h2>
             {completionReason === "TIME_LIMIT_EXCEEDED" && (
               <p className="mt-2 text-sm text-amber-600">
-                The session time limit has been reached and the interview was ended automatically.
+                测试时间已到,系统自动结束了本次测试。
               </p>
             )}
             <p className="mt-2 text-muted-foreground">
-              Your interview has been completed successfully. We appreciate your
-              time and thoughtful responses.
+              你的测试已顺利完成,感谢你的时间和用心的回答。
             </p>
           </CardContent>
         </Card>
@@ -137,6 +136,7 @@ export default function InviteSessionPage() {
           chatEnabled={!!interview.chatEnabled}
           onComplete={handleComplete}
           videoMode={!!interview.videoEnabled}
+          candidateName={(candidate.data as any).name}
         />
       </>
     );

@@ -27,11 +27,11 @@ const siteUrl = process.env.NEXT_PUBLIC_APP_URL ?? "https://aural-ai.com";
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {
-    default: "Aural - AI Interview Platform | Voice & Video Interviews",
-    template: "%s | Aural",
+    default: "数君 · AI 面试",
+    template: "%s | 数君面试",
   },
   description:
-    "Aural is the AI interview platform for structured voice, chat, and video interviews. Automate candidate screening, get real-time insights, and scale your interview process.",
+    "数君 AI 面试:结构化的语音 / 文字面试,自动初筛、实时洞察。",
   keywords: [
     "AI interview platform",
     "voice interview",
@@ -51,26 +51,26 @@ export const metadata: Metadata = {
   },
   openGraph: {
     type: "website",
-    locale: "en_US",
-    siteName: "Aural",
-    title: "Aural - AI Interview Platform | Voice & Video Interviews",
+    locale: "zh_CN",
+    siteName: "数君",
+    title: "数君 · AI 面试",
     description:
-      "Aural is the AI interview platform for structured voice, chat, and video interviews. Automate candidate screening, get real-time insights, and scale your interview process.",
+      "数君 AI 面试:结构化的语音 / 文字面试,自动初筛、实时洞察。",
     url: siteUrl,
     images: [
       {
         url: `${siteUrl}/images/marketing/hero-screenshots.webp`,
         width: 1920,
         height: 960,
-        alt: "Aural AI Interview Platform",
+        alt: "数君 AI 面试",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Aural - AI Interview Platform | Voice & Video Interviews",
+    title: "数君 · AI 面试",
     description:
-      "Aural is the AI interview platform for structured voice, chat, and video interviews. Automate candidate screening, get real-time insights, and scale your interview process.",
+      "数君 AI 面试:结构化的语音 / 文字面试,自动初筛、实时洞察。",
     images: [`${siteUrl}/images/marketing/hero-screenshots.webp`],
   },
 };

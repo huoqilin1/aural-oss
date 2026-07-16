@@ -71,7 +71,7 @@ function resolvePrimaryEndpoint(): RelayLlmEndpoint {
 function resolveFallbackEndpoint(primary: RelayLlmEndpoint): RelayLlmEndpoint | null {
   const model =
     process.env.RELAY_LLM_FALLBACK_MODEL?.trim() || RELAY_LLM_FALLBACK_MODEL;
-  const apiKey = process.env.MINIMAX_API_KEY?.trim() || "";
+  const apiKey = process.env.RELAY_LLM_FALLBACK_API_KEY?.trim() || process.env.MINIMAX_API_KEY?.trim() || "";
   if (!apiKey) return null;
 
   const baseUrl =
@@ -197,18 +197,23 @@ async function callOpenAICompatible(
   prompt: string,
   maxTokens: number,
 ): Promise<string> {
+  const reqBody: Record<string, unknown> = {
+    model: endpoint.model,
+    messages: [{ role: "user", content: prompt }],
+    temperature: endpoint.temperature,
+    max_tokens: maxTokens,
+  };
+  // 关思考(GLM/deepseek 支持):RELAY_LLM_DISABLE_THINKING=1 时禁用推理,秒回省成本(2026-06-27 换 glm-5.2 关思考)
+  if (process.env.RELAY_LLM_DISABLE_THINKING?.trim() === "1") {
+    reqBody.thinking = { type: "disabled" };
+  }
   const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${endpoint.apiKey}`,
     },
-    body: JSON.stringify({
-      model: endpoint.model,
-      messages: [{ role: "user", content: prompt }],
-      temperature: endpoint.temperature,
-      max_tokens: maxTokens,
-    }),
+    body: JSON.stringify(reqBody),
   });
 
   if (!res.ok) {

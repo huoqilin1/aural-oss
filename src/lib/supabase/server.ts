@@ -34,6 +34,7 @@ export function createClient() {
     process.env.SUPABASE_URL!,
     process.env.SUPABASE_ANON_KEY!,
     {
+      auth: { storageKey: "sb-oprun-auth-token" },
       cookies: {
         getAll() {
           return cookieStore.getAll();

@@ -23,6 +23,8 @@ export function buildInterviewerPrompt(ctx: InterviewContext): LLMMessage[] {
     })
     .join("\n");
 
+  const isFreeform = interview.questions.length === 0;
+
   const channels = [
     interview.chatEnabled && "Chat",
     interview.voiceEnabled && "Voice",
@@ -66,8 +68,8 @@ RETURNING TO PREVIOUS QUESTIONS:
 - Encourage them to share any additional thoughts they have
 - Once they finish adding, continue the interview naturally by moving to the next question
 
-CURRENT PROGRESS: Question ${currentQuestionIndex + 1} of ${interview.questions.length}
-CURRENT QUESTION: ${interview.questions[currentQuestionIndex]?.text ?? "Interview complete - wrap up"}
+${isFreeform ? `INTERVIEW MODE: Free-form, objective-driven — there is NO fixed question list. Drive the whole conversation from the Objective above and the candidate's resume in it. NEVER tell the candidate how many questions there are, never say "question N of M", never mention progress.` : `CURRENT PROGRESS: Question ${currentQuestionIndex + 1} of ${interview.questions.length}
+CURRENT QUESTION: ${interview.questions[currentQuestionIndex]?.text ?? "Interview complete - wrap up"}`}
 
 FULL QUESTION SCRIPT:
 ${formattedQuestions}
@@ -106,7 +108,15 @@ RULES:
 - Don't repeat their answer back verbatim
 - If they go off-topic, gently guide back
 - If they ask for clarification, provide it helpfully
-- Stay in character as an interviewer, not an AI assistant`;
+- Stay in character as an interviewer, not an AI assistant
+${isFreeform ? `
+
+OPENING (free-form assessment — CRITICAL):
+- ROLE: You ARE the interviewer named ${interview.aiName}. You are NOT the candidate. Speak ONLY in your own voice as ${interview.aiName}. The resume in the Objective belongs to the CANDIDATE you are testing — it is NOT your own background.
+- Your VERY FIRST message must be the interviewer greeting the candidate: say "你好,我是${interview.aiName}", tell them 这次测试大概 15-20 分钟, then ASK the candidate about ONE concrete experience written in their resume.
+- NEVER introduce yourself with the candidate's name, NEVER say "我是<候选人姓名>", NEVER speak as if you were the candidate.
+- In Chinese ALWAYS say "测试", NEVER say "面试". Do NOT announce any question count or progress, and do NOT literally label what you ask as a "问题" — but you MUST still ask the candidate about their real experience.
+- There is no script — draw each topic live from the candidate's resume/objective.` : ``}`;
 
   return [{ role: "system", content: systemPrompt }, ...conversationHistory];
 }

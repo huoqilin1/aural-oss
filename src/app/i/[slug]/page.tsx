@@ -128,10 +128,9 @@ export default function PublicInterviewPage() {
         <Card className="w-full max-w-md">
           <CardContent className="py-12 text-center">
             <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
-            <h2 className="mt-4 text-2xl font-bold">Thank you!</h2>
+            <h2 className="mt-4 text-2xl font-bold">测试已完成</h2>
             <p className="mt-2 text-muted-foreground">
-              Your interview has been completed successfully. We appreciate your
-              time and thoughtful responses.
+              你的测试已顺利完成,感谢你的时间和用心的回答。
             </p>
           </CardContent>
         </Card>

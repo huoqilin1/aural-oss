@@ -83,12 +83,7 @@ export const sessionRouter = router({
     }),
 
   createPreview: protectedProcedure
-    .input(
-      z.object({
-        interviewId: z.string(),
-        questionId: z.string().optional(),
-      }),
-    )
+    .input(z.object({ interviewId: z.string() }))
     .mutation(async ({ ctx, input }) => {
       const { data: interviewAccess } = await ctx.supabase
         .from("interviews")
@@ -137,12 +132,6 @@ export const sessionRouter = router({
       if (!interview) {
         throw new TRPCError({ code: "NOT_FOUND", message: "Interview not found" });
       }
-      if (!interview.publicSlug || !interview.isActive) {
-        throw new TRPCError({
-          code: "BAD_REQUEST",
-          message: "Publish the interview before opening a preview session.",
-        });
-      }
 
       const { data: profile } = await ctx.supabase
         .from("profiles")
@@ -151,10 +140,6 @@ export const sessionRouter = router({
         .single();
 
       const questions = (interview.questions ?? []) as { id: string }[];
-      const targetQuestionId =
-        input.questionId && questions.some((question) => question.id === input.questionId)
-          ? input.questionId
-          : questions[0]?.id ?? null;
       const derivedMode = interview.voiceEnabled ? "VOICE" : "CHAT";
 
       const { data: sessionJson, error } = await ctx.supabase.rpc(
@@ -164,7 +149,7 @@ export const sessionRouter = router({
           p_participant_name: profile?.name ?? "Preview User",
           p_participant_email: profile?.email ?? ctx.user.email ?? null,
           p_mode_used: derivedMode,
-          p_current_question_id: targetQuestionId,
+          p_current_question_id: questions[0]?.id ?? null,
         },
       );
 
@@ -174,7 +159,7 @@ export const sessionRouter = router({
       }
 
       const session = sessionJson as { id: string };
-      return { sessionId: session.id, slug: interview.publicSlug };
+      return { sessionId: session.id };
     }),
 
   createFromInvite: publicProcedure

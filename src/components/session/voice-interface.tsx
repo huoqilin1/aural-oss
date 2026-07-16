@@ -63,6 +63,7 @@ import {
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 interface Message {
   id: string;
@@ -85,6 +86,60 @@ function hasRecentAssistantTranscript(messages: Message[], text: string): boolea
   }
 
   return false;
+}
+
+/* ── OpRun 气泡样式(对齐 OPC 对话页:头像圆 + 名字行 + 气泡卡片)──
+   只改"长什么样",msg.role / msg.content / msg.source 的判断分支不动。
+   配色走 navy+米金:AI 头像米金渐变,气泡底 #1a2940、边 #2a3a55、尖角朝头像。 */
+function BubbleAvatar({ kind, aiName }: { kind: "ai" | "user"; aiName: string }) {
+  const label =
+    kind === "ai" ? (aiName?.trim()?.[0] || "AI") : "你";
+  const style =
+    kind === "ai"
+      ? { background: "linear-gradient(135deg,#D6B98A 0%,#C4A87A 100%)", color: "#0F1B2D" }
+      : { background: "linear-gradient(135deg,#E5D2A8 0%,#D6B98A 100%)", color: "#0F1B2D" };
+  return (
+    <div
+      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-sm font-semibold"
+      style={style}
+    >
+      {label}
+    </div>
+  );
+}
+
+function ChatBubble({
+  kind,
+  name,
+  children,
+  live = false,
+}: {
+  kind: "ai" | "user";
+  name: string;
+  children: ReactNode;
+  live?: boolean;
+}) {
+  // AI 气泡尖角朝左上(头像在左),user 气泡尖角同样朝左上(头像也在左,镜像 OPC 单列流式排版)
+  const bubbleStyle: CSSProperties = {
+    background: "#1a2940",
+    border: "1px solid #2a3a55",
+    borderRadius: "12px",
+    borderTopLeftRadius: "4px",
+  };
+  return (
+    <div className={`flex items-start gap-3 text-sm ${live ? "animate-pulse" : ""}`}>
+      <BubbleAvatar kind={kind} aiName={name} />
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 text-[11px] text-muted-foreground">{name}</div>
+        <div
+          className="inline-block max-w-full px-3.5 py-2.5 leading-relaxed text-foreground"
+          style={bubbleStyle}
+        >
+          {children}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function isExpandedTranscript(previous: string, next: string): boolean {
@@ -373,6 +428,8 @@ interface VoiceInterfaceProps {
   chatEnabled?: boolean;
   onComplete?: () => void;
   videoMode?: boolean;
+  /** 候选人姓名(招聘语音面顶部显示「名字 · 岗位」) */
+  candidateName?: string;
   /** Render in static preview mode — shows full layout without connecting */
   preview?: boolean;
 }
@@ -394,6 +451,7 @@ export function VoiceInterface({
   chatEnabled = false,
   onComplete,
   videoMode = false,
+  candidateName,
   preview = false,
 }: VoiceInterfaceProps) {
   const { resolvedTheme } = useTheme();
@@ -669,6 +727,14 @@ export function VoiceInterface({
       setIsStartingInterview(false);
     }
   }, [voice.isConnected]);
+
+  // ── 招聘语音面:连上后自动开麦,候选人进来就在录(默认不静音)──
+  const micAutoStartedRef = useRef(false);
+  useEffect(() => {
+    if (!voice.isConnected || micAutoStartedRef.current) return;
+    micAutoStartedRef.current = true;
+    if (!voice.isListening) voice.startListening();
+  }, [voice.isConnected, voice.isListening]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (error) {
@@ -1105,8 +1171,15 @@ export function VoiceInterface({
   }, [saveCurrentContent, voice]);
 
   const handleNextQuestion = useCallback(async () => {
+    // 不再因 isTransitioning 拦截:小君说题时也允许点下一题,服务端会打断 TTS 并排队切(王总:修手动下一题卡死)
+    if (voice.totalQuestions > 0 && voice.currentQuestionIndex >= voice.totalQuestions - 1) return;
     await saveCurrentContent();
-    voice.nextQuestion();
+    if (voice.totalQuestions === 0) {
+      // 即兴深挖(招聘):没预设题,「我答完了」= 告诉 AI 推进下一个问题
+      voice.sendTextMessage("(我答完了,请继续下一个问题)");
+    } else {
+      voice.nextQuestion();
+    }
   }, [saveCurrentContent, voice]);
 
   // ── Editor toggle helpers (save before deactivate, restore on activate)
@@ -1314,10 +1387,9 @@ export function VoiceInterface({
       <Card className="w-full max-w-md">
         <CardContent className="py-12 text-center">
           <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
-          <h2 className="mt-4 text-2xl font-bold">Thank you!</h2>
+          <h2 className="mt-4 text-2xl font-bold">谢谢!</h2>
           <p className="mt-2 text-muted-foreground">
-            Your interview has been completed successfully. We appreciate your
-            time and thoughtful responses.
+            测试已顺利完成,感谢你的时间和用心的回答。
           </p>
         </CardContent>
       </Card>
@@ -1525,9 +1597,9 @@ export function VoiceInterface({
       <div className="shrink-0 border-b bg-card px-3 py-2 md:px-6 md:py-3">
         <div className="flex items-center justify-between">
           <div className="mr-2 min-w-0 flex-1">
-            <h1 className="truncate text-sm font-semibold md:text-base">{interviewTitle}</h1>
+            <h1 className="truncate text-sm font-semibold md:text-base">{candidateName ? `${candidateName} · ${interviewTitle.replace(/^数君招聘\s*·\s*/, "")}` : interviewTitle}</h1>
             <p className="hidden text-xs text-muted-foreground md:block">
-              Voice Interview with {aiName}
+              {aiName} 语音测试
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -1538,21 +1610,25 @@ export function VoiceInterface({
               </div>
             )}
             <Badge variant={preview ? "outline" : voice.isConnected ? "default" : "secondary"}>
-              {preview ? "Preview" : voice.isConnected ? "Connected" : "Disconnected"}
+              {preview ? "预览" : voice.isConnected ? "已连接" : "已断开"}
             </Badge>
             <IntervieweeHelpPopover mode="voice" />
           </div>
         </div>
         {/* Question progress + timer (mobile: timer in header to avoid blocking bottom buttons) */}
         <div className="mt-2 flex items-center gap-3">
-          <Progress value={progress} className="h-1.5 flex-1" />
-          <span className="shrink-0 text-xs font-medium text-muted-foreground">
-            Q{voice.currentQuestionIndex + 1} / {voice.totalQuestions}
-          </span>
+          {voice.totalQuestions > 0 && (
+            <>
+              <Progress value={progress} className="h-1.5 flex-1" />
+              <span className="shrink-0 text-xs font-medium text-muted-foreground">
+                Q{voice.currentQuestionIndex + 1} / {voice.totalQuestions}
+              </span>
+            </>
+          )}
           {remainingSeconds !== null && isMobile && (
             <div className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium tabular-nums ${isTimeLow ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
               <Clock className="h-3 w-3" />
-              <span>{formatTime(remainingSeconds)} left</span>
+              <span>剩 {formatTime(remainingSeconds)}</span>
             </div>
           )}
         </div>
@@ -1584,7 +1660,7 @@ export function VoiceInterface({
                 {voice.isSpeaking && (
                   <div className="flex items-center gap-1.5 text-primary">
                     <Volume2 className="h-4 w-4 animate-pulse" />
-                    <span className="text-xs font-medium">{aiName} speaking</span>
+                    <span className="text-xs font-medium">{aiName} 说话中</span>
                   </div>
                 )}
                 {voice.isListening && (
@@ -1598,28 +1674,28 @@ export function VoiceInterface({
                         <Mic className="h-full w-full text-secondary-400" />
                       </div>
                     </div>
-                    <span className="text-xs font-medium">Listening</span>
+                    <span className="text-xs font-medium">🎤 正在听</span>
                   </div>
                 )}
                 {voice.isProcessing && (
                   <div className="flex items-center gap-1.5 text-muted-foreground">
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    <span className="text-xs font-medium">Thinking</span>
+                    <span className="text-xs font-medium">思考中</span>
                   </div>
                 )}
                 {voice.isTransitioning && (
                   <div className="flex items-center gap-1.5 text-muted-foreground">
                     <Loader2 className="h-4 w-4 animate-spin" />
                     <span className="text-xs font-medium">
-                      {voice.transitionDirection === "previous" ? "Previous question..." : "Next question..."}
+                      {voice.transitionDirection === "previous" ? "上一题…" : "下一题…"}
                     </span>
                   </div>
                 )}
                 {!voice.isSpeaking && !voice.isListening && !voice.isProcessing && !voice.isTransitioning && (
                   <span className="text-xs text-muted-foreground">
                     {voice.isConnected
-                      ? `Voice active — ${whiteboardActive ? "draw" : "code"} freely`
-                      : "Voice disconnected"}
+                      ? `语音进行中 — 可自由${whiteboardActive ? "作画" : "写代码"}`
+                      : "语音已断开"}
                   </span>
                 )}
                 {voice.isListening && voice.userTranscript && (
@@ -1702,7 +1778,7 @@ export function VoiceInterface({
                     ) : (
                       <Save className="h-3 w-3" />
                     )}
-                    {saveStatus === "saved" ? "Saved" : "Save"}
+                    {saveStatus === "saved" ? "已保存" : "保存"}
                   </button>
                 </div>
               </div>
@@ -1779,7 +1855,7 @@ export function VoiceInterface({
                     ) : (
                       <Save className="h-3 w-3" />
                     )}
-                    {codeSaveStatus === "saved" ? "Saved" : "Save"}
+                    {codeSaveStatus === "saved" ? "已保存" : "保存"}
                   </button>
                 </div>
               </div>
@@ -1796,7 +1872,7 @@ export function VoiceInterface({
                     >
                       <div className="mb-3 flex items-center gap-2">
                         <FileText className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Problem</span>
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">题目</span>
                       </div>
                       <p className="mb-3 text-sm font-medium leading-snug">{currentQVoice.text}</p>
                       {currentQVoice.description && (
@@ -1839,7 +1915,7 @@ export function VoiceInterface({
                     >
                       <div className="mb-3 flex items-center gap-2">
                         <FileText className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">Problem</span>
+                        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">题目</span>
                       </div>
                       <p className="mb-3 text-sm font-medium leading-snug">{currentQVoice.text}</p>
                       {currentQVoice.description && (
@@ -1850,7 +1926,7 @@ export function VoiceInterface({
                           <div className="flex items-center gap-1.5 border-b border-zinc-800 bg-zinc-900 px-3 py-1.5">
                             <Code2 className="h-3 w-3 text-zinc-400" />
                             <span className="text-[10px] font-medium uppercase tracking-wide text-zinc-400">
-                              Starter Code — {currentQVoice.starterCode.language}
+                              初始代码 — {currentQVoice.starterCode.language}
                             </span>
                           </div>
                           <CodeBlock code={currentQVoice.starterCode.code} language={currentQVoice.starterCode.language} />
@@ -1919,7 +1995,7 @@ export function VoiceInterface({
                   <div className="flex items-center gap-2 text-muted-foreground">
                     <Loader2 className="h-5 w-5 animate-spin" />
                     <span className="text-sm font-medium">
-                      {voice.transitionDirection === "previous" ? "Preparing previous question..." : "Preparing next question..."}
+                      {voice.transitionDirection === "previous" ? "正在准备上一题…" : "正在准备下一题…"}
                     </span>
                   </div>
                 )}
@@ -1927,7 +2003,7 @@ export function VoiceInterface({
                   <div className="flex flex-col items-center gap-3">
                     <div className="flex items-center gap-2 text-muted-foreground">
                       <Loader2 className="h-5 w-5 animate-spin" />
-                      <span className="text-sm font-medium">Thinking...</span>
+                      <span className="text-sm font-medium">思考中…</span>
                     </div>
                     {(() => {
                       const lastUserMsg = messages.filter((m) => m.role === "user").pop();
@@ -1943,7 +2019,7 @@ export function VoiceInterface({
                 {showVoiceSpeaking && (
                   <div className="flex items-center gap-2 text-primary">
                     <Volume2 className="h-5 w-5 animate-pulse" />
-                    <span className="text-sm font-medium">{aiName} is speaking...</span>
+                    <span className="text-sm font-medium">{aiName} 正在说话…</span>
                   </div>
                 )}
                 {showVoiceListening && (
@@ -1958,7 +2034,7 @@ export function VoiceInterface({
                         <Mic className="h-full w-full text-secondary-400" />
                       </div>
                     </div>
-                    <span className="text-sm font-medium text-secondary-500">Listening...</span>
+                    <span className="text-lg font-semibold text-secondary-500">🎤 正在听,请说</span>
                   </div>
                 )}
 
@@ -2001,6 +2077,16 @@ export function VoiceInterface({
               </div>
 
               {!voice.isConnected && !preview && (
+                <div className="mb-3 max-w-md rounded-xl border bg-card/60 px-4 py-3 text-left text-xs leading-relaxed text-muted-foreground">
+                  <p className="mb-1.5 text-sm font-medium text-foreground">答题方式</p>
+                  <p>· 对着麦克风说话,会实时变成文字</p>
+                  <p>· 说「我答完了 / 下一题」自动进入下一题</p>
+                  <p>· 停顿超过 30 秒,自动进入下一题</p>
+                  <p>· 想重答上一题,点下方「上一题」</p>
+                </div>
+              )}
+
+              {!voice.isConnected && !preview && (
                 <Button
                   size="lg"
                   disabled={isStartingInterview}
@@ -2020,29 +2106,29 @@ export function VoiceInterface({
                   ) : (
                     <Mic className="h-5 w-5" />
                   )}
-                  {isStartingInterview ? "Connecting..." : "Start Voice Interview"}
+                  {isStartingInterview ? "连接中…" : "开始语音测试"}
                 </Button>
               )}
 
               {!voice.isConnected && !preview && isStartingInterview && (
                 <p className="text-sm text-muted-foreground">
-                  Connecting to the interview. This can take a few seconds.
+                  正在连接测试,需要几秒钟。
                 </p>
               )}
 
               {preview && (
                 <p className="text-sm text-muted-foreground">
-                  This is where the voice conversation happens
+                  这里就是进行语音对话的地方
                 </p>
               )}
               {voice.isConnected && !showVoiceListening && !showVoiceProcessing && !showVoiceSpeaking && (
                 <p className="text-sm text-muted-foreground">
-                  Click the mic to start speaking
+                  点麦克风开始说话
                 </p>
               )}
               {voice.isConnected && showVoiceListening && (
                 <p className="text-sm text-muted-foreground">
-                  Speak naturally — AI will respond automatically
+                  自然说话即可,AI 会自动回应
                 </p>
               )}
               </div>
@@ -2069,7 +2155,7 @@ export function VoiceInterface({
                     className="flex shrink-0 items-center justify-between border-b px-4 py-2 text-left"
                     onClick={() => setMobileTranscriptCollapsed((prev) => !prev)}
                   >
-                    <p className="text-xs font-medium text-muted-foreground">Transcript</p>
+                    <p className="text-xs font-medium text-muted-foreground">对话记录</p>
                     {mobileTranscriptCollapsed ? (
                       <ChevronDown className="h-4 w-4 text-muted-foreground" />
                     ) : (
@@ -2081,77 +2167,47 @@ export function VoiceInterface({
                       <div className="space-y-3 p-4">
                         {preview ? (
                           <>
-                            <div className="flex items-start gap-1.5 text-sm">
-                              <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
-                              <div>
-                                <span className="font-medium text-primary">{aiName}:</span>{" "}
-                                Welcome! Let&apos;s begin the interview. Could you start by telling me about yourself?
-                              </div>
-                            </div>
-                            <div className="flex items-start gap-1.5 text-sm">
-                              <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                              <div>
-                                <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
-                                Sure, I have been working as a software engineer for...
-                              </div>
-                            </div>
+                            <ChatBubble kind="ai" name={aiName}>
+                              Welcome! Let&apos;s begin the interview. Could you start by telling me about yourself?
+                            </ChatBubble>
+                            <ChatBubble kind="user" name="你">
+                              Sure, I have been working as a software engineer for...
+                            </ChatBubble>
                             <p className="text-center text-xs text-muted-foreground italic">(sample transcript)</p>
                           </>
                         ) : messages.length === 0 && !voice.aiTranscript && !voice.userTranscript ? (
                           <p className="py-8 text-center text-sm text-muted-foreground">
-                            Transcript will appear here once the conversation starts.
+                            对话开始后,这里会显示文字记录。
                           </p>
                         ) : (
                           <>
                             {messages.map((msg) => (
-                              <div key={msg.id} className="flex items-start gap-1.5 text-sm">
-                                {msg.role === "user" ? (
-                                  msg.source === "chat"
-                                    ? <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                                    : <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                                ) : (
-                                  <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                                )}
-                                <div>
-                                  <span
-                                    className={`font-medium ${
-                                      msg.role === "user"
-                                        ? "text-secondary-600 dark:text-secondary-400"
-                                        : "text-primary"
-                                    }`}
-                                  >
-                                    {msg.role === "user" ? "You" : aiName}:
-                                  </span>{" "}
-                                  {msg.content}
-                                </div>
-                              </div>
+                              <ChatBubble
+                                key={msg.id}
+                                kind={msg.role === "user" ? "user" : "ai"}
+                                name={msg.role === "user" ? "你" : aiName}
+                              >
+                                {msg.content}
+                              </ChatBubble>
                             ))}
                             {voice.userTranscript && (
-                              <div className="flex items-start gap-1.5 text-sm animate-pulse">
-                                <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                                <div>
-                                  <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
-                                  <span className="text-muted-foreground">{voice.userTranscript}</span>
-                                </div>
-                              </div>
+                              <ChatBubble kind="user" name="你" live>
+                                <span className="text-muted-foreground">{voice.userTranscript}</span>
+                              </ChatBubble>
                             )}
                             {voice.isProcessing && !voice.aiTranscript && (
-                              <div className="flex items-start gap-1.5 text-sm text-muted-foreground">
-                                <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-primary/60" />
-                                <span className="text-xs italic">Thinking...</span>
+                              <div className="flex items-start gap-3 text-sm text-muted-foreground">
+                                <Loader2 className="mt-1 h-4 w-4 shrink-0 animate-spin text-primary/60" />
+                                <span className="text-xs italic">思考中…</span>
                               </div>
                             )}
                             {voice.aiTranscript && (() => {
                               const alreadyInMessages = hasRecentAssistantTranscript(messages, voice.aiTranscript);
                               if (alreadyInMessages) return null;
                               return (
-                                <div className="flex items-start gap-1.5 text-sm">
-                                  <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
-                                  <div>
-                                    <span className="font-medium text-primary">{aiName}:</span>{" "}
-                                    <span className="text-muted-foreground">{voice.aiTranscript}</span>
-                                  </div>
-                                </div>
+                                <ChatBubble kind="ai" name={aiName} live>
+                                  <span className="text-muted-foreground">{voice.aiTranscript}</span>
+                                </ChatBubble>
                               );
                             })()}
                           </>
@@ -2191,7 +2247,7 @@ export function VoiceInterface({
                 className="text-[11px] font-medium uppercase tracking-[0.2em]"
                 style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}
               >
-                Transcript
+                对话记录
               </span>
             </button>
           ) : (
@@ -2211,70 +2267,44 @@ export function VoiceInterface({
                   className="flex items-center justify-between border-b px-4 py-2 text-left"
                   onClick={() => setDesktopTranscriptCollapsed(true)}
                 >
-                  <p className="text-xs font-medium text-muted-foreground">Transcript</p>
+                  <p className="text-xs font-medium text-muted-foreground">对话记录</p>
                   <ChevronRight className="h-4 w-4 text-muted-foreground" />
                 </button>
                 <ScrollArea className="min-h-0 flex-1">
                   <div className="space-y-3 p-4">
                     {preview ? (
                       <>
-                        <div className="flex items-start gap-1.5 text-sm">
-                          <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
-                          <div>
-                            <span className="font-medium text-primary">{aiName}:</span>{" "}
-                            Welcome! Let&apos;s begin the interview. Could you start by telling me about yourself?
-                          </div>
-                        </div>
-                        <div className="flex items-start gap-1.5 text-sm">
-                          <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                          <div>
-                            <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
-                            Sure, I have been working as a software engineer for...
-                          </div>
-                        </div>
+                        <ChatBubble kind="ai" name={aiName}>
+                          Welcome! Let&apos;s begin the interview. Could you start by telling me about yourself?
+                        </ChatBubble>
+                        <ChatBubble kind="user" name="你">
+                          Sure, I have been working as a software engineer for...
+                        </ChatBubble>
                         <p className="text-center text-xs text-muted-foreground italic">(sample transcript)</p>
                       </>
                     ) : messages.length === 0 && !voice.aiTranscript && !voice.userTranscript ? (
                       <p className="py-8 text-center text-sm text-muted-foreground">
-                        Transcript will appear here once the conversation starts.
+                        对话开始后,这里会显示文字记录。
                       </p>
                     ) : (
                       <>
                         {messages.map((msg) => (
-                          <div key={msg.id} className="flex items-start gap-1.5 text-sm">
-                            {msg.role === "user" ? (
-                              msg.source === "chat"
-                                ? <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                                : <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                            ) : (
-                              <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                            )}
-                            <div>
-                              <span
-                                className={`font-medium ${
-                                  msg.role === "user"
-                                    ? "text-secondary-600 dark:text-secondary-400"
-                                    : "text-primary"
-                                }`}
-                              >
-                                {msg.role === "user" ? "You" : aiName}:
-                              </span>{" "}
-                              {msg.content}
-                            </div>
-                          </div>
+                          <ChatBubble
+                            key={msg.id}
+                            kind={msg.role === "user" ? "user" : "ai"}
+                            name={msg.role === "user" ? "你" : aiName}
+                          >
+                            {msg.content}
+                          </ChatBubble>
                         ))}
                         {voice.userTranscript && (
-                          <div className="flex items-start gap-1.5 text-sm animate-pulse">
-                            <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                            <div>
-                              <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
-                              <span className="text-muted-foreground">{voice.userTranscript}</span>
-                            </div>
-                          </div>
+                          <ChatBubble kind="user" name="你" live>
+                            <span className="text-muted-foreground">{voice.userTranscript}</span>
+                          </ChatBubble>
                         )}
                         {voice.isProcessing && !voice.aiTranscript && (
-                          <div className="flex items-start gap-1.5 text-sm text-muted-foreground">
-                            <Loader2 className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-primary/60" />
+                          <div className="flex items-start gap-3 text-sm text-muted-foreground">
+                            <Loader2 className="mt-1 h-4 w-4 shrink-0 animate-spin text-primary/60" />
                             <span className="text-xs italic">Thinking...</span>
                           </div>
                         )}
@@ -2282,13 +2312,9 @@ export function VoiceInterface({
                           const alreadyInMessages = hasRecentAssistantTranscript(messages, voice.aiTranscript);
                           if (alreadyInMessages) return null;
                           return (
-                            <div className="flex items-start gap-1.5 text-sm">
-                              <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
-                              <div>
-                                <span className="font-medium text-primary">{aiName}:</span>{" "}
-                                <span className="text-muted-foreground">{voice.aiTranscript}</span>
-                              </div>
-                            </div>
+                            <ChatBubble kind="ai" name={aiName} live>
+                              <span className="text-muted-foreground">{voice.aiTranscript}</span>
+                            </ChatBubble>
                           );
                         })()}
                       </>
@@ -2313,20 +2339,19 @@ export function VoiceInterface({
                   style={{ height: `${100 - chatSplitPercent}%` }}
                 >
                   <div className="flex items-center border-b px-4 py-2">
-                    <p className="text-xs font-medium text-muted-foreground">Chat</p>
+                    <p className="text-xs font-medium text-muted-foreground">聊天</p>
                   </div>
                   <ScrollArea className="min-h-0 flex-1">
                     <div className="space-y-3 p-4">
                       {chatMessages.length === 0 ? (
                         <p className="py-4 text-center text-xs text-muted-foreground">
-                          Send a message to start chatting.
+                          发条消息开始聊天。
                         </p>
                       ) : (
                         chatMessages.map((msg) => (
-                          <div key={msg.id} className="flex items-start gap-1.5 text-sm">
-                            <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                            <p className="text-foreground">{msg.content}</p>
-                          </div>
+                          <ChatBubble key={msg.id} kind="user" name="你">
+                            {msg.content}
+                          </ChatBubble>
                         ))
                       )}
                       <div ref={chatEndRef} />
@@ -2337,8 +2362,8 @@ export function VoiceInterface({
                       ref={chatInputRef}
                       value={chatInput}
                       onChange={(e) => setChatInput(e.target.value)}
-                      placeholder="Type a message..."
-                      className="h-8 flex-1 text-sm"
+                      placeholder="输入消息…"
+                      className="h-9 flex-1 text-sm"
                       onKeyDown={(e) => {
                         if (e.key === "Enter" && !e.shiftKey && chatInput.trim()) {
                           e.preventDefault();
@@ -2349,8 +2374,8 @@ export function VoiceInterface({
                     />
                     <Button
                       size="icon"
-                      variant="ghost"
-                      className="h-7 w-7 shrink-0"
+                      className="h-9 w-9 shrink-0"
+                      style={{ background: "#D6B98A", color: "#0F1B2D" }}
                       disabled={!chatInput.trim()}
                       onClick={() => {
                         handleSendChat(chatInput);
@@ -2358,7 +2383,7 @@ export function VoiceInterface({
                         chatInputRef.current?.focus();
                       }}
                     >
-                      <Send className="h-3.5 w-3.5" />
+                      <Send className="h-4 w-4" />
                     </Button>
                   </div>
                 </div>
@@ -2376,7 +2401,7 @@ export function VoiceInterface({
           {remainingSeconds !== null && !isMobile && (
             <div className={`absolute right-3 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium tabular-nums md:right-6 md:px-2.5 ${isTimeLow ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
               <Clock className="h-3.5 w-3.5" />
-              <span>{formatTime(remainingSeconds)} left</span>
+              <span>剩 {formatTime(remainingSeconds)}</span>
             </div>
           )}
           {/* Mic toggle */}
@@ -2404,7 +2429,7 @@ export function VoiceInterface({
               )}
             </Button>
             <span className="hidden text-[10px] text-muted-foreground md:block">
-              {voice.isListening ? "Mute" : "Unmute"}
+              {voice.isListening ? "静音" : "取消静音"}
             </span>
           </div>
 
@@ -2419,36 +2444,12 @@ export function VoiceInterface({
               >
                 <MessageSquare className="h-4 w-4" />
               </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Chat</span>
+              <span className="hidden text-[10px] text-muted-foreground md:block">聊天</span>
             </div>
           )}
 
           {/* Whiteboard + Code Editor toggles */}
-          <div data-tour="voice-tools" className="flex items-center gap-2 md:gap-6">
-            <div className="flex flex-col items-center gap-0.5">
-              <Button
-                size="icon"
-                variant={whiteboardActive ? "default" : "secondary"}
-                className="h-9 w-9 rounded-full"
-                onClick={handleToggleWhiteboard}
-              >
-                <PenLine className="h-4 w-4" />
-              </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Whiteboard</span>
-            </div>
-
-            <div className="flex flex-col items-center gap-0.5">
-              <Button
-                size="icon"
-                variant={codeEditorActive ? "default" : "secondary"}
-                className="h-9 w-9 rounded-full"
-                onClick={handleToggleCodeEditor}
-              >
-                <Code2 className="h-4 w-4" />
-              </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Code</span>
-            </div>
-          </div>
+          {/* 白板/代码按钮已删(招聘语音面用不上) */}
 
           {/* Previous / Next / End */}
           <div data-tour="voice-progress" className="flex items-center gap-2 md:gap-6">
@@ -2469,7 +2470,7 @@ export function VoiceInterface({
                   <SkipBack className="h-4 w-4" />
                 )}
               </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Previous</span>
+              <span className="hidden text-[10px] text-muted-foreground md:block">上一题</span>
             </div>
 
             <div className="flex flex-col items-center gap-0.5">
@@ -2479,8 +2480,7 @@ export function VoiceInterface({
                 className="h-9 w-9 rounded-full"
                 onClick={handleNextQuestion}
                 disabled={
-                  voice.isTransitioning ||
-                  voice.currentQuestionIndex >= voice.totalQuestions - 1
+                  voice.totalQuestions > 0 && voice.currentQuestionIndex >= voice.totalQuestions - 1
                 }
               >
                 {voice.isTransitioning && voice.transitionDirection !== "previous" ? (
@@ -2489,7 +2489,7 @@ export function VoiceInterface({
                   <SkipForward className="h-4 w-4" />
                 )}
               </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">Next</span>
+              <span onClick={handleNextQuestion} className="hidden text-[10px] text-muted-foreground md:block cursor-pointer hover:text-foreground">{voice.totalQuestions === 0 ? "我答完了" : "下一题"}</span>
             </div>
 
             <div className="flex flex-col items-center gap-0.5">
@@ -2501,7 +2501,7 @@ export function VoiceInterface({
               >
                 <PhoneOff className="h-4 w-4" />
               </Button>
-              <span className="hidden text-[10px] text-muted-foreground md:block">End</span>
+              <span className="hidden text-[10px] text-muted-foreground md:block">结束</span>
             </div>
           </div>
         </div>
@@ -2520,7 +2520,7 @@ export function VoiceInterface({
           />
           <div className="absolute bottom-1 left-1 flex items-center gap-1 rounded bg-black/60 px-1.5 py-0.5">
             <Video className="h-2.5 w-2.5 text-white" />
-            <span className="text-[9px] text-white">Camera</span>
+            <span className="text-[9px] text-white">摄像头</span>
           </div>
         </DraggablePip>
       )}
@@ -2529,18 +2529,18 @@ export function VoiceInterface({
       <AlertDialog open={showEndDialog} onOpenChange={setShowEndDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>End interview?</AlertDialogTitle>
+            <AlertDialogTitle>结束测试?</AlertDialogTitle>
             <AlertDialogDescription>
-              This will save your progress and end the current interview session. You won&apos;t be able to continue after this.
+              这会保存你的进度并结束当前测试,结束后将无法继续。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogCancel>取消</AlertDialogCancel>
             <AlertDialogAction
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={handleEndInterview}
             >
-              End Interview
+              结束测试
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -2555,7 +2555,7 @@ export function VoiceInterface({
             onOpenAutoFocus={(e) => e.preventDefault()}
           >
             <SheetHeader className="shrink-0 border-b px-4 py-3">
-              <SheetTitle className="text-sm">Chat</SheetTitle>
+              <SheetTitle className="text-sm">聊天</SheetTitle>
             </SheetHeader>
             <ScrollArea className="min-h-0 flex-1">
               <div className="space-y-3 p-4">
@@ -2566,48 +2566,26 @@ export function VoiceInterface({
                 ) : (
                   <>
                     {messages.map((msg) => (
-                      <div key={msg.id} className="flex items-start gap-1.5 text-sm">
-                        {msg.role === "user" ? (
-                          msg.source === "chat"
-                            ? <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                            : <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                        ) : (
-                          <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                        )}
-                        <div>
-                          <span
-                            className={`font-medium ${
-                              msg.role === "user"
-                                ? "text-secondary-600 dark:text-secondary-400"
-                                : "text-primary"
-                            }`}
-                          >
-                            {msg.role === "user" ? "You" : aiName}:
-                          </span>{" "}
-                          {msg.content}
-                        </div>
-                      </div>
+                      <ChatBubble
+                        key={msg.id}
+                        kind={msg.role === "user" ? "user" : "ai"}
+                        name={msg.role === "user" ? "You" : aiName}
+                      >
+                        {msg.content}
+                      </ChatBubble>
                     ))}
                     {voice.userTranscript && (
-                      <div className="flex items-start gap-1.5 text-sm animate-pulse">
-                        <Mic className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground" />
-                        <div>
-                          <span className="font-medium text-secondary-600 dark:text-secondary-400">You:</span>{" "}
-                          <span className="text-muted-foreground">{voice.userTranscript}</span>
-                        </div>
-                      </div>
+                      <ChatBubble kind="user" name="你" live>
+                        <span className="text-muted-foreground">{voice.userTranscript}</span>
+                      </ChatBubble>
                     )}
                     {voice.aiTranscript && (() => {
                       const alreadyInMessages = hasRecentAssistantTranscript(messages, voice.aiTranscript);
                       if (alreadyInMessages) return null;
                       return (
-                        <div className="flex items-start gap-1.5 text-sm">
-                          <Volume2 className="mt-0.5 h-3 w-3 shrink-0 text-primary/60" />
-                          <div>
-                            <span className="font-medium text-primary">{aiName}:</span>{" "}
-                            <span className="text-muted-foreground">{voice.aiTranscript}</span>
-                          </div>
-                        </div>
+                        <ChatBubble kind="ai" name={aiName} live>
+                          <span className="text-muted-foreground">{voice.aiTranscript}</span>
+                        </ChatBubble>
                       );
                     })()}
                   </>
@@ -2621,7 +2599,7 @@ export function VoiceInterface({
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 placeholder="Type a message..."
-                className="h-8 flex-1 text-base md:text-sm"
+                className="h-9 flex-1 text-base md:text-sm"
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey && chatInput.trim()) {
                     e.preventDefault();
@@ -2632,8 +2610,8 @@ export function VoiceInterface({
               />
               <Button
                 size="icon"
-                variant="ghost"
-                className="h-7 w-7 shrink-0"
+                className="h-9 w-9 shrink-0"
+                style={{ background: "#D6B98A", color: "#0F1B2D" }}
                 disabled={!chatInput.trim()}
                 onClick={() => {
                   handleSendChat(chatInput);
@@ -2641,7 +2619,7 @@ export function VoiceInterface({
                   chatInputRef.current?.focus();
                 }}
               >
-                <Send className="h-3.5 w-3.5" />
+                <Send className="h-4 w-4" />
               </Button>
             </div>
           </SheetContent>

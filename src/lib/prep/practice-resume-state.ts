@@ -1,10 +1,8 @@
 import {
     EMPTY_FEEDBACK,
-    normalizePrepQuestionOptions,
     type PrepAttempt,
     type PrepFeedback,
     type PrepQuestion,
-    type PrepQuestionOption,
 } from "@/components/prep/prep-types";
 
 type PracticeMode = "TEXT" | "VOICE";
@@ -17,7 +15,6 @@ export type PracticeResumeChatMessage =
       content: string;
       questionIndex: number;
       questionType?: string;
-      questionOptions?: PrepQuestionOption[];
     }
   | {
       id: string;
@@ -36,10 +33,6 @@ export type PracticeResumeChatMessage =
       feedback: PrepFeedback;
       feedbackPartial: false;
       phase: "idle";
-      questionIndex: number;
-      questionId: string;
-      attemptId: string;
-      answerText: string;
     };
 
 export type PracticeResumeState = {
@@ -98,7 +91,6 @@ function questionMessage(
     content: question.text,
     questionIndex: index,
     questionType: question.type || "OPEN_ENDED",
-    questionOptions: normalizePrepQuestionOptions(question.options),
   };
 }
 
@@ -154,10 +146,6 @@ export function buildPracticeResumeState(
       feedback: normalizeFeedback(attempt.feedback),
       feedbackPartial: false,
       phase: "idle",
-      questionIndex,
-      questionId: attempt.questionId,
-      attemptId: attempt.id,
-      answerText: attempt.answerText,
     });
   }
 

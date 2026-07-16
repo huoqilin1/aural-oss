@@ -20,7 +20,6 @@ import { createClient } from "@/lib/supabase/client";
 import { cn } from "@/lib/utils";
 import {
     ArrowUpRight,
-    BookMarked,
     BrainCircuit,
     ChevronUp,
     FolderKanban,
@@ -160,10 +159,9 @@ export function Sidebar({
   const projectNavigation = [
     { name: t("sidebar.dashboard"), href: "/dashboard", icon: LayoutDashboard },
     { name: t("sidebar.interviews"), href: "/interviews", icon: MessageSquare },
-    { name: t("sidebar.practices"), href: "/practices", icon: BrainCircuit },
+    { name: "Practices", href: "/practices", icon: BrainCircuit },
     { name: t("sidebar.sessions"), href: "/candidates", icon: PlayCircle },
     { name: t("sidebar.questions"), href: "/questions", icon: HelpCircle },
-    { name: t("sidebar.answerBank"), href: "/answer-bank", icon: BookMarked },
   ];
 
   useEffect(() => {

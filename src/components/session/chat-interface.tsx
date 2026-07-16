@@ -119,24 +119,20 @@ export function ChatInterface({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const whiteboardRef = useRef<WhiteboardCanvasRef>(null);
   const codeEditorRef = useRef<CodeEditorCanvasRef>(null);
-  const aiAbortRef = useRef<AbortController | null>(null);
 
   // ── Countdown timer (starts after first user message) ───────────
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const timerExpiredRef = useRef(false);
   const timerStartedRef = useRef(false);
-  const initialUserMessageCount = useRef(
-    initialMessages?.filter((m) => m.role === "USER").length ?? 0,
-  );
+  const initialMessageCount = useRef(initialMessages?.length ?? 0);
 
   useEffect(() => {
     if (timerStartedRef.current || !durationMinutes) return;
-    const userMessageCount = messages.filter((m) => m.role === "USER").length;
-    if (userMessageCount > initialUserMessageCount.current) {
+    if (messages.length > initialMessageCount.current) {
       timerStartedRef.current = true;
       setRemainingSeconds(durationMinutes * 60);
     }
-  }, [messages, durationMinutes]);
+  }, [messages.length, durationMinutes]);
 
   useEffect(() => {
     if (remainingSeconds === null || remainingSeconds <= 0) return;
@@ -817,15 +813,11 @@ export function ChatInterface({
     questionIndex = currentQuestion,
     options?: { ignoreQuestionAdvance?: boolean },
   ) {
-    aiAbortRef.current?.abort();
-    const controller = new AbortController();
-    aiAbortRef.current = controller;
     setAiTyping(true);
     try {
       const response = await fetch("/api/ai/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
         body: JSON.stringify({
           sessionId,
           interviewId: interview.id,
@@ -879,22 +871,11 @@ export function ChatInterface({
         setTimeout(onComplete, 2000);
       }
     } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
       console.error("AI response error:", error);
     } finally {
-      if (aiAbortRef.current === controller) {
-        aiAbortRef.current = null;
-        setAiTyping(false);
-      }
+      setAiTyping(false);
     }
   }
-
-  const handleStopGeneration = useCallback(() => {
-    aiAbortRef.current?.abort();
-    aiAbortRef.current = null;
-    setSending(false);
-    setAiTyping(false);
-  }, []);
 
   // ── Auto-end when timer expires ──────────────────────────────────
   useEffect(() => {
@@ -949,10 +930,6 @@ export function ChatInterface({
         ? CHAT_PREVIOUS_TRANSITION
         : CHAT_NEXT_TRANSITION;
 
-    const prevIdx = currentQuestion;
-    const prevMessages = messages;
-    const prevQuestionId = interview.questions[prevIdx]?.id;
-
     setCurrentQuestion(targetIdx);
 
     if (targetQuestionId) {
@@ -977,7 +954,7 @@ export function ChatInterface({
     setSending(true);
 
     try {
-      const sendRes = await fetch("/api/trpc/session.sendMessage", {
+      await fetch("/api/trpc/session.sendMessage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -990,26 +967,11 @@ export function ChatInterface({
         }),
       });
 
-      if (!sendRes.ok) {
-        throw new Error(`sendMessage failed: ${sendRes.status}`);
-      }
-
       await getAIResponse(updatedMessages, targetIdx, {
         ignoreQuestionAdvance: true,
       });
     } catch (error) {
       console.error("Question transition error:", error);
-      setCurrentQuestion(prevIdx);
-      setMessages(prevMessages);
-      if (prevQuestionId) {
-        fetch("/api/trpc/session.updateCurrentQuestion", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            json: { sessionId, questionId: prevQuestionId },
-          }),
-        }).catch(() => {});
-      }
     } finally {
       setSending(false);
     }
@@ -1060,9 +1022,6 @@ export function ChatInterface({
           onComplete("TIME_LIMIT_EXCEEDED");
           return;
         }
-        setMessages(messages);
-        setInput(userMessage.content);
-        return;
       }
 
       // Get AI response
@@ -1223,13 +1182,14 @@ export function ChatInterface({
               {interview.title}
             </h1>
             <p className="hidden text-xs text-muted-foreground md:block">
-              Chat Interview with {interview.aiName}
+              对话测试 · {interview.aiName}
             </p>
           </div>
           <div className="flex items-center gap-2">
             <IntervieweeHelpPopover mode="chat" />
           </div>
         </div>
+        {interview.questions.length > 0 && (
         <div
           className="mt-2 flex items-center gap-3"
           data-tour="chat-progress"
@@ -1240,6 +1200,7 @@ export function ChatInterface({
             {interview.questions.length}
           </span>
         </div>
+        )}
         {currentQ?.text && (
           <p className="mt-1.5 line-clamp-1 text-xs text-muted-foreground">
             {currentQ.text}
@@ -1300,7 +1261,10 @@ export function ChatInterface({
           value={input}
           onChange={setInput}
           onSubmit={() => void handleSend()}
-          onStop={handleStopGeneration}
+          onStop={() => {
+            setSending(false);
+            setAiTyping(false);
+          }}
           isGenerating={sending || aiTyping}
           disabled={preview}
           submitDisabled={preview || !input.trim()}
