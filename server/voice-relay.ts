@@ -772,6 +772,8 @@ async function handleMicTestConnection(browserWs: WebSocket) {
   let asrAccumulator = "";
   let intentionalClose = false;
   let asrReconnecting = false;
+  let reconnectAttempts = 0;
+  const maxReconnectAttempts = 2;
 
   const autoTimeout = setTimeout(() => {
     log.info("Mic test auto-timeout");
@@ -800,6 +802,56 @@ async function handleMicTestConnection(browserWs: WebSocket) {
     asrAlive = false;
   }
 
+  function startKeepAlive() {
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
+    keepAliveInterval = setInterval(() => {
+      if (!asrAlive || !asrWs || asrWs.readyState !== WebSocket.OPEN) return;
+      try {
+        asrAudioSeq++;
+        asrWs.send(buildBigModelAudioRequest(Buffer.alloc(3200), asrAudioSeq));
+      } catch (err) {
+        void recoverMicTestAsr(`keep-alive failed: ${String(err)}`);
+      }
+    }, 5000);
+  }
+
+  async function recoverMicTestAsr(reason: string) {
+    if (intentionalClose || browserWs.readyState !== WebSocket.OPEN || asrReconnecting) return;
+    asrReconnecting = true;
+    asrAlive = false;
+    if (keepAliveInterval) {
+      clearInterval(keepAliveInterval);
+      keepAliveInterval = null;
+    }
+    const failedWs = asrWs;
+    asrWs = null;
+    failedWs?.removeAllListeners();
+    try { failedWs?.close(); } catch { /* ignore */ }
+
+    while (!intentionalClose && browserWs.readyState === WebSocket.OPEN
+        && reconnectAttempts < maxReconnectAttempts) {
+      reconnectAttempts += 1;
+      log.warn(`Mic test ASR recovery ${reconnectAttempts}/${maxReconnectAttempts}: ${reason}`);
+      await new Promise((resolve) => setTimeout(resolve, reconnectAttempts * 500));
+      if (intentionalClose || browserWs.readyState !== WebSocket.OPEN) break;
+      try {
+        await connectMicTestAsr(false);
+        startKeepAlive();
+        asrReconnecting = false;
+        return;
+      } catch (err) {
+        reason = `reconnect failed: ${String(err)}`;
+      }
+    }
+
+    asrReconnecting = false;
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({ type: "disconnected", reason: "asr_unavailable" }));
+      browserWs.close();
+    }
+    cleanup();
+  }
+
   function bindAsrMessageHandlers(ws: WebSocket) {
     ws.on("message", (data: Buffer) => {
       try {
@@ -807,10 +859,12 @@ async function handleMicTestConnection(browserWs: WebSocket) {
 
         if (resp.errorCode != null) {
           log.error(`Mic test ASR error: ${resp.errorCode} ${resp.errorMessage}`);
+          void recoverMicTestAsr(`provider error ${resp.errorCode}`);
           return;
         }
 
         if (resp.utterances) {
+        reconnectAttempts = 0;
           for (const utt of resp.utterances) {
             if (utt.text) {
               asrAccumulator = utt.text;
@@ -850,6 +904,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
 
     ws.on("error", (err: Error) => {
       log.error("Mic test ASR error:", err.message);
+      void recoverMicTestAsr(err.message);
     });
 
     ws.on("close", () => {
@@ -858,18 +913,8 @@ async function handleMicTestConnection(browserWs: WebSocket) {
       if (intentionalClose || browserWs.readyState !== WebSocket.OPEN || asrReconnecting) {
         return;
       }
-      asrReconnecting = true;
       log.info("Mic test ASR closed — reconnecting for continuous transcription");
-      void connectMicTestAsr(false)
-        .catch((err) => {
-          log.error("Mic test ASR reconnect failed:", err);
-          if (browserWs.readyState === WebSocket.OPEN) {
-            browserWs.send(JSON.stringify({ type: "disconnected" }));
-          }
-        })
-        .finally(() => {
-          asrReconnecting = false;
-        });
+      void recoverMicTestAsr("provider socket closed");
     });
   }
 
@@ -897,7 +942,8 @@ async function handleMicTestConnection(browserWs: WebSocket) {
     );
     const nextWs = new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
 
-    await new Promise<void>((resolve, reject) => {
+    try {
+      await new Promise<void>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error("ASR connect timeout")), 10000);
       nextWs.on("open", () => { clearTimeout(t); resolve(); });
       nextWs.on("error", (e) => { clearTimeout(t); reject(e); });
@@ -910,7 +956,12 @@ async function handleMicTestConnection(browserWs: WebSocket) {
           reject(new Error(`ASR server responded ${res.statusCode}: ${body}`));
         });
       });
-    });
+      });
+    } catch (error) {
+      nextWs.removeAllListeners();
+      try { nextWs.close(); } catch { /* ignore */ }
+      throw error;
+    }
 
     asrWs = nextWs;
     asrWs.send(buildBigModelFullRequest(asrConfig, reqid));
@@ -941,14 +992,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
 
   try {
     await connectMicTestAsr(true);
-
-    keepAliveInterval = setInterval(() => {
-      if (!asrAlive || !asrWs || asrWs.readyState !== WebSocket.OPEN) {
-        return;
-      }
-      asrAudioSeq++;
-      asrWs.send(buildBigModelAudioRequest(Buffer.alloc(3200), asrAudioSeq));
-    }, 5000);
+    startKeepAlive();
   } catch (err) {
     log.error("Mic test connection failed:", err);
     if (browserWs.readyState === WebSocket.OPEN) {

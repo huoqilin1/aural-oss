@@ -56,6 +56,7 @@ export function useRelayAsrInput({
   const ownsMicStreamRef = useRef(true);
   const pendingAudioRef = useRef<string[]>([]);
   const micCaptureStartedRef = useRef(false);
+  const generationRef = useRef(0);
 
   useEffect(() => {
     onTranscriptRef.current = onTranscript;
@@ -103,6 +104,7 @@ export function useRelayAsrInput({
   );
 
   const stop = useCallback(() => {
+    generationRef.current += 1;
     listeningRef.current = false;
     connectorRef.current?.close();
     connectorRef.current = null;
@@ -111,11 +113,18 @@ export function useRelayAsrInput({
 
   const startMicCapture = useCallback(async () => {
     if (!listeningRef.current || micCaptureStartedRef.current) return;
+    const generation = generationRef.current;
     try {
       const external = sharedStreamRef.current;
       const stream =
         external ??
         (await navigator.mediaDevices.getUserMedia({ audio: true }));
+      if (!listeningRef.current || generation !== generationRef.current) {
+        if (!external) {
+          stream.getTracks().forEach((track) => track.stop());
+        }
+        return;
+      }
       if (!external) micStreamRef.current = stream;
 
       const ctx = new AudioContext({ sampleRate: 16000 });
@@ -143,6 +152,11 @@ export function useRelayAsrInput({
       const workletUrl = URL.createObjectURL(blob);
       await ctx.audioWorklet.addModule(workletUrl);
       URL.revokeObjectURL(workletUrl);
+      if (!listeningRef.current || generation !== generationRef.current) {
+        if (!external) stream.getTracks().forEach((track) => track.stop());
+        await ctx.close();
+        return;
+      }
 
       const source = ctx.createMediaStreamSource(stream);
       const worklet = new AudioWorkletNode(ctx, "mic-processor");
@@ -155,7 +169,7 @@ export function useRelayAsrInput({
       micCaptureStartedRef.current = true;
 
       worklet.port.onmessage = (e) => {
-        if (!listeningRef.current) return;
+        if (!listeningRef.current || generation !== generationRef.current) return;
         const input = e.data as Float32Array;
         let sumSq = 0;
         for (let i = 0; i < input.length; i++) sumSq += input[i] * input[i];
@@ -187,6 +201,7 @@ export function useRelayAsrInput({
       sessionBufferRef.current = "";
       pendingAudioRef.current = [];
       listeningRef.current = true;
+      const generation = generationRef.current;
       if (externalStream) {
         sharedStreamRef.current = externalStream;
         ownsMicStreamRef.current = false;
@@ -198,6 +213,7 @@ export function useRelayAsrInput({
       void startMicCapture();
 
       const publish = () => {
+        if (!listeningRef.current || generation !== generationRef.current) return;
         const merged = [baseTextRef.current, sessionBufferRef.current]
           .filter(Boolean)
           .join(" ");
@@ -234,10 +250,11 @@ export function useRelayAsrInput({
         }),
         buildInitMessage: () => ({ type: "mic_test", language }),
         onConnected: () => {
+          if (generation !== generationRef.current) return;
           flushPendingAudio();
         },
         onJsonMessage: (msg, { connector: activeConnector }) => {
-          if (!listeningRef.current) return;
+          if (!listeningRef.current || generation !== generationRef.current) return;
           if (msg.type === "asr") {
             const text = extractAsrText(msg);
             if (text) mergePartial(text);
@@ -255,17 +272,23 @@ export function useRelayAsrInput({
           }
         },
         onPermanentFailure: () => {
-          if (listeningRef.current) stop();
+          if (listeningRef.current && generation === generationRef.current) {
+            stop();
+          }
         },
       });
 
       connectorRef.current = connector;
       try {
         await connector.connect();
+        if (!listeningRef.current || generation !== generationRef.current) {
+          connector.close();
+          return false;
+        }
         flushPendingAudio();
         return listeningRef.current;
       } catch {
-        stop();
+        if (generation === generationRef.current) stop();
         return false;
       }
     },
