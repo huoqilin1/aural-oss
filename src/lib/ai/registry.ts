@@ -2,6 +2,7 @@ import { type LLMProvider } from "./types";
 import { OpenAIProvider } from "./providers/openai";
 import { GeminiProvider } from "./providers/gemini";
 import { KimiProvider } from "./providers/kimi";
+import { DeepSeekProvider } from "./providers/deepseek";
 import { MinimaxProvider } from "./providers/minimax";
 
 const providers = new Map<string, LLMProvider>();
@@ -10,6 +11,7 @@ function registerProvider(provider: LLMProvider) {
   providers.set(provider.id, provider);
 }
 
+registerProvider(new DeepSeekProvider());
 registerProvider(new OpenAIProvider());
 registerProvider(new GeminiProvider());
 registerProvider(new KimiProvider());

@@ -81,7 +81,7 @@ const ASR_RESOURCE_ID = process.env.DOUBAO_ASR_RESOURCE_ID || "volc.seedasr.sauc
 /** Volc BigModel endpointing / speech timing bounds (ms). Docs: min 200ms for end window. */
 const ASR_ENDPOINT_MIN_MS = 200;
 const ASR_END_WINDOW_DEFAULT_MS = 2000;
-const ASR_END_WINDOW_MAX_MS = 6_000;
+const ASR_END_WINDOW_MAX_MS = 15_000;
 const ASR_FORCE_SPEECH_DEFAULT_MS = 0;
 const ASR_FORCE_SPEECH_MAX_MS = 60_000;
 
@@ -441,7 +441,7 @@ function isSimilarResponse(a: string, b: string): boolean {
 // ── Transition detection ────────────────────────────────────────────
 
 const FAST_NEXT_PATTERNS = [
-  /^(?:下一个问题|下一题|跳过|next\s*question|skip)\.?$/i,
+  /^(?:那个?|好的?|嗯|呃|噢|哦|行|就|这样|ok|okay)*[\s,，、。]*(?:下一个问题|下一题|下一道|跳过|已完成|回答完了|我回答完了|答完了|我答完了|回答完毕|说完了|我说完了|讲完了|我讲完了|继续下一个?|继续)[\s,，、。]*(?:吧|了|啦|哈|呢|啊|哦|嗯|谢谢|就这样|就这些)*[\s,，、。!！~]*$/i,
 ];
 
 const FAST_PREV_PATTERNS = [
@@ -1025,6 +1025,9 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   // ── LLM-controlled response state ─────────────────────────────
   let generatingResponse = false;
   let userTurnsOnCurrentQ = 0;
+  // 候选人静默 30 秒自动进入下一题(王总 2026-06-21)
+  let silenceAutoSkipTimer: ReturnType<typeof setTimeout> | null = null;
+  const SILENCE_AUTO_SKIP_MS = 30_000;
   /** Wall time when the latest assistant line was appended to questionTranscript (split-noise heuristic). */
   let lastAssistantMessageWallClockMs = 0;
   const recentAcceptedUserFinals: RecentAsrFinal[] = [];
@@ -1131,7 +1134,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   switch (ctx.followUpDepth) {
     case "LIGHT":   maxFollowUps = 2; break;
     case "MODERATE": maxFollowUps = 7; break;
-    case "DEEP":    maxFollowUps = 8; break;
+    case "DEEP":    maxFollowUps = 12; break;
     default:        maxFollowUps = 2;
   }
 
@@ -1980,6 +1983,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     const transitionId = ++transitionGeneration;
     isTransitioning = true;
     clearPendingAsrFinal();
+    clearSilenceAutoSkip();
 
     suppressAsrResults = true;
     disconnectAsr();
@@ -2070,6 +2074,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     const transitionId = ++transitionGeneration;
     isTransitioning = true;
     clearPendingAsrFinal();
+    clearSilenceAutoSkip();
 
     suppressAsrResults = true;
     disconnectAsr();
@@ -2428,6 +2433,28 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   }
 
   /** Reconnect ASR after response cycle so accumulated echo text is cleared. */
+  function clearSilenceAutoSkip() {
+    if (silenceAutoSkipTimer) {
+      clearTimeout(silenceAutoSkipTimer);
+      silenceAutoSkipTimer = null;
+    }
+  }
+  function armSilenceAutoSkip() {
+    clearSilenceAutoSkip();
+    if (interviewDone || endingInterview) return;
+    silenceAutoSkipTimer = setTimeout(() => {
+      silenceAutoSkipTimer = null;
+      if (interviewDone || endingInterview) return;
+      // 小君还在说话/出题/切题时,顺延 30 秒再看(不打断小君)
+      if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+        armSilenceAutoSkip();
+        return;
+      }
+      log.info("候选人静默 30 秒无新内容,自动进入下一题");
+      handleTransition(true).catch(log.error);
+    }, SILENCE_AUTO_SKIP_MS);
+  }
+
   async function reopenAsr() {
     try {
       await connectAsr();
@@ -2571,6 +2598,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
     asrWs.send(buildBigModelFullRequest(asrConfig, reqid));
     asrAlive = true;
+    armSilenceAutoSkip();
 
     asrWs.on("message", (data: Buffer) => {
       try {
@@ -2598,6 +2626,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         }
 
         for (const r of results) {
+          if (r.text && r.text.trim()) armSilenceAutoSkip();
           // Server-side barge-in: interim speech during TTS → cancel TTS immediately
           if (shouldHoldBargeInInterimForFinal({
             text: r.text,
