@@ -25,6 +25,9 @@ const ASR_PROCESSING_ACTIVE_SPEECH_HOLD_MS = 1_600;
 const ASR_PROCESSING_AUDIO_ACTIVITY_RMS_THRESHOLD = 0.018;
 
 export interface InterviewContext {
+  interviewId?: string;
+  sessionId?: string;
+  externalCorrelationId?: string | null;
   title: string;
   objective?: string | null;
   aiName: string;
@@ -33,6 +36,7 @@ export interface InterviewContext {
   followUpDepth: string;
   startQuestionIndex?: number;
   questions: Array<{
+    id?: string;
     text: string;
     type: string;
     description?: string | null;
@@ -92,6 +96,7 @@ interface TrackedMessage {
  * 8. On disconnect, all messages are saved to database
  */
 export function useVoice({
+  interviewId,
   sessionId,
   interviewContext,
   onTranscript,
@@ -444,6 +449,8 @@ export function useVoice({
           type: "init",
           context: {
             ...interviewContext,
+            interviewId,
+            sessionId,
             startQuestionIndex: currentQuestionIndexRef.current,
           },
         }),
@@ -520,16 +527,32 @@ export function useVoice({
       if (messages.length === 0 && typeof currentQuestionIndex !== "number") return;
 
       try {
-        await fetch("/api/voice/save", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId, messages, currentQuestionIndex }),
-        });
+        let response: Response | null = null;
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+          try {
+            response = await fetch("/api/voice/save", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ sessionId, messages, currentQuestionIndex }),
+            });
+            if (response.ok) break;
+          } catch (error) {
+            if (attempt === 3) throw error;
+          }
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          }
+        }
+        if (!response?.ok) {
+          throw new Error(`Progress save failed with HTTP ${response?.status ?? "network"}`);
+        }
         log.info(
           `Progress saved: ${messages.length} msgs, Q${currentQuestionIndex + 1}`
         );
       } catch (err) {
+        trackedMessagesRef.current = [...messages, ...trackedMessagesRef.current];
         log.error("Failed to save progress:", err);
+        throw err;
       }
     },
     [sessionId]
@@ -748,20 +771,28 @@ export function useVoice({
           const idx = msg.questionIndex as number;
           const total = msg.totalQuestions as number;
 
-          // Persist messages from the previous question (fire-and-forget)
-          saveProgress(idx);
-
-          setState((s) => ({
-            ...s,
-            currentQuestionIndex: idx,
-            totalQuestions: total,
+          // Confirm the UI transition only after the server acknowledges progress.
+          void saveProgress(idx).then(() => {
+            currentQuestionIndexRef.current = idx;
+            setState((s) => ({
+              ...s,
+              currentQuestionIndex: idx,
+              totalQuestions: total,
               isTransitioning: false,
               transitionDirection: null,
               aiTranscript: "",
               lastAssistantUtteranceEndedAt: 0,
             }));
-          onQuestionChange?.(idx, total);
-          log.info(`Question ${idx + 1}/${total}`);
+            onQuestionChange?.(idx, total);
+            log.info(`Question ${idx + 1}/${total}`);
+          }).catch((error) => {
+            setState((s) => ({ ...s, isTransitioning: false, transitionDirection: null }));
+            onError?.(
+              error instanceof Error
+                ? `测试进度保存失败：${error.message}`
+                : "测试进度保存失败，请检查网络后重试",
+            );
+          });
           break;
         }
 

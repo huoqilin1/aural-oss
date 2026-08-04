@@ -24,6 +24,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
 import { callRelayLLM, logRelayLlmStartup } from "./relay-llm";
+import { emitInterviewEvent } from "./interview-events";
 import {
     collapseInternalAsrRepetitions,
     finalizeTurnBudgetResponse,
@@ -217,6 +218,9 @@ if (!ASR_ACCESS_TOKEN && !ASR_API_KEY) {
 // ── Interview context type ──────────────────────────────────────────
 
 interface InterviewContext {
+  interviewId?: string;
+  sessionId?: string;
+  externalCorrelationId?: string | null;
   title: string;
   objective?: string | null;
   aiName: string;
@@ -225,6 +229,7 @@ interface InterviewContext {
   followUpDepth: string;
   startQuestionIndex?: number;
   questions: Array<{
+    id?: string;
     text: string;
     type: string;
     description?: string | null;
@@ -1069,9 +1074,9 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   // ── LLM-controlled response state ─────────────────────────────
   let generatingResponse = false;
   let userTurnsOnCurrentQ = 0;
-  // 候选人静默 30 秒自动进入下一题(王总 2026-06-21)
-  let silenceAutoSkipTimer: ReturnType<typeof setTimeout> | null = null;
-  const SILENCE_AUTO_SKIP_MS = 30_000;
+  // 静默只提醒，绝不替候选人跳题。跳题必须来自有效回答后的模型判断或显式操作。
+  let silenceReminderTimer: ReturnType<typeof setTimeout> | null = null;
+  const SILENCE_REMINDER_MS = 30_000;
   /** Wall time when the latest assistant line was appended to questionTranscript (split-noise heuristic). */
   let lastAssistantMessageWallClockMs = 0;
   const recentAcceptedUserFinals: RecentAsrFinal[] = [];
@@ -1650,6 +1655,10 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       pendingLastQuestionTimeout = null;
     }
     browserWs.send(JSON.stringify({ type: "interview_complete" }));
+    void emitInterviewEvent(ctx, "session_completed", {
+      stage: "session_completed",
+      question_index: currentQuestionIndex,
+    });
     log.info("Interview complete signal sent");
   }
 
@@ -2070,6 +2079,13 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
             auto,
           })
         );
+        void emitInterviewEvent(ctx, "question_asked", {
+          stage: "interviewing",
+          question_index: currentQuestionIndex,
+          question_id: nextQ.id,
+          question_text: nextQ.text,
+          question_type: nextQ.type,
+        });
 
         log.info(`→ Q${currentQuestionIndex + 1}/${sortedQuestions.length}: ${nextQ.text.slice(0, 60)}...`);
 
@@ -2335,6 +2351,13 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         rememberAcceptedUserFinal(userText);
         questionTranscript.push({ role: "user", text: userText });
         userTurnsOnCurrentQ++;
+        const activeQuestion = sortedQuestions[currentQuestionIndex];
+        void emitInterviewEvent(ctx, "answer_finalized", {
+          stage: "interviewing",
+          question_index: currentQuestionIndex,
+          question_id: activeQuestion?.id,
+          answer_text: userText,
+        });
       }
       lastResponseWasCorrection = false;
 
@@ -2478,25 +2501,48 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
   /** Reconnect ASR after response cycle so accumulated echo text is cleared. */
   function clearSilenceAutoSkip() {
-    if (silenceAutoSkipTimer) {
-      clearTimeout(silenceAutoSkipTimer);
-      silenceAutoSkipTimer = null;
+    if (silenceReminderTimer) {
+      clearTimeout(silenceReminderTimer);
+      silenceReminderTimer = null;
     }
   }
   function armSilenceAutoSkip() {
     clearSilenceAutoSkip();
     if (interviewDone || endingInterview) return;
-    silenceAutoSkipTimer = setTimeout(() => {
-      silenceAutoSkipTimer = null;
+    silenceReminderTimer = setTimeout(async () => {
+      silenceReminderTimer = null;
       if (interviewDone || endingInterview) return;
-      // 小君还在说话/出题/切题时,顺延 30 秒再看(不打断小君)
-      if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+      const userMayStillBeSpeaking =
+        !!pendingAsrFinalText.trim() ||
+        !!asrAccumulator.trim() ||
+        !!queuedUserUtteranceWhileGenerating.trim() ||
+        Date.now() - lastUserAudioActivityAt < 1_500;
+      if (
+        isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse ||
+        suppressAsrResults || userMayStillBeSpeaking
+      ) {
         armSilenceAutoSkip();
         return;
       }
-      log.info("候选人静默 30 秒无新内容,自动进入下一题");
-      handleTransition(true).catch(log.error);
-    }, SILENCE_AUTO_SKIP_MS);
+      log.info("候选人静默 30 秒，保留当前题并播放温和提醒");
+      try {
+        suppressAsrResults = true;
+        disconnectAsr();
+        await speakAndHandle(
+          isZh
+            ? "可以慢慢想，不用着急。准备好后继续回答就可以，我们仍然停留在当前问题。"
+            : "Take your time. Continue when you are ready; we are staying on the current question.",
+          { trackInTranscript: false },
+        );
+      } catch (err) {
+        log.error("Silence reminder failed:", err);
+      } finally {
+        if (!interviewDone && browserWs.readyState === WebSocket.OPEN) {
+          await reopenAsr().catch(log.error);
+          armSilenceAutoSkip();
+        }
+      }
+    }, SILENCE_REMINDER_MS);
   }
 
   async function reopenAsr() {
@@ -2639,6 +2685,10 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       });
     });
     log.info(`ASR connected: resource=${ASR_RESOURCE_ID}`);
+    void emitInterviewEvent(ctx, "voice_connected", {
+      stage: "interviewing",
+      question_index: currentQuestionIndex,
+    });
 
     asrWs.send(buildBigModelFullRequest(asrConfig, reqid));
     asrAlive = true;
@@ -2894,6 +2944,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   try {
     await connectAsr();
 
+    void emitInterviewEvent(ctx, "session_started", {
+      stage: "interviewing",
+      question_index: currentQuestionIndex,
+    });
+
     browserWs.send(JSON.stringify({ type: "ready", sessionId: randomUUID() }));
 
     browserWs.send(
@@ -2903,6 +2958,14 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         totalQuestions: sortedQuestions.length,
       })
     );
+    const openingQuestion = sortedQuestions[currentQuestionIndex];
+    void emitInterviewEvent(ctx, "question_asked", {
+      stage: "interviewing",
+      question_index: currentQuestionIndex,
+      question_id: openingQuestion?.id,
+      question_text: openingQuestion?.text,
+      question_type: openingQuestion?.type,
+    });
 
     suppressAsrResults = true;
     log.info(`Starting greeting TTS for Q${currentQuestionIndex + 1}`);

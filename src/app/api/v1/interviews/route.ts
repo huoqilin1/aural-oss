@@ -114,6 +114,20 @@ export async function POST(request: Request) {
   }
 
   const projectId = auth.projectIds[0]!;
+  const externalCorrelationId =
+    typeof body.externalCorrelationId === "string" && body.externalCorrelationId.trim()
+      ? body.externalCorrelationId.trim()
+      : null;
+
+  if (externalCorrelationId) {
+    const { data: existing } = await (supabaseAdmin as any)
+      .from("interviews")
+      .select("*")
+      .eq("projectId", projectId)
+      .eq("externalCorrelationId", externalCorrelationId)
+      .maybeSingle();
+    if (existing) return Response.json({ data: existing, reused: true });
+  }
 
   const chatEnabled = typeof body.chatEnabled === "boolean" ? body.chatEnabled : true;
   const voiceEnabled = typeof body.voiceEnabled === "boolean" ? body.voiceEnabled : false;
@@ -150,15 +164,25 @@ export async function POST(request: Request) {
     userId: auth.userId,
     requireInvite: true,
     publicSlug: nanoid(10),
+    externalCorrelationId,
   };
 
-  const { data: interview, error } = await supabaseAdmin
+  const { data: interview, error } = await (supabaseAdmin as any)
     .from("interviews")
     .insert(insert)
     .select()
     .single();
 
   if (error) {
+    if (externalCorrelationId && error.code === "23505") {
+      const { data: existing } = await (supabaseAdmin as any)
+        .from("interviews")
+        .select("*")
+        .eq("projectId", projectId)
+        .eq("externalCorrelationId", externalCorrelationId)
+        .single();
+      if (existing) return Response.json({ data: existing, reused: true });
+    }
     return apiError("INTERNAL_ERROR", error.message, 500);
   }
 

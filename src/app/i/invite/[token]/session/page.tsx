@@ -102,17 +102,46 @@ export default function InviteSessionPage() {
     );
   }
 
+  const resumeMessages = session.messages ?? [];
+  const resumeQuestionIndex = (() => {
+    if (!session.currentQuestionId) return 0;
+    const index = (interview.questions ?? []).findIndex(
+      (question: any) => question.id === session.currentQuestionId,
+    );
+    return index >= 0 ? index : 0;
+  })();
+  const isResuming = resumeMessages.length > 0 || resumeQuestionIndex > 0;
+  const resumeTextMessages = resumeMessages
+    .filter((message: any) => message.contentType === "TEXT")
+    .map((message: any) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+    }));
+  const resumeDrawings = resumeMessages
+    .filter((message: any) => message.contentType === "WHITEBOARD" && message.whiteboardData)
+    .map((message: any) => ({
+      id: message.id,
+      label: message.whiteboardData?.label ?? "Drawing",
+      snapshotData: JSON.stringify(message.whiteboardData),
+    }));
+
   const useVoice = interview.voiceEnabled;
 
   if (useVoice) {
     const interviewContext = {
+      interviewId: interview.id,
+      sessionId: session.id,
+      externalCorrelationId: interview.externalCorrelationId,
       title: interview.title,
       objective: interview.objective,
       aiName: interview.aiName,
       aiTone: interview.aiTone,
       language: interview.language,
       followUpDepth: interview.followUpDepth,
+      startQuestionIndex: isResuming ? resumeQuestionIndex : undefined,
       questions: interview.questions.map((q: any) => ({
+        id: q.id,
         text: q.text,
         type: q.type,
         description: q.description,
@@ -133,6 +162,8 @@ export default function InviteSessionPage() {
           questionCount={interview.questions.length}
           interviewContext={interviewContext}
           durationMinutes={interview.timeLimitMinutes ?? undefined}
+          initialMessages={isResuming ? resumeTextMessages : undefined}
+          initialDrawings={isResuming && resumeDrawings.length ? resumeDrawings : undefined}
           chatEnabled={!!interview.chatEnabled}
           onComplete={handleComplete}
           videoMode={!!interview.videoEnabled}
@@ -155,6 +186,15 @@ export default function InviteSessionPage() {
           })),
         }}
         durationMinutes={interview.timeLimitMinutes ?? undefined}
+        initialMessages={resumeMessages
+          .filter((message: any) => message.contentType !== "WHITEBOARD")
+          .map((message: any) => ({
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            timestamp: String(message.timestamp),
+          }))}
+        initialQuestionIndex={isResuming ? resumeQuestionIndex : undefined}
         onComplete={handleComplete}
       />
     </>

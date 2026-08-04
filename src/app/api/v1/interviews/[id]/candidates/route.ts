@@ -14,6 +14,7 @@ type CandidateInput = {
   email?: unknown;
   phone?: unknown;
   notes?: unknown;
+  externalCorrelationId?: unknown;
 };
 
 function normalizeCandidateInput(raw: unknown): CandidateInput | null {
@@ -82,6 +83,7 @@ export async function POST(
     phone: string | null;
     notes: string | null;
     inviteToken: string;
+    externalCorrelationId: string | null;
   }[] = [];
 
   for (const item of rawItems) {
@@ -95,6 +97,28 @@ export async function POST(
     const emailRaw = typeof c.email === "string" ? c.email.trim().toLowerCase() : "";
     const phone = typeof c.phone === "string" ? c.phone.trim() || null : null;
     const notes = typeof c.notes === "string" ? c.notes.trim() || null : null;
+    const externalCorrelationId =
+      typeof c.externalCorrelationId === "string" && c.externalCorrelationId.trim()
+        ? c.externalCorrelationId.trim()
+        : null;
+
+    if (!Array.isArray(body) && externalCorrelationId) {
+      const { data: existing } = await (supabaseAdmin as any)
+        .from("candidates")
+        .select("id, name, email, phone, notes, inviteToken, sessionId, createdAt, updatedAt")
+        .eq("interviewId", interviewId)
+        .eq("externalCorrelationId", externalCorrelationId)
+        .maybeSingle();
+      if (existing) {
+        return Response.json({
+          data: [{
+            ...existing,
+            inviteUrl: `${APP_BASE}/invite/${existing.inviteToken as string}`,
+          }],
+          reused: true,
+        });
+      }
+    }
 
     rows.push({
       interviewId,
@@ -103,10 +127,11 @@ export async function POST(
       phone,
       notes,
       inviteToken: nanoid(12),
+      externalCorrelationId,
     });
   }
 
-  const { data: created, error } = await supabaseAdmin
+  const { data: created, error } = await (supabaseAdmin as any)
     .from("candidates")
     .insert(rows)
     .select(
@@ -114,10 +139,28 @@ export async function POST(
     );
 
   if (error) {
+    const correlationId = rows.length === 1 ? rows[0]?.externalCorrelationId : null;
+    if (correlationId && error.code === "23505") {
+      const { data: existing } = await (supabaseAdmin as any)
+        .from("candidates")
+        .select("id, name, email, phone, notes, inviteToken, sessionId, createdAt, updatedAt")
+        .eq("interviewId", interviewId)
+        .eq("externalCorrelationId", correlationId)
+        .single();
+      if (existing) {
+        return Response.json({
+          data: [{
+            ...existing,
+            inviteUrl: `${APP_BASE}/invite/${existing.inviteToken as string}`,
+          }],
+          reused: true,
+        });
+      }
+    }
     return apiError("INTERNAL_ERROR", error.message, 500);
   }
 
-  const data = (created ?? []).map((row) => ({
+  const data = (created ?? []).map((row: Record<string, unknown>) => ({
     ...row,
     inviteUrl: `${APP_BASE}/invite/${row.inviteToken as string}`,
   }));

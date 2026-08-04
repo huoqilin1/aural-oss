@@ -7,6 +7,8 @@ import {
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { getProvider } from "@/lib/ai/registry";
 import { createLogger } from "@/lib/logger";
+import { deduplicateRecruitQuestions } from "@/lib/recruit-question-reliability";
+import { createHash } from "node:crypto";
 
 const log = createLogger("api/v1/generate-questions");
 
@@ -91,8 +93,9 @@ function buildRecruitPrompt(opts: {
    - 再 ${jobQuestions} 道【岗位题】:针对岗位"${jobTitle}"该具备的能力出题,考察能不能胜任。
 2. 全部用 OPEN_ENDED 类型(语音对话测试,不要选择题、不要编程题)。
 3. 每题短、具体、一题一个点,像资深挑剔的考官。
-4. 整场大约 ${durationMinutes} 分钟。${expertBlock ? `
-5. 下面给了资深面试官(王总/凌总等专家)在本岗位问过的「经典问答范例」。请学习这些范例的提问深度、角度和挖人方式,出题向这个水准看齐——可借鉴角度,但要结合本候选人简历,不要照抄。` : ""}
+4. 每道题必须考察不同的事实或能力维度。禁止换个说法重复询问同一段经历、同一项目、同一技能；先在内部逐题比较，发现角度重复就换成新的考察点。
+5. 整场大约 ${durationMinutes} 分钟。${expertBlock ? `
+6. 下面给了资深面试官(王总/凌总等专家)在本岗位问过的「经典问答范例」。请学习这些范例的提问深度、角度和挖人方式,出题向这个水准看齐——可借鉴角度,但要结合本候选人简历,不要照抄。` : ""}
 
 只输出合法 JSON,不要 markdown、不要解释:
 {
@@ -167,6 +170,51 @@ export async function POST(
     return apiError("BAD_REQUEST", "jobTitle 或 resumeText 至少要有一个", 400);
   }
 
+  const suppliedVersion =
+    typeof body.questionSetVersion === "string" && body.questionSetVersion.trim()
+      ? body.questionSetVersion.trim()
+      : "";
+  const questionSetVersion = suppliedVersion || createHash("sha256")
+    .update(JSON.stringify({
+      jobTitle,
+      jobDescription,
+      resumeText,
+      durationMinutes,
+      resumeQuestions,
+      jobQuestions,
+      expertExamples,
+    }))
+    .digest("hex")
+    .slice(0, 24);
+  const idempotencyKey = request.headers.get("idempotency-key");
+
+  const { data: claimData, error: claimError } = await (supabaseAdmin as any).rpc(
+    "claim_recruit_question_generation",
+    {
+      p_interview_id: interviewId,
+      p_version: questionSetVersion,
+      p_idempotency_key: idempotencyKey,
+    },
+  );
+  if (claimError) return apiError("INTERNAL_ERROR", claimError.message, 500);
+  const claim = claimData as { claimed?: boolean; status?: string; count?: number } | null;
+  if (claim?.status === "COMPLETED") {
+    return Response.json({
+      data: { count: claim.count ?? 0, version: questionSetVersion, reused: true },
+    });
+  }
+  if (!claim?.claimed) {
+    return apiError("CONFLICT", "同一版本题目正在生成，请稍后查询", 409);
+  }
+
+  const markFailed = async (message: string) => {
+    await (supabaseAdmin as any).rpc("fail_recruit_question_generation", {
+      p_interview_id: interviewId,
+      p_version: questionSetVersion,
+      p_error: message,
+    });
+  };
+
   let generated: { questions?: Array<{ text?: unknown }> };
   try {
     const provider = getProvider(RECRUIT_GENERATOR_MODEL);
@@ -188,33 +236,34 @@ export async function POST(
     generated = parseJsonSafe(resp.content) as { questions?: Array<{ text?: unknown }> };
   } catch (err) {
     log.error("招聘出题失败:", err);
+    await markFailed(err instanceof Error ? err.message : "AI 出题失败");
     return apiError("INTERNAL_ERROR", "AI 出题失败", 500);
   }
 
   const rawQs = Array.isArray(generated?.questions) ? generated.questions : [];
-  const texts: string[] = rawQs
+  const generatedTexts: string[] = rawQs
     .map((q) => (typeof q.text === "string" ? q.text.trim() : ""))
     .filter((t) => t.length > 0);
 
   // 兜底:第 1 题必须是自我介绍(AI 没放对就强制补到最前)
   const introLike =
-    texts[0] && /自我介绍|介绍一下自己|介绍一下你自己/.test(texts[0]);
+    generatedTexts[0] && /自我介绍|介绍一下自己|介绍一下你自己/.test(generatedTexts[0]);
   if (!introLike) {
-    texts.unshift("请先花大约 3 分钟做个自我介绍,聊聊你的背景、经历和你最拿得出手的事。");
+    generatedTexts.unshift("请先花大约 3 分钟做个自我介绍,聊聊你的背景、经历和你最拿得出手的事。");
+  }
+  const { questions: texts, rejected } = deduplicateRecruitQuestions(generatedTexts);
+  const expectedMainQuestions = 1 + resumeQuestions + jobQuestions;
+  if (texts.length < expectedMainQuestions) {
+    const message = `题目去重后数量不足: expected=${expectedMainQuestions}, actual=${texts.length}, rejected=${rejected.length}`;
+    log.warn(message, rejected);
+    await markFailed(message);
+    return apiError("UNPROCESSABLE_ENTITY", "AI 生成了重复题目，系统将自动重试", 422);
   }
   if (texts.length === 0) {
+    await markFailed("AI 没出有效题目");
     return apiError("INTERNAL_ERROR", "AI 没出有效题目", 500);
   }
-
-  const { data: maxRow } = await supabaseAdmin
-    .from("questions")
-    .select("order")
-    .eq("interviewId", interviewId)
-    .order("order", { ascending: false })
-    .limit(1)
-    .maybeSingle();
-
-  let nextOrder = (maxRow?.order ?? -1) + 1;
+  let nextOrder = 0;
   const rows = texts.map((text) => ({
     interviewId,
     order: nextOrder++,
@@ -235,14 +284,26 @@ export async function POST(
     probeOnShort: false,
   });
 
-  const { data: created, error } = await supabaseAdmin
-    .from("questions")
-    .insert(rows)
-    .select("id");
+  const { data: createdCount, error } = await (supabaseAdmin as any).rpc(
+    "complete_recruit_question_generation",
+    {
+      p_interview_id: interviewId,
+      p_version: questionSetVersion,
+      p_questions: rows,
+    },
+  );
 
   if (error) {
+    await markFailed(error.message);
     return apiError("INTERNAL_ERROR", error.message, 500);
   }
 
-  return Response.json({ data: { count: created?.length ?? 0 } });
+  return Response.json({
+    data: {
+      count: typeof createdCount === "number" ? createdCount : rows.length,
+      version: questionSetVersion,
+      rejectedDuplicates: rejected.length,
+      reused: false,
+    },
+  });
 }
