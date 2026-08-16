@@ -39,6 +39,7 @@ export interface InterviewContext {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     options?: any;
     starterCode?: { language: string; code: string } | null;
+    timeLimitSeconds?: number | null;
     order: number;
   }>;
 }

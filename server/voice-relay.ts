@@ -229,6 +229,7 @@ interface InterviewContext {
     type: string;
     description?: string | null;
     options?: { options: string[]; allowMultiple?: boolean } | null;
+    timeLimitSeconds?: number | null;
     order: number;
   }>;
 }
@@ -1069,6 +1070,10 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   // ── LLM-controlled response state ─────────────────────────────
   let generatingResponse = false;
   let userTurnsOnCurrentQ = 0;
+  // Recruitment interviews use at most two AI follow-ups across the entire
+  // session so eight distinct assessment dimensions are all covered.
+  let totalFollowUpsUsed = 0;
+  const GLOBAL_FOLLOW_UP_LIMIT = 2;
   // 候选人静默 30 秒自动进入下一题(王总 2026-06-21)
   let silenceAutoSkipTimer: ReturnType<typeof setTimeout> | null = null;
   const SILENCE_AUTO_SKIP_MS = 30_000;
@@ -1813,7 +1818,10 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       ? Math.max(maxFollowUps, 7)
       : maxFollowUps;
     const followUpsDone = Math.max(0, userTurnsOnCurrentQ - 1);
-    const turnsLeft = effectiveMaxFollowUps - followUpsDone;
+    const turnsLeft = Math.min(
+      effectiveMaxFollowUps - followUpsDone,
+      Math.max(0, GLOBAL_FOLLOW_UP_LIMIT - totalFollowUpsUsed),
+    );
     let followUpInstruction: string;
     const isCodingOrWhiteboard = currentQ.type === "CODING" || currentQ.type === "WHITEBOARD";
 
@@ -1932,6 +1940,18 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     }
 
     const spokenResponse = response.replace(NEXT_TOKEN, "").replace(PREV_TOKEN, "").trim();
+    if (
+      !response.includes(NEXT_TOKEN) &&
+      !response.includes(PREV_TOKEN) &&
+      userTurnsOnCurrentQ > 0 &&
+      replyKeepsConversationOpen(spokenResponse, isZh)
+    ) {
+      totalFollowUpsUsed = Math.min(
+        GLOBAL_FOLLOW_UP_LIMIT,
+        totalFollowUpsUsed + 1,
+      );
+      log.info(`Global follow-up budget: ${totalFollowUpsUsed}/${GLOBAL_FOLLOW_UP_LIMIT}`);
+    }
     if (spokenResponse) {
       recentAgentResponses.push(spokenResponse);
       if (recentAgentResponses.length > 5) recentAgentResponses.shift();

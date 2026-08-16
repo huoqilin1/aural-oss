@@ -97,7 +97,7 @@ export const SPOKEN = {
 
   greeting(aiName: string, title: string, count: number, spokenQuestion: string): BiText {
     return {
-      zh: `你好，我是${aiName}，这次测试大概 20 到 25 分钟，咱们开始吧。${spokenQuestion}`,
+      zh: `你好，我是${aiName}，这次 AI 一面大概 30 分钟，咱们开始吧。${spokenQuestion}`,
       en: `Hi, I'm ${aiName}. This will take about 20 to 25 minutes. Let's begin. ${spokenQuestion}`,
     };
   },

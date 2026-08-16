@@ -492,6 +492,7 @@ export function VoiceInterface({
 
   // ── Countdown timer state ────────────────────────────────────────
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+  const [questionElapsedSeconds, setQuestionElapsedSeconds] = useState(0);
   const timerExpiredRef = useRef(false);
   const timerStartedRef = useRef(false);
 
@@ -777,6 +778,19 @@ export function VoiceInterface({
     }, 1000);
     return () => clearInterval(id);
   }, [remainingSeconds]);
+
+  useEffect(() => {
+    setQuestionElapsedSeconds(0);
+  }, [voice.currentQuestionIndex]);
+
+  useEffect(() => {
+    if (!voice.isConnected || locallyCompleted) return;
+    const timer = window.setInterval(
+      () => setQuestionElapsedSeconds((value) => value + 1),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [locallyCompleted, voice.isConnected, voice.currentQuestionIndex]);
 
   // ── Whiteboard persistence ──────────────────────────────────────
   /** Persist a single drawing to the backend. */
@@ -1366,6 +1380,10 @@ export function VoiceInterface({
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
   const isTimeLow = remainingSeconds !== null && remainingSeconds <= 60;
+  const elapsedSeconds =
+    remainingSeconds !== null && durationMinutes
+      ? Math.max(0, durationMinutes * 60 - remainingSeconds)
+      : 0;
 
   useEffect(() => {
     if (!farewellReadyToClose || locallyCompleted) return;
@@ -1615,8 +1633,8 @@ export function VoiceInterface({
             <IntervieweeHelpPopover mode="voice" />
           </div>
         </div>
-        {/* Question progress + timer (mobile: timer in header to avoid blocking bottom buttons) */}
-        <div className="mt-2 flex items-center gap-3">
+        {/* Question progress and prominent hybrid timing. */}
+        <div className="mt-2 flex flex-wrap items-center gap-3">
           {voice.totalQuestions > 0 && (
             <>
               <Progress value={progress} className="h-1.5 flex-1" />
@@ -1625,18 +1643,31 @@ export function VoiceInterface({
               </span>
             </>
           )}
-          {remainingSeconds !== null && isMobile && (
-            <div className={`flex shrink-0 items-center gap-1.5 rounded-md px-2 py-0.5 text-xs font-medium tabular-nums ${isTimeLow ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
-              <Clock className="h-3 w-3" />
-              <span>剩 {formatTime(remainingSeconds)}</span>
+          {remainingSeconds !== null && (
+            <div className={`flex shrink-0 items-center gap-2 rounded-lg border px-3 py-1.5 text-sm font-semibold tabular-nums ${isTimeLow ? "border-destructive/30 bg-destructive/10 text-destructive" : "border-border bg-muted/60 text-foreground"}`}>
+              <Clock className="h-4 w-4" />
+              <span>已用 {formatTime(elapsedSeconds)}</span>
+              <span className="text-muted-foreground">/</span>
+              <span>剩余 {formatTime(remainingSeconds)}</span>
             </div>
           )}
         </div>
-        {/* Current question text */}
-        {voice.isConnected && currentQuestionText && (
-          <p className="mt-1.5 text-xs text-muted-foreground line-clamp-1">
-            {currentQuestionText}
-          </p>
+        {/* Current question stays fully visible while the candidate answers. */}
+        {currentQuestionText && (
+          <div className="mt-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 md:px-4">
+            <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
+              <span>当前题目 · Q{voice.currentQuestionIndex + 1}</span>
+              <span className="tabular-nums">
+                本题已用 {formatTime(questionElapsedSeconds)}
+                {currentQVoice?.timeLimitSeconds
+                  ? ` · 建议 ${formatTime(currentQVoice.timeLimitSeconds)}`
+                  : ""}
+              </span>
+            </div>
+            <p className="text-sm font-medium leading-6 text-foreground md:text-base md:leading-7">
+              {currentQuestionText}
+            </p>
+          </div>
         )}
       </div>
 
@@ -2397,13 +2428,6 @@ export function VoiceInterface({
       {/* ── Bottom control bar (Zoom-like) ──────────────────── */}
       {(voice.isConnected || preview) && (
         <div className={`relative flex items-center justify-center gap-2 border-t bg-card px-3 py-2 md:gap-6 md:px-6${preview ? " pointer-events-none" : ""}`}>
-          {/* Timer — right-aligned on desktop only (mobile shows it in header) */}
-          {remainingSeconds !== null && !isMobile && (
-            <div className={`absolute right-3 flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium tabular-nums md:right-6 md:px-2.5 ${isTimeLow ? "bg-destructive/10 text-destructive" : "bg-muted text-muted-foreground"}`}>
-              <Clock className="h-3.5 w-3.5" />
-              <span>剩 {formatTime(remainingSeconds)}</span>
-            </div>
-          )}
           {/* Mic toggle */}
           <div data-tour="voice-mic" className="flex flex-col items-center gap-0.5">
             <Button

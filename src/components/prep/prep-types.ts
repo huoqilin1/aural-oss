@@ -39,6 +39,12 @@ export type PrepQuestion = {
   text: string;
   description: string | null;
   type: string;
+  options?: unknown;
+};
+
+export type PrepQuestionOption = {
+  label: string;
+  value?: string;
 };
 
 export type PrepAttempt = {
@@ -79,6 +85,39 @@ export function scoreTone(score?: number | null): string {
   if (score >= 8) return "text-emerald-600 dark:text-emerald-400";
   if (score >= 6) return "text-amber-600 dark:text-amber-400";
   return "text-red-600 dark:text-red-400";
+}
+
+export function scoreBadgeClasses(score?: number | null): string {
+  if (typeof score !== "number") {
+    return "border-border bg-muted text-muted-foreground";
+  }
+  if (score >= 8) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-300";
+  }
+  if (score >= 6) {
+    return "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300";
+  }
+  return "border-red-200 bg-red-50 text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300";
+}
+
+export function normalizePrepQuestionOptions(value: unknown): PrepQuestionOption[] {
+  const rawOptions =
+    value && typeof value === "object" && !Array.isArray(value)
+      ? (value as { options?: unknown }).options
+      : value;
+  if (!Array.isArray(rawOptions)) return [];
+  return rawOptions.flatMap((raw): PrepQuestionOption[] => {
+    if (typeof raw === "string") {
+      const label = raw.trim();
+      return label ? [{ label, value: label }] : [];
+    }
+    if (!raw || typeof raw !== "object") return [];
+    const candidate = raw as { label?: unknown; value?: unknown };
+    const label = String(candidate.label ?? candidate.value ?? "").trim();
+    if (!label) return [];
+    const optionValue = String(candidate.value ?? label).trim();
+    return [{ label, value: optionValue || label }];
+  });
 }
 
 export function safeStringArray(value: unknown): string[] {

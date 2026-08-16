@@ -228,9 +228,9 @@ function ChatProgressIllustration() {
 export function getVoiceGuideItems(): GuideItem[] {
   return [
     {
-      title: "你的 AI 测试官",
+      title: "你的 AI 一面面试官",
       description:
-        "中间区域显示 AI 测试官的状态,它会实时跟你说话、听你回答。",
+        "中间区域显示 AI 一面面试官的状态,它会实时跟你说话、听你回答。",
       illustration: <VoiceAreaIllustration />,
     },
     {
