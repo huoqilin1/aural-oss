@@ -144,6 +144,7 @@ export default function SlugSessionPage() {
   if (showPreviewTour) {
     const mode = useVoice ? "voice" : "chat";
     const mockContext: InterviewContext = {
+      interviewId: "__preview__",
       title: interview.data.title,
       aiName: interview.data.aiName ?? "AI Interviewer",
       aiTone: "professional",
@@ -199,6 +200,7 @@ export default function SlugSessionPage() {
 
   if (useVoice) {
     const interviewContext = {
+      interviewId: interview.data.id,
       title: interview.data.title,
       objective: interview.data.objective,
       aiName: interview.data.aiName,

@@ -41,6 +41,8 @@ type RawQuestionInput = {
   required?: unknown;
   options?: unknown;
   followUpEnabled?: unknown;
+  description?: unknown;
+  timeLimitSeconds?: unknown;
 };
 
 function parseQuestionInputs(body: unknown): RawQuestionInput[] | Response {
@@ -70,6 +72,8 @@ function normalizeOne(
       isRequired: boolean;
       options: string[] | null;
       probeOnShort: boolean;
+      description: string | null;
+      timeLimitSeconds: number | null;
     }
   | Response {
   const text =
@@ -119,7 +123,33 @@ function normalizeOne(
       ? true
       : Boolean(raw.followUpEnabled);
 
-  return { order, text, type, isRequired, options, probeOnShort };
+  const description =
+    typeof raw.description === "string" && raw.description.trim()
+      ? raw.description.trim().slice(0, 500)
+      : null;
+  let timeLimitSeconds: number | null = null;
+  if (raw.timeLimitSeconds !== undefined && raw.timeLimitSeconds !== null) {
+    const n = Number(raw.timeLimitSeconds);
+    if (!Number.isInteger(n) || n < 30 || n > 3600) {
+      return apiError(
+        "BAD_REQUEST",
+        "timeLimitSeconds must be an integer between 30 and 3600",
+        400,
+      );
+    }
+    timeLimitSeconds = n;
+  }
+
+  return {
+    order,
+    text,
+    type,
+    isRequired,
+    options,
+    probeOnShort,
+    description,
+    timeLimitSeconds,
+  };
 }
 
 export async function GET(
@@ -186,6 +216,8 @@ export async function POST(
     isRequired: boolean;
     options: string[] | null;
     probeOnShort: boolean;
+    description: string | null;
+    timeLimitSeconds: number | null;
   }> = [];
 
   for (const raw of parsed) {
@@ -199,6 +231,8 @@ export async function POST(
       isRequired: normalized.isRequired,
       options: normalized.options,
       probeOnShort: normalized.probeOnShort,
+      description: normalized.description,
+      timeLimitSeconds: normalized.timeLimitSeconds,
     });
     if (raw.order === undefined || raw.order === null) {
       nextOrder = normalized.order + 1;

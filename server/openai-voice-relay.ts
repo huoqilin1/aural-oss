@@ -10,6 +10,7 @@
 import { randomUUID } from "crypto";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
+import { createClient } from "@supabase/supabase-js";
 import { createLogger } from "../src/lib/logger";
 import {
     DEFAULT_TTS_BARGE_IN_MIN_AUDIO_BYTES,
@@ -29,6 +30,15 @@ const log = createLogger("openai-relay");
 
 config({ path: ".env.local", override: true });
 config({ path: ".env" });
+
+const dynamicQuestionClient =
+  process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(
+        process.env.SUPABASE_URL,
+        process.env.SUPABASE_SERVICE_ROLE_KEY,
+        { auth: { autoRefreshToken: false, persistSession: false } },
+      )
+    : null;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -197,6 +207,7 @@ function isCodingDoneSignal(text: string): boolean {
 // ── Interview context type ───────────────────────────────────────────
 
 interface InterviewContext {
+  interviewId?: string;
   title: string;
   objective?: string | null;
   aiName: string;
@@ -720,7 +731,7 @@ async function handleMicTest(browserWs: WebSocket) {
 // ── Interview handler ───────────────────────────────────────────────
 
 async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
-  const sortedQuestions = ctx.questions.sort((a, b) => a.order - b.order);
+  let sortedQuestions = [...ctx.questions].sort((a, b) => a.order - b.order);
   const isZh = isChineseInterview(ctx);
   let currentQuestionIndex = ctx.startQuestionIndex ?? 0;
   let questionEnteredAt = Date.now();
@@ -735,6 +746,53 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   let oaiSessionStart = Date.now();
   let reconnecting = false;
   let browserClosed = false;
+  let questionRefreshInFlight = false;
+
+  async function refreshDynamicQuestions(): Promise<boolean> {
+    if (!ctx.interviewId || !dynamicQuestionClient || questionRefreshInFlight) {
+      return false;
+    }
+    questionRefreshInFlight = true;
+    try {
+      const { data, error } = await dynamicQuestionClient
+        .from("questions")
+        .select("text,type,description,options,starterCode,order")
+        .eq("interviewId", ctx.interviewId)
+        .order("order", { ascending: true });
+      if (error) {
+        log.warn(`Dynamic question refresh failed: ${error.message}`);
+        return false;
+      }
+      const incoming = (data ?? []).map((row) => ({
+        text: String(row.text || ""),
+        type: String(row.type || "OPEN_ENDED"),
+        description: typeof row.description === "string" ? row.description : null,
+        options: row.options as { options: string[]; allowMultiple?: boolean } | null,
+        starterCode: row.starterCode as { language: string; code: string } | null,
+        order: Number(row.order || 0),
+      })).filter((row) => row.text);
+      if (incoming.length <= sortedQuestions.length) return false;
+      for (let index = 0; index <= currentQuestionIndex; index += 1) {
+        if (
+          sortedQuestions[index]
+          && incoming[index]
+          && sortedQuestions[index].text !== incoming[index].text
+        ) {
+          log.warn("Rejected dynamic question refresh that changed an active question");
+          return false;
+        }
+      }
+      sortedQuestions = incoming;
+      send({ type: "question_count_update", totalQuestions: sortedQuestions.length });
+      log.info(`Dynamic questions refreshed: total=${sortedQuestions.length}`);
+      return true;
+    } finally {
+      questionRefreshInFlight = false;
+    }
+  }
+  const dynamicQuestionTimer = ctx.interviewId
+    ? setInterval(() => { refreshDynamicQuestions().catch(log.error); }, 2_000)
+    : null;
 
   let inputTranscriptBuffer = "";
   let outputTranscriptBuffer = "";
@@ -1569,6 +1627,20 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               const userRequested = args.userRequested === true;
               log.info(`OpenAI called signal_question_change → Q${newIdx + 1}${userRequested ? " (user requested)" : ""}`);
 
+              if (
+                newIdx >= sortedQuestions.length
+                && ctx.interviewId
+                && sortedQuestions.length <= 1
+              ) {
+                refreshDynamicQuestions().catch(log.error);
+                pendingFunctionCalls.push({
+                  callId: msg.call_id,
+                  name: msg.name,
+                  args: "The remaining structured questions are still loading. Continue the current question briefly and try the transition again shortly; do not end the interview.",
+                });
+                break;
+              }
+
               // Already on the requested question — no-op, just tell the model.
               if (newIdx >= 0 && newIdx < sortedQuestions.length && newIdx === currentQuestionIndex) {
                 log.info(`Already on Q${newIdx + 1}, ignoring duplicate signal_question_change`);
@@ -2265,6 +2337,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     browserClosed = true;
     clearInterval(keepaliveTimer);
     clearInterval(livenessTimer);
+    if (dynamicQuestionTimer) clearInterval(dynamicQuestionTimer);
     clearPendingTransition();
     clearQuestionPrompt();
     cleanupVolcAsr();

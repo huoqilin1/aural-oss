@@ -21,6 +21,7 @@
 import { randomUUID } from "crypto";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
+import { createClient } from "@supabase/supabase-js";
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
 import { callRelayLLM, logRelayLlmStartup } from "./relay-llm";
@@ -60,6 +61,15 @@ const log = createLogger("voice-relay");
 
 config({ path: ".env.local", override: true });
 config({ path: ".env" });
+
+const dynamicQuestionClient =
+  process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+    ? createClient(
+        process.env.SUPABASE_URL,
+        process.env.SUPABASE_SERVICE_ROLE_KEY,
+        { auth: { autoRefreshToken: false, persistSession: false } },
+      )
+    : null;
 
 // AbortController.abort() in Node.js can cause unhandled rejections from
 // fetch internals — these are expected during TTS barge-in cancellation.
@@ -217,6 +227,7 @@ if (!ASR_ACCESS_TOKEN && !ASR_API_KEY) {
 // ── Interview context type ──────────────────────────────────────────
 
 interface InterviewContext {
+  interviewId?: string;
   title: string;
   objective?: string | null;
   aiName: string;
@@ -1151,7 +1162,57 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     });
   }
 
-  const sortedQuestions = ctx.questions.sort((a, b) => a.order - b.order);
+  let sortedQuestions = [...ctx.questions].sort((a, b) => a.order - b.order);
+  let questionRefreshInFlight = false;
+  async function refreshDynamicQuestions(): Promise<boolean> {
+    if (!ctx.interviewId || !dynamicQuestionClient || questionRefreshInFlight) {
+      return false;
+    }
+    questionRefreshInFlight = true;
+    try {
+      const { data, error } = await dynamicQuestionClient
+        .from("questions")
+        .select("text,type,description,options,timeLimitSeconds,order")
+        .eq("interviewId", ctx.interviewId)
+        .order("order", { ascending: true });
+      if (error) {
+        log.warn(`Dynamic question refresh failed: ${error.message}`);
+        return false;
+      }
+      const incoming = (data ?? []).map((row) => ({
+        text: String(row.text || ""),
+        type: String(row.type || "OPEN_ENDED"),
+        description: typeof row.description === "string" ? row.description : null,
+        options: row.options as { options: string[]; allowMultiple?: boolean } | null,
+        timeLimitSeconds:
+          typeof row.timeLimitSeconds === "number" ? row.timeLimitSeconds : null,
+        order: Number(row.order || 0),
+      })).filter((row) => row.text);
+      if (incoming.length <= sortedQuestions.length) return false;
+      for (let index = 0; index <= currentQuestionIndex; index += 1) {
+        if (
+          sortedQuestions[index]
+          && incoming[index]
+          && sortedQuestions[index].text !== incoming[index].text
+        ) {
+          log.warn("Rejected dynamic question refresh that changed an active question");
+          return false;
+        }
+      }
+      sortedQuestions = incoming;
+      browserWs.send(JSON.stringify({
+        type: "question_count_update",
+        totalQuestions: sortedQuestions.length,
+      }));
+      log.info(`Dynamic questions refreshed: total=${sortedQuestions.length}`);
+      return true;
+    } finally {
+      questionRefreshInFlight = false;
+    }
+  }
+  const dynamicQuestionTimer = ctx.interviewId
+    ? setInterval(() => { refreshDynamicQuestions().catch(log.error); }, 2_000)
+    : null;
   const configIsZh = isChineseInterview(ctx);
   let isZh = configIsZh;
 
@@ -2046,6 +2107,28 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     }
     const transitionId = ++transitionGeneration;
     isTransitioning = true;
+
+    // A candidate may finish the fixed opening before personalized questions
+    // arrive.  Keep the current question active instead of treating the
+    // opening-only snapshot as a completed interview.
+    if (ctx.interviewId && sortedQuestions.length <= 1) {
+      const waitUntil = Date.now() + 12_000;
+      while (sortedQuestions.length <= 1 && Date.now() < waitUntil) {
+        await refreshDynamicQuestions();
+        if (sortedQuestions.length > 1) break;
+        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      }
+      if (sortedQuestions.length <= 1) {
+        isTransitioning = false;
+        await speakAndHandle(
+          isZh
+            ? "后续题目正在整理中，请再补充一个最能体现你能力的具体结果，我会继续准备下一题。"
+            : "The remaining questions are still being prepared. Please add one concrete result that best demonstrates your ability while I prepare the next question.",
+          { trackInTranscript: false },
+        );
+        return;
+      }
+    }
     clearPendingAsrFinal();
     clearSilenceAutoSkip();
 
@@ -2071,6 +2154,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         pendingLastQuestionTimeout = null;
       }
 
+      await refreshDynamicQuestions();
       currentQuestionIndex++;
 
       if (currentQuestionIndex < sortedQuestions.length) {
@@ -3034,6 +3118,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     settleAllWhiteboardSnapshotRequests(false);
     cancelTts();
     if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
+    if (dynamicQuestionTimer) clearInterval(dynamicQuestionTimer);
     if (finalResponseTimeout) clearTimeout(finalResponseTimeout);
     if (pendingLastQuestionTimeout) clearTimeout(pendingLastQuestionTimeout);
     if (asrAlive && asrWs && asrWs.readyState === WebSocket.OPEN) {

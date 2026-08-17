@@ -25,6 +25,7 @@ const ASR_PROCESSING_ACTIVE_SPEECH_HOLD_MS = 1_600;
 const ASR_PROCESSING_AUDIO_ACTIVITY_RMS_THRESHOLD = 0.018;
 
 export interface InterviewContext {
+  interviewId?: string;
   title: string;
   objective?: string | null;
   aiName: string;
@@ -763,6 +764,14 @@ export function useVoice({
             }));
           onQuestionChange?.(idx, total);
           log.info(`Question ${idx + 1}/${total}`);
+          break;
+        }
+
+        case "question_count_update": {
+          const total = Number(msg.totalQuestions || 0);
+          if (total > 0) {
+            setState((s) => ({ ...s, totalQuestions: Math.max(s.totalQuestions, total) }));
+          }
           break;
         }
 

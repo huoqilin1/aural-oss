@@ -13,6 +13,27 @@ const log = createLogger("api/v1/generate-questions");
 // 招聘一面出题:深度思考模型(最新深度版),按岗位+简历提前出题。
 // 现场追问走另一条快线(relay-llm,deepseek-v4-flash),不在这里。
 const RECRUIT_GENERATOR_MODEL = "deepseek-v4-pro";
+// The fixed opening is already usable.  Do not let a slow deep model keep the
+// remaining interview unavailable: fall back to the balanced blueprint within
+// the public 30-second preparation target.
+const GENERATION_BUDGET_MS = 18_000;
+
+async function withGenerationBudget<T>(promise: Promise<T>): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("generation_budget_exceeded")),
+          GENERATION_BUDGET_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
 
 function parseJsonSafe(raw: string): unknown {
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
@@ -58,6 +79,7 @@ function buildRecruitPrompt(opts: {
   resumeQuestions: number;
   jobQuestions: number;
   expertExamples?: Array<{ question?: string; answer?: string }>;
+  preserveOpening?: boolean;
 }) {
   const {
     jobTitle,
@@ -67,6 +89,7 @@ function buildRecruitPrompt(opts: {
     resumeQuestions,
     jobQuestions,
     expertExamples,
+    preserveOpening,
   } = opts;
   const expertBlock =
     expertExamples && expertExamples.length
@@ -85,8 +108,8 @@ function buildRecruitPrompt(opts: {
       content: `你是一位资深的招聘一面出题官。请为一位候选人设计 AI 一面（结构化岗位面试）的题目。全部用中文。
 
 要求:
-1. 固定生成 8 道主问题，顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:
-   1) communication: 用大约 3 分钟自我介绍，观察信息组织与表达；
+1. ${preserveOpening ? "第 1 题 communication 已由系统固定写入；只生成第 2 至第 8 题，严禁再次生成 communication 或自我介绍题" : "固定生成 8 道主问题"}，顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:
+   ${preserveOpening ? "" : "1) communication: 用大约 3 分钟自我介绍，观察信息组织与表达；"}
    2) core_experience: 从简历选最相关的一段经历，核验本人职责、行动和量化结果；
    3) job_duty_primary: 核验岗位最核心职责；
    4) job_duty_secondary: 核验岗位另一项重要职责或跨团队协作；
@@ -94,7 +117,7 @@ function buildRecruitPrompt(opts: {
    6) ai_collaboration: 核验如何用 AI 改造工作，而不是只问是否用过工具；
    7) learning: 核验学习速度、复盘和迁移能力；
    8) motivation_stability: 核验求职动机、岗位理解与稳定性。
-2. 除第 1 题外，每题都要结合岗位或简历中的具体证据；简历没有的信息不得臆造。
+2. 每题都要结合岗位或简历中的具体证据；简历没有的信息不得臆造。
 3. 全部用 OPEN_ENDED 类型，一题只考一个主要方向；不同题不得换一种说法重复追问同一段经历。
 4. 整场目标约 ${durationMinutes} 分钟，系统全场最多只允许 2 次追问，因此主问题必须独立、完整、可直接作答。${expertBlock ? `
 5. 下面给了资深面试官(王总/凌总等专家)在本岗位问过的「经典问答范例」。请学习这些范例的提问深度、角度和挖人方式,出题向这个水准看齐——可借鉴角度,但要结合本候选人简历,不要照抄。` : ""}
@@ -167,6 +190,7 @@ export async function POST(
   const expertExamples = Array.isArray(body.expertExamples)
     ? (body.expertExamples as Array<{ question?: string; answer?: string }>).slice(0, 8)
     : [];
+  const preserveOpening = body.preserveOpening === true;
 
   if (!jobTitle && !resumeText) {
     return apiError("BAD_REQUEST", "jobTitle 或 resumeText 至少要有一个", 400);
@@ -183,19 +207,24 @@ export async function POST(
       resumeQuestions,
       jobQuestions,
       expertExamples,
+      preserveOpening,
     });
-    const resp = await provider.generateResponse({
-      messages,
-      temperature: 0.5,
-      maxTokens: 8000,
-      model: RECRUIT_GENERATOR_MODEL,
-    });
+    const resp = await withGenerationBudget(
+      provider.generateResponse({
+        messages,
+        temperature: 0.5,
+        maxTokens: preserveOpening ? 4500 : 6000,
+        model: RECRUIT_GENERATOR_MODEL,
+      }),
+    );
     generated = parseJsonSafe(resp.content) as {
       questions?: Array<{ text?: unknown; dimension?: unknown }>;
     };
   } catch (err) {
     log.error("招聘出题失败:", err);
-    return apiError("INTERNAL_ERROR", "AI 出题失败", 500);
+    // A provider failure must not strand a candidate after the fixed opening.
+    // The deterministic blueprint below is a complete, usable fallback.
+    generated = { questions: [] };
   }
 
   const rawQs = Array.isArray(generated?.questions) ? generated.questions : [];
@@ -249,10 +278,12 @@ export async function POST(
     }),
   );
   const usedQuestionTexts = new Set<string>();
-  const questions = blueprint.map((item, index) => {
+  const questions = blueprint
+    .filter((item) => !preserveOpening || item.key !== "communication")
+    .map((item, index) => {
     const generatedText = generatedByDimension.get(item.key);
     let text =
-      index === 0 && (!generatedText || !/自我介绍|介绍一下/.test(generatedText))
+      item.key === "communication" && (!generatedText || !/自我介绍|介绍一下/.test(generatedText))
         ? item.fallback
         : generatedText || item.fallback;
     const normalized = text.toLocaleLowerCase().replace(/[\s，。！？、；：,.!?;:()（）【】\[\]"“”'‘’]/g, "");
@@ -261,7 +292,31 @@ export async function POST(
       text.toLocaleLowerCase().replace(/[\s，。！？、；：,.!?;:()（）【】\[\]"“”'‘’]/g, ""),
     );
     return { ...item, text };
-  });
+    });
+
+  const { data: existingRows, error: existingError } = await supabaseAdmin
+    .from("questions")
+    .select("order,description,text")
+    .eq("interviewId", interviewId)
+    .order("order", { ascending: true });
+  if (existingError) {
+    return apiError("INTERNAL_ERROR", existingError.message, 500);
+  }
+  const existingDimensions = new Set(
+    (existingRows ?? []).flatMap((row) => {
+      const description = typeof row.description === "string" ? row.description : "";
+      return description.startsWith("oprun_dimension:")
+        ? [description.slice("oprun_dimension:".length)]
+        : [];
+    }),
+  );
+  if (preserveOpening && !existingDimensions.has("communication")) {
+    return apiError(
+      "CONFLICT",
+      "preserveOpening requires an existing communication opening question",
+      409,
+    );
+  }
 
   const { data: maxRow } = await supabaseAdmin
     .from("questions")
@@ -272,7 +327,9 @@ export async function POST(
     .maybeSingle();
 
   let nextOrder = (maxRow?.order ?? -1) + 1;
-  const rows = questions.map((question) => ({
+  const rows = questions
+    .filter((question) => !existingDimensions.has(question.key))
+    .map((question) => ({
     interviewId,
     order: nextOrder++,
     text: question.text,
@@ -284,7 +341,7 @@ export async function POST(
     timeLimitSeconds: question.seconds,
   }));
   // 候选人反问环节(2026-06-27 王总拍板):一面最后让候选人问小君;小君收集问题、不追问候选人(probeOnShort=false),答疑交给二面 HR
-  rows.push({
+  if (!existingDimensions.has("candidate_questions")) rows.push({
     interviewId,
     order: nextOrder++,
     text: "最后,你有没有什么想了解的?关于岗位、团队、公司,想问的都可以说出来,我会记下来,二面的时候 HR 会当面跟你详细解答。",
@@ -295,6 +352,10 @@ export async function POST(
     description: "oprun_dimension:candidate_questions",
     timeLimitSeconds: 90,
   });
+
+  if (rows.length === 0) {
+    return Response.json({ data: { count: 0 } });
+  }
 
   const { data: created, error } = await supabaseAdmin
     .from("questions")
