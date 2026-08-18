@@ -16,7 +16,6 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -428,7 +427,7 @@ interface VoiceInterfaceProps {
   chatEnabled?: boolean;
   onComplete?: () => void;
   videoMode?: boolean;
-  /** 候选人姓名(招聘语音面顶部显示「名字 · 岗位」) */
+  /** 候选人姓名（保留接口兼容；候选人面试页不展示个人信息） */
   candidateName?: string;
   /** Render in static preview mode — shows full layout without connecting */
   preview?: boolean;
@@ -451,7 +450,6 @@ export function VoiceInterface({
   chatEnabled = false,
   onComplete,
   videoMode = false,
-  candidateName,
   preview = false,
 }: VoiceInterfaceProps) {
   const { resolvedTheme } = useTheme();
@@ -472,7 +470,7 @@ export function VoiceInterface({
   const [chatOpen, setChatOpen] = useState(false);
   const [isStartingInterview, setIsStartingInterview] = useState(false);
   const [desktopTranscriptCollapsed, setDesktopTranscriptCollapsed] = useState(false);
-  const [mobileTranscriptCollapsed, setMobileTranscriptCollapsed] = useState(false);
+  const [mobileTranscriptCollapsed, setMobileTranscriptCollapsed] = useState(true);
   const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<Message[]>([]);
   const chatInputRef = useRef<HTMLInputElement>(null);
@@ -1379,11 +1377,37 @@ export function VoiceInterface({
     const s = totalSec % 60;
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
-  const isTimeLow = remainingSeconds !== null && remainingSeconds <= 60;
+  const isTimeCritical = remainingSeconds !== null && remainingSeconds <= 60;
+  const isTimeWarning =
+    remainingSeconds !== null && remainingSeconds <= 5 * 60 && !isTimeCritical;
   const elapsedSeconds =
     remainingSeconds !== null && durationMinutes
       ? Math.max(0, durationMinutes * 60 - remainingSeconds)
       : 0;
+  const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(interviewTitle);
+  const conciseInterviewTitle = interviewTitle.replace(/^数君招聘\s*·\s*/, "");
+  const displayInterviewTitle = isOprunRecruitmentInterview
+    ? `OpRun AI 面试 · ${conciseInterviewTitle}`
+    : conciseInterviewTitle;
+  const targetDurationMinutes = durationMinutes === 32 ? 30 : durationMinutes;
+  const durationDescription = durationMinutes
+    ? targetDurationMinutes !== durationMinutes
+      ? `${targetDurationMinutes} 分钟目标 · ${durationMinutes} 分钟硬截止`
+      : `${durationMinutes} 分钟上限`
+    : null;
+  const interviewActivityLabel = preview
+    ? "预览"
+    : !voice.isConnected
+      ? "正在连接"
+      : voice.isSpeaking
+        ? `${aiName} 正在提问`
+        : voice.isProcessing
+          ? "AI 正在分析回答"
+          : voice.isTransitioning
+            ? "AI 正在准备下一题"
+            : voice.isListening
+              ? "正在听取回答"
+              : "面试进行中";
 
   useEffect(() => {
     if (!farewellReadyToClose || locallyCompleted) return;
@@ -1611,64 +1635,104 @@ export function VoiceInterface({
         </div>
       )}
 
-      {/* Header */}
-      <div className="shrink-0 border-b bg-card px-3 py-2 md:px-6 md:py-3">
-        <div className="flex items-center justify-between">
-          <div className="mr-2 min-w-0 flex-1">
-            <h1 className="truncate text-sm font-semibold md:text-base">{candidateName ? `${candidateName} · ${interviewTitle.replace(/^数君招聘\s*·\s*/, "")}` : interviewTitle}</h1>
-            <p className="hidden text-xs text-muted-foreground md:block">
-              {aiName} 语音测试
-            </p>
+      {/* Candidate interview overview: clear timing, progress and persistent question. */}
+      <div className="shrink-0 border-b bg-muted/20">
+        <div className="flex items-center justify-between gap-3 border-b bg-card px-3 py-3 md:px-6 md:py-4">
+          <div className="flex min-w-0 items-center gap-3 md:gap-4">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/20 text-xl font-bold text-primary md:h-14 md:w-14 md:text-2xl">
+              O
+            </div>
+            <div className="min-w-0">
+              <h1 className="truncate text-base font-bold text-foreground md:text-2xl">
+                {displayInterviewTitle}
+              </h1>
+              <p className="mt-0.5 hidden text-sm text-muted-foreground sm:block">
+                系统正在记录并分析回答，题目会始终保留在页面中
+              </p>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             {videoMode && recording.isRecording && (
-              <div className="flex items-center gap-1.5 rounded-full bg-destructive/10 px-2.5 py-0.5">
+              <div className="flex items-center gap-1.5 rounded-full bg-destructive/10 px-2.5 py-1">
                 <div className="h-2 w-2 animate-pulse rounded-full bg-destructive" />
                 <span className="text-[10px] font-medium text-destructive">REC</span>
               </div>
             )}
-            <Badge variant={preview ? "outline" : voice.isConnected ? "default" : "secondary"}>
-              {preview ? "预览" : voice.isConnected ? "已连接" : "已断开"}
-            </Badge>
+            <div className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold md:px-4 md:py-2 md:text-sm ${voice.isConnected ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-border bg-muted text-muted-foreground"}`}>
+              <span className={`h-2 w-2 rounded-full ${voice.isConnected ? "bg-emerald-500" : "bg-muted-foreground"}`} />
+              <span className="hidden sm:inline">{interviewActivityLabel}</span>
+            </div>
             <IntervieweeHelpPopover mode="voice" />
           </div>
         </div>
-        {/* Question progress and prominent hybrid timing. */}
-        <div className="mt-2 flex flex-wrap items-center gap-3">
-          {voice.totalQuestions > 0 && (
-            <>
-              <Progress value={progress} className="h-1.5 flex-1" />
-              <span className="shrink-0 text-xs font-medium text-muted-foreground">
-                Q{voice.currentQuestionIndex + 1} / {voice.totalQuestions}
-              </span>
-            </>
-          )}
-          {remainingSeconds !== null && (
-            <div className={`flex shrink-0 items-center gap-2 rounded-lg border px-3 py-1.5 text-sm font-semibold tabular-nums ${isTimeLow ? "border-destructive/30 bg-destructive/10 text-destructive" : "border-border bg-muted/60 text-foreground"}`}>
-              <Clock className="h-4 w-4" />
-              <span>已用 {formatTime(elapsedSeconds)}</span>
-              <span className="text-muted-foreground">/</span>
-              <span>剩余 {formatTime(remainingSeconds)}</span>
+
+        <div className="space-y-3 px-3 py-3 md:px-6 md:py-4">
+          <div className="grid gap-4 xl:grid-cols-[minmax(220px,0.58fr)_minmax(0,1.42fr)] xl:items-stretch">
+            {remainingSeconds !== null && (
+              <div className={`rounded-2xl border bg-card px-4 py-3 md:px-5 md:py-4 ${isTimeCritical ? "border-destructive/40" : isTimeWarning ? "border-amber-500/40" : "border-border"}`}>
+                <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground md:text-sm">
+                  <Clock className="h-4 w-4" />
+                  剩余时间
+                </div>
+                <div className={`mt-1 text-4xl font-bold tracking-tight tabular-nums md:text-6xl ${isTimeCritical ? "text-destructive" : isTimeWarning ? "text-amber-700 dark:text-amber-300" : "text-foreground"}`}>
+                  {formatTime(remainingSeconds)}
+                </div>
+                {durationDescription && (
+                  <p className="mt-1 text-xs text-muted-foreground md:text-sm">
+                    {durationDescription}
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div className="space-y-3">
+              {voice.totalQuestions > 0 && (
+                <div>
+                  <Progress value={progress} className="h-2.5" />
+                  <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground md:text-sm">
+                    <span>已进行 {Math.round(progress)}%</span>
+                    <span>第 {voice.currentQuestionIndex + 1} / {voice.totalQuestions} 题</span>
+                  </div>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-xl border bg-card px-4 py-3">
+                  <div className="text-xs text-muted-foreground md:text-sm">全场已用</div>
+                  <div className="mt-1 text-xl font-bold tabular-nums md:text-3xl">
+                    {formatTime(elapsedSeconds)}
+                  </div>
+                </div>
+                <div className="rounded-xl border bg-card px-4 py-3">
+                  <div className="text-xs text-muted-foreground md:text-sm">本题已用</div>
+                  <div className="mt-1 text-xl font-bold tabular-nums md:text-3xl">
+                    {formatTime(questionElapsedSeconds)}
+                  </div>
+                </div>
+              </div>
+              <div className={`rounded-xl border-l-4 px-4 py-2.5 text-xs md:text-sm ${isTimeCritical ? "border-destructive bg-destructive/10 text-destructive" : isTimeWarning ? "border-amber-500 bg-amber-500/10 text-amber-800 dark:text-amber-200" : "border-primary/60 bg-primary/5 text-muted-foreground"}`}>
+                剩余 5 分钟时转为黄色提醒；剩余 1 分钟时转为红色强提醒，但不会遮挡题目或打断回答。
+              </div>
+            </div>
+          </div>
+
+          {/* Current question stays fully visible while the candidate answers. */}
+          {currentQuestionText && (
+            <div className="rounded-2xl border border-primary/20 bg-card px-4 py-3 md:px-5 md:py-4">
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-muted-foreground md:text-sm">
+                <span className="text-primary">第 {voice.currentQuestionIndex + 1} 题 / 共 {voice.totalQuestions} 题</span>
+                <span className="rounded-lg bg-muted px-3 py-1.5 tabular-nums">
+                  本题建议用时 {currentQVoice?.timeLimitSeconds
+                    ? formatTime(currentQVoice.timeLimitSeconds)
+                    : "不限制"}
+                </span>
+              </div>
+              <div className="text-xs font-semibold text-muted-foreground">当前题目 · 始终显示</div>
+              <p className="mt-2 text-base font-bold leading-7 text-foreground md:text-xl md:leading-8">
+                {currentQuestionText}
+              </p>
             </div>
           )}
         </div>
-        {/* Current question stays fully visible while the candidate answers. */}
-        {currentQuestionText && (
-          <div className="mt-2 rounded-lg border border-primary/20 bg-primary/5 px-3 py-2.5 md:px-4">
-            <div className="mb-1 flex flex-wrap items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">
-              <span>当前题目 · Q{voice.currentQuestionIndex + 1}</span>
-              <span className="tabular-nums">
-                本题已用 {formatTime(questionElapsedSeconds)}
-                {currentQVoice?.timeLimitSeconds
-                  ? ` · 建议 ${formatTime(currentQVoice.timeLimitSeconds)}`
-                  : ""}
-              </span>
-            </div>
-            <p className="text-sm font-medium leading-6 text-foreground md:text-base md:leading-7">
-              {currentQuestionText}
-            </p>
-          </div>
-        )}
       </div>
 
       {/* Error display */}

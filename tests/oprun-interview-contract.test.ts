@@ -66,8 +66,18 @@ test("OpRun recruitment relay caps follow-ups across the entire interview", () =
 
 test("candidate interface keeps the full question and hybrid timing visible", () => {
   assert.match(voiceInterface, /本题已用/);
-  assert.match(voiceInterface, /剩余 \{formatTime\(remainingSeconds\)\}/);
-  assert.match(voiceInterface, /当前题目 · Q/);
+  assert.match(voiceInterface, /剩余时间/);
+  assert.match(voiceInterface, /formatTime\(remainingSeconds\)/);
+  assert.match(voiceInterface, /targetDurationMinutes.*分钟目标/);
+  assert.match(voiceInterface, /durationMinutes.*分钟硬截止/);
+  assert.match(voiceInterface, /剩余 5 分钟时转为黄色提醒/);
+  assert.match(voiceInterface, /剩余 1 分钟时转为红色强提醒/);
+  assert.match(voiceInterface, /当前题目 · 始终显示/);
+  assert.match(voiceInterface, /md:text-6xl/);
+  assert.match(
+    voiceInterface,
+    /mobileTranscriptCollapsed, setMobileTranscriptCollapsed\] = useState\(true\)/,
+  );
   assert.doesNotMatch(
     voiceInterface,
     /currentQuestionText[\s\S]{0,200}line-clamp-1/,
