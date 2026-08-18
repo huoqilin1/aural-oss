@@ -24,6 +24,10 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
+import {
+  isProgressiveOpeningOnly,
+  mergeExpandedQuestionSet,
+} from "../src/lib/voice/dynamic-question-sync";
 import { callRelayLLM, logRelayLlmStartup } from "./relay-llm";
 import {
     collapseInternalAsrRepetitions,
@@ -1164,6 +1168,47 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
   let sortedQuestions = [...ctx.questions].sort((a, b) => a.order - b.order);
   let questionRefreshInFlight = false;
+
+  function normalizeDynamicQuestions(rows: unknown): typeof sortedQuestions {
+    if (!Array.isArray(rows)) return [];
+    return rows.map((row) => {
+      const item = row as Record<string, unknown>;
+      return {
+        text: String(item.text || ""),
+        type: String(item.type || "OPEN_ENDED"),
+        description: typeof item.description === "string" ? item.description : null,
+        options: item.options as { options: string[]; allowMultiple?: boolean } | null,
+        timeLimitSeconds:
+          typeof item.timeLimitSeconds === "number" ? item.timeLimitSeconds : null,
+        order: Number(item.order || 0),
+      };
+    }).filter((row) => row.text);
+  }
+
+  function applyDynamicQuestionSet(rows: unknown, source: "database" | "browser"): boolean {
+    const incoming = normalizeDynamicQuestions(rows);
+    const merged = mergeExpandedQuestionSet(
+      sortedQuestions,
+      incoming,
+      currentQuestionIndex,
+    );
+    if (!merged) {
+      if (incoming.length > sortedQuestions.length) {
+        log.warn(`Rejected ${source} question refresh that changed an active question`);
+      }
+      return false;
+    }
+    sortedQuestions = merged;
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({
+        type: "question_count_update",
+        totalQuestions: sortedQuestions.length,
+      }));
+    }
+    log.info(`Dynamic questions refreshed from ${source}: total=${sortedQuestions.length}`);
+    return true;
+  }
+
   async function refreshDynamicQuestions(): Promise<boolean> {
     if (!ctx.interviewId || !dynamicQuestionClient || questionRefreshInFlight) {
       return false;
@@ -1179,33 +1224,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         log.warn(`Dynamic question refresh failed: ${error.message}`);
         return false;
       }
-      const incoming = (data ?? []).map((row) => ({
-        text: String(row.text || ""),
-        type: String(row.type || "OPEN_ENDED"),
-        description: typeof row.description === "string" ? row.description : null,
-        options: row.options as { options: string[]; allowMultiple?: boolean } | null,
-        timeLimitSeconds:
-          typeof row.timeLimitSeconds === "number" ? row.timeLimitSeconds : null,
-        order: Number(row.order || 0),
-      })).filter((row) => row.text);
-      if (incoming.length <= sortedQuestions.length) return false;
-      for (let index = 0; index <= currentQuestionIndex; index += 1) {
-        if (
-          sortedQuestions[index]
-          && incoming[index]
-          && sortedQuestions[index].text !== incoming[index].text
-        ) {
-          log.warn("Rejected dynamic question refresh that changed an active question");
-          return false;
-        }
-      }
-      sortedQuestions = incoming;
-      browserWs.send(JSON.stringify({
-        type: "question_count_update",
-        totalQuestions: sortedQuestions.length,
-      }));
-      log.info(`Dynamic questions refreshed: total=${sortedQuestions.length}`);
-      return true;
+      return applyDynamicQuestionSet(data ?? [], "database");
     } finally {
       questionRefreshInFlight = false;
     }
@@ -2111,8 +2130,8 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     // A candidate may finish the fixed opening before personalized questions
     // arrive.  Keep the current question active instead of treating the
     // opening-only snapshot as a completed interview.
-    if (ctx.interviewId && sortedQuestions.length <= 1) {
-      const waitUntil = Date.now() + 12_000;
+    if (isProgressiveOpeningOnly(sortedQuestions)) {
+      const waitUntil = Date.now() + 20_000;
       while (sortedQuestions.length <= 1 && Date.now() < waitUntil) {
         await refreshDynamicQuestions();
         if (sortedQuestions.length > 1) break;
@@ -2158,11 +2177,6 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       currentQuestionIndex++;
 
       if (currentQuestionIndex < sortedQuestions.length) {
-        const summary = transcriptSnapshot.length > 0
-          ? await summarizeQuestion(currentQ.text, transcriptSnapshot, isZh)
-          : "";
-        questionSummaries.push(summary);
-
         const nextQ = sortedQuestions[currentQuestionIndex];
         const transition = buildTransitionSayHello(currentQuestionIndex, nextQ, isZh);
 
@@ -2176,8 +2190,15 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         );
 
         log.info(`→ Q${currentQuestionIndex + 1}/${sortedQuestions.length}: ${nextQ.text.slice(0, 60)}...`);
-
-        await speakAndHandle(transition, { trackInTranscript: false });
+        const previousQuestionIndex = currentQuestionIndex - 1;
+        const summaryPromise = transcriptSnapshot.length > 0
+          ? summarizeQuestion(currentQ.text, transcriptSnapshot, isZh)
+          : Promise.resolve("");
+        const [, summary] = await Promise.all([
+          speakAndHandle(transition, { trackInTranscript: false }),
+          summaryPromise,
+        ]);
+        questionSummaries[previousQuestionIndex] = summary;
       } else {
         if (transcriptSnapshot.length > 0) {
           const lastSummary = await summarizeQuestion(currentQ.text, transcriptSnapshot, isZh);
@@ -3074,6 +3095,16 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
           handleUserUtterance(userText).catch(log.error);
           log.info(`Text input${source ? ` (${source})` : ""}: "${userText.slice(0, 60)}..."`);
         }
+      } else if (msg.type === "question_set_update") {
+        if (
+          ctx.interviewId
+          && typeof msg.interviewId === "string"
+          && msg.interviewId !== ctx.interviewId
+        ) {
+          log.warn("Rejected browser question refresh for a different interview");
+          return;
+        }
+        applyDynamicQuestionSet(msg.questions, "browser");
       } else if (msg.type === "next_question") {
         log.info("Browser requested next question");
         handleTransition().catch(log.error);

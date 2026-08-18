@@ -7,6 +7,7 @@ import { IntervieweeOnboarding } from "@/components/session/interviewee-onboardi
 import { PreparingScreen } from "@/components/session/preparing-screen";
 import { Card, CardContent } from "@/components/ui/card";
 import { trpc } from "@/lib/trpc/client";
+import { isProgressiveOpeningOnly } from "@/lib/voice/dynamic-question-sync";
 import { CheckCircle2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
@@ -39,6 +40,20 @@ export default function InviteSessionPage() {
     { token },
     { retry: false },
   );
+
+  const candidateInterview = (candidate.data as any)?.interview;
+  const isWaitingForGeneratedQuestions = isProgressiveOpeningOnly(
+    candidateInterview?.questions ?? [],
+  );
+  const refetchCandidate = candidate.refetch;
+
+  useEffect(() => {
+    if (!isWaitingForGeneratedQuestions) return;
+    const timer = window.setInterval(() => {
+      void refetchCandidate();
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [isWaitingForGeneratedQuestions, refetchCandidate]);
 
   useEffect(() => {
     if (candidate.isError) {
@@ -106,6 +121,7 @@ export default function InviteSessionPage() {
 
   if (useVoice) {
     const interviewContext = {
+      interviewId: interview.id,
       title: interview.title,
       objective: interview.objective,
       aiName: interview.aiName,

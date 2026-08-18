@@ -9,6 +9,10 @@ const generationRoute = readFileSync(
 const relay = readFileSync("server/voice-relay.ts", "utf8");
 const openAiRelay = readFileSync("server/openai-voice-relay.ts", "utf8");
 const candidateSession = readFileSync("src/app/i/[slug]/session/page.tsx", "utf8");
+const invitedCandidateSession = readFileSync(
+  "src/app/i/invite/[token]/session/page.tsx",
+  "utf8",
+);
 const voiceInterface = readFileSync(
   "src/components/session/voice-interface.tsx",
   "utf8",
@@ -47,16 +51,28 @@ test("progressive generation preserves the fixed opening and falls back safely",
 
 test("both voice relays refresh questions during an active candidate session", () => {
   assert.match(candidateSession, /interviewId: interview\.data\.id/);
+  assert.match(candidateSession, /refetchInterview\(\)/);
+  assert.match(invitedCandidateSession, /interviewId: interview\.id/);
+  assert.match(invitedCandidateSession, /refetchCandidate\(\)/);
   for (const source of [relay, openAiRelay]) {
     assert.match(source, /async function refreshDynamicQuestions/);
     assert.match(source, /type: "question_count_update"/);
+    assert.match(source, /type === "question_set_update"/);
+    assert.match(source, /isProgressiveOpeningOnly\(sortedQuestions\)/);
     assert.match(source, /2_000/);
-    assert.match(source, /Dynamic questions refreshed/);
+    assert.match(source, /Dynamic questions refreshed from/);
   }
   assert.match(relay, /await refreshDynamicQuestions\(\)/);
-  assert.match(relay, /const waitUntil = Date\.now\(\) \+ 12_000/);
+  assert.match(relay, /const waitUntil = Date\.now\(\) \+ 20_000/);
   assert.match(relay, /sortedQuestions\.length <= 1/);
   assert.match(openAiRelay, /do not end the interview/);
+});
+
+test("the browser pushes generated questions into an already-open relay", () => {
+  const voiceHook = readFileSync("src/hooks/use-voice.ts", "utf8");
+  assert.match(voiceHook, /type: "question_set_update"/);
+  assert.match(voiceHook, /questions,/);
+  assert.match(voiceHook, /Math\.max\(current\.totalQuestions, questions\.length\)/);
 });
 
 test("OpRun recruitment relay caps follow-ups across the entire interview", () => {

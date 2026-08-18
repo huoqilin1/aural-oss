@@ -94,6 +94,7 @@ interface TrackedMessage {
  * 8. On disconnect, all messages are saved to database
  */
 export function useVoice({
+  interviewId,
   sessionId,
   interviewContext,
   onTranscript,
@@ -121,6 +122,7 @@ export function useVoice({
   });
 
   const relayConnectorRef = useRef<RelayConnector<Record<string, unknown>> | null>(null);
+  const lastQuestionSetFingerprintRef = useRef("");
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -408,6 +410,31 @@ export function useVoice({
     },
     []
   );
+
+  useEffect(() => {
+    const questions = interviewContext.questions;
+    if (questions.length > 0) {
+      setState((current) => ({
+        ...current,
+        totalQuestions: Math.max(current.totalQuestions, questions.length),
+      }));
+    }
+
+    const connector = relayConnectorRef.current;
+    if (!connector?.isReady) return;
+
+    const fingerprint = JSON.stringify(
+      questions.map((question) => [question.order, question.text]),
+    );
+    if (fingerprint === lastQuestionSetFingerprintRef.current) return;
+
+    connector.sendJson({
+      type: "question_set_update",
+      interviewId,
+      questions,
+    });
+    lastQuestionSetFingerprintRef.current = fingerprint;
+  }, [interviewContext.questions, interviewId]);
 
   /** Connect to the voice relay server */
   const connect = useCallback(async () => {

@@ -10,6 +10,7 @@ import { PreparingScreen } from "@/components/session/preparing-screen";
 import { Card, CardContent } from "@/components/ui/card";
 import type { InterviewContext } from "@/hooks/use-voice";
 import { trpc } from "@/lib/trpc/client";
+import { isProgressiveOpeningOnly } from "@/lib/voice/dynamic-question-sync";
 import { CheckCircle2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
@@ -58,6 +59,19 @@ export default function SlugSessionPage() {
     { id: sessionId! },
     { enabled: !!sessionId, retry: false },
   );
+
+  const isWaitingForGeneratedQuestions = isProgressiveOpeningOnly(
+    interview.data?.questions ?? [],
+  );
+  const refetchInterview = interview.refetch;
+
+  useEffect(() => {
+    if (!isWaitingForGeneratedQuestions) return;
+    const timer = window.setInterval(() => {
+      void refetchInterview();
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [isWaitingForGeneratedQuestions, refetchInterview]);
 
   useEffect(() => {
     if (!sessionId || session.isError) {

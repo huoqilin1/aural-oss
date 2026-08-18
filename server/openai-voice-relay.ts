@@ -13,6 +13,10 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
 import { createLogger } from "../src/lib/logger";
 import {
+  isProgressiveOpeningOnly,
+  mergeExpandedQuestionSet,
+} from "../src/lib/voice/dynamic-question-sync";
+import {
     DEFAULT_TTS_BARGE_IN_MIN_AUDIO_BYTES,
     DEFAULT_TTS_BARGE_IN_MIN_AUDIO_MS,
     shouldAllowTtsBargeIn,
@@ -748,6 +752,40 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   let browserClosed = false;
   let questionRefreshInFlight = false;
 
+  function normalizeDynamicQuestions(rows: unknown): typeof sortedQuestions {
+    if (!Array.isArray(rows)) return [];
+    return rows.map((row) => {
+      const item = row as Record<string, unknown>;
+      return {
+        text: String(item.text || ""),
+        type: String(item.type || "OPEN_ENDED"),
+        description: typeof item.description === "string" ? item.description : null,
+        options: item.options as { options: string[]; allowMultiple?: boolean } | null,
+        starterCode: item.starterCode as { language: string; code: string } | null,
+        order: Number(item.order || 0),
+      };
+    }).filter((row) => row.text);
+  }
+
+  function applyDynamicQuestionSet(rows: unknown, source: "database" | "browser"): boolean {
+    const incoming = normalizeDynamicQuestions(rows);
+    const merged = mergeExpandedQuestionSet(
+      sortedQuestions,
+      incoming,
+      currentQuestionIndex,
+    );
+    if (!merged) {
+      if (incoming.length > sortedQuestions.length) {
+        log.warn(`Rejected ${source} question refresh that changed an active question`);
+      }
+      return false;
+    }
+    sortedQuestions = merged;
+    send({ type: "question_count_update", totalQuestions: sortedQuestions.length });
+    log.info(`Dynamic questions refreshed from ${source}: total=${sortedQuestions.length}`);
+    return true;
+  }
+
   async function refreshDynamicQuestions(): Promise<boolean> {
     if (!ctx.interviewId || !dynamicQuestionClient || questionRefreshInFlight) {
       return false;
@@ -763,29 +801,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
         log.warn(`Dynamic question refresh failed: ${error.message}`);
         return false;
       }
-      const incoming = (data ?? []).map((row) => ({
-        text: String(row.text || ""),
-        type: String(row.type || "OPEN_ENDED"),
-        description: typeof row.description === "string" ? row.description : null,
-        options: row.options as { options: string[]; allowMultiple?: boolean } | null,
-        starterCode: row.starterCode as { language: string; code: string } | null,
-        order: Number(row.order || 0),
-      })).filter((row) => row.text);
-      if (incoming.length <= sortedQuestions.length) return false;
-      for (let index = 0; index <= currentQuestionIndex; index += 1) {
-        if (
-          sortedQuestions[index]
-          && incoming[index]
-          && sortedQuestions[index].text !== incoming[index].text
-        ) {
-          log.warn("Rejected dynamic question refresh that changed an active question");
-          return false;
-        }
-      }
-      sortedQuestions = incoming;
-      send({ type: "question_count_update", totalQuestions: sortedQuestions.length });
-      log.info(`Dynamic questions refreshed: total=${sortedQuestions.length}`);
-      return true;
+      return applyDynamicQuestionSet(data ?? [], "database");
     } finally {
       questionRefreshInFlight = false;
     }
@@ -2093,6 +2109,10 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       }
       if (targetIdx >= sortedQuestions.length) {
         isTransitioning = false;
+        if (isProgressiveOpeningOnly(sortedQuestions)) {
+          void transitionToNextWhenReady(reason);
+          return;
+        }
         if (!interviewDone) {
           interviewDone = true;
           pendingInterviewComplete = true;
@@ -2126,6 +2146,41 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     }, 500);
   }
 
+  async function transitionToNextWhenReady(
+    reason: "button" | "user_request" = "button",
+  ) {
+    if (interviewDone || isTransitioning) return;
+    if (!isProgressiveOpeningOnly(sortedQuestions)) {
+      requestTransition(currentQuestionIndex + 1, "Next Question", reason);
+      return;
+    }
+
+    isTransitioning = true;
+    send({ type: "transitioning", direction: "next" });
+    const waitUntil = Date.now() + 20_000;
+    while (isProgressiveOpeningOnly(sortedQuestions) && Date.now() < waitUntil) {
+      await refreshDynamicQuestions();
+      if (!isProgressiveOpeningOnly(sortedQuestions)) break;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    isTransitioning = false;
+
+    if (isProgressiveOpeningOnly(sortedQuestions)) {
+      send({
+        type: "transition_cancelled",
+        direction: "next",
+        questionIndex: currentQuestionIndex,
+        totalQuestions: sortedQuestions.length,
+      });
+      sendQuestionPrompt(
+        "[SYSTEM] The remaining structured questions are still being prepared. Do not end the interview. Ask the participant to add one concrete, verifiable result while preparation continues.",
+      );
+      return;
+    }
+
+    requestTransition(currentQuestionIndex + 1, "Next Question", reason);
+  }
+
   function tryHandleExplicitUserNavigation(text: string): boolean {
     const userText = text.trim();
     if (!userText || isTransitioning || interviewDone) return false;
@@ -2138,6 +2193,10 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     }
 
     if (isFastNextRequest(userText) || isUserSkipRequest(userText)) {
+      if (isProgressiveOpeningOnly(sortedQuestions)) {
+        void transitionToNextWhenReady("user_request");
+        return true;
+      }
       const nextIdx = Math.min(currentQuestionIndex + 1, sortedQuestions.length);
       if (nextIdx === currentQuestionIndex) return false;
       log.info(`Fast-path NEXT transition from user: "${userText}"`);
@@ -2152,8 +2211,24 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     try {
       const msg = JSON.parse(data.toString());
 
+      if (msg.type === "question_set_update") {
+        if (
+          ctx.interviewId
+          && typeof msg.interviewId === "string"
+          && msg.interviewId !== ctx.interviewId
+        ) {
+          log.warn("Rejected browser question refresh for a different interview");
+          return;
+        }
+        applyDynamicQuestionSet(msg.questions, "browser");
+        return;
+      }
       if (msg.type === "next_question") {
         log.info("Browser requested next question");
+        if (isProgressiveOpeningOnly(sortedQuestions)) {
+          void transitionToNextWhenReady("button");
+          return;
+        }
         const nextIdx = Math.min(currentQuestionIndex + 1, sortedQuestions.length);
         if (nextIdx !== currentQuestionIndex) {
           requestTransition(nextIdx, "Next Question");
