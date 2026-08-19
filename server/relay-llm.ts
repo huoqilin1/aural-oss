@@ -11,9 +11,22 @@ import { createLogger } from "../src/lib/logger";
 
 const log = createLogger("relay-llm");
 
-export const RELAY_LLM_PRIMARY_MODEL = "deepseek-v4-pro";
-export const RELAY_LLM_FALLBACK_MODEL = "glm-5.3";
-const RELAY_LLM_LAST_RESORT_MODEL = "kimi-latest";
+// 模型策略（王总 2026-08-20）：
+// - DeepSeek 固定写死"深思考"变体（它有快反应/长反应/深思考三档，自动追新可能漂到
+//   快档；深思考是质量底线，禁止漂移）。
+// - GLM / Kimi 追各家最新版：检测到新版本（如 glm-5.2 → glm-5.3）就更新默认值。
+// - 所有 ID 均可环境变量覆盖（DEEPSEEK_MODEL / ZHIPU_MODEL / KIMI_MODEL /
+//   RECRUIT_GENERATOR_MODEL），升级改 env 即生效，无需改代码重发版。
+// 各默认值核查日期 2026-08-20。
+function deepseekRelayModel(): string {
+  return process.env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-pro";
+}
+function zhipuRelayModel(): string {
+  return process.env.ZHIPU_MODEL?.trim() || process.env.GLM_MODEL?.trim() || "glm-5.3";
+}
+function kimiRelayModel(): string {
+  return process.env.KIMI_MODEL?.trim() || "kimi-latest";
+}
 const ZHIPU_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
 const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
 const KIMI_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1";
@@ -123,7 +136,7 @@ function buildProviderChain(): RelayLlmEndpoint[] {
   const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim();
   if (deepseekKey) {
     chain.push({
-      model: RELAY_LLM_PRIMARY_MODEL,
+      model: deepseekRelayModel(),
       temperature,
       apiKey: deepseekKey,
       baseUrl: process.env.DEEPSEEK_BASE_URL?.trim() || DEEPSEEK_DEFAULT_BASE_URL,
@@ -134,7 +147,7 @@ function buildProviderChain(): RelayLlmEndpoint[] {
   const zhipuKey = process.env.ZHIPU_API_KEY?.trim() || process.env.GLM_API_KEY?.trim();
   if (zhipuKey) {
     chain.push({
-      model: RELAY_LLM_FALLBACK_MODEL,
+      model: zhipuRelayModel(),
       temperature,
       apiKey: zhipuKey,
       baseUrl: process.env.ZHIPU_BASE_URL?.trim() || ZHIPU_DEFAULT_BASE_URL,
@@ -145,7 +158,7 @@ function buildProviderChain(): RelayLlmEndpoint[] {
   const kimiKey = process.env.KIMI_API_KEY?.trim();
   if (kimiKey) {
     chain.push({
-      model: process.env.KIMI_MODEL?.trim() || RELAY_LLM_LAST_RESORT_MODEL,
+      model: kimiRelayModel(),
       temperature,
       apiKey: kimiKey,
       baseUrl: process.env.KIMI_BASE_URL?.trim() || KIMI_DEFAULT_BASE_URL,

@@ -10,9 +10,10 @@ import { createLogger } from "@/lib/logger";
 
 const log = createLogger("api/v1/generate-questions");
 
-// 招聘一面出题:深度思考模型(最新深度版),按岗位+简历提前出题。
-// 现场追问走另一条快线(relay-llm,deepseek-v4-flash),不在这里。
-const RECRUIT_GENERATOR_MODEL = "deepseek-v4-pro";
+// 招聘一面出题:深度思考模型,按岗位+简历提前出题。现场追问走 relay-llm,不在这里。
+// 模型策略(王总 2026-08-20):DeepSeek 固定写死"深思考"变体(三档中锁深思考,禁止漂移);
+// 其余模型追最新版。环境变量 RECRUIT_GENERATOR_MODEL 可覆盖,升级改 env 即生效。核查日期 2026-08-20。
+const RECRUIT_GENERATOR_MODEL = process.env.RECRUIT_GENERATOR_MODEL?.trim() || "deepseek-v4-pro";
 // The fixed opening is already usable.  The deep generator (deepseek-v4-pro,
 // up to 6000 tokens) routinely needs 10-20s; an 8s budget made it lose the
 // race by milliseconds and every session fell back to the blueprint
