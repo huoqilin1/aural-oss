@@ -37,16 +37,14 @@ test("OpRun recruitment generator preserves eight distinct dimensions", () => {
   assert.match(generationRoute, /AI 一面（结构化岗位面试）/);
 });
 
-test("progressive generation preserves the fixed opening and falls back safely", () => {
+test("progressive generation preserves Q1 and optional fallback Q2 safely", () => {
   assert.match(generationRoute, /const preserveOpening = body\.preserveOpening === true/);
-  assert.match(generationRoute, /const GENERATION_BUDGET_MS = 18_000/);
+  assert.match(generationRoute, /const preserveDimensions = Array\.isArray/);
+  assert.match(generationRoute, /preserveDimensions\.includes\(item\.key\)/);
+  assert.match(generationRoute, /const GENERATION_BUDGET_MS = 8_000/);
   assert.match(generationRoute, /withGenerationBudget\(/);
-  assert.match(
-    generationRoute,
-    /!preserveOpening \|\| item\.key !== "communication"/,
-  );
   assert.match(generationRoute, /generated = \{ questions: \[\] \}/);
-  assert.match(generationRoute, /existingDimensions\.has\("communication"\)/);
+  assert.match(generationRoute, /missingPreservedDimensions/);
 });
 
 test("both voice relays refresh questions during an active candidate session", () => {
@@ -63,9 +61,15 @@ test("both voice relays refresh questions during an active candidate session", (
     assert.match(source, /Dynamic questions refreshed from/);
   }
   assert.match(relay, /await refreshDynamicQuestions\(\)/);
-  assert.match(relay, /const waitUntil = Date\.now\(\) \+ 20_000/);
-  assert.match(relay, /sortedQuestions\.length <= 1/);
+  assert.match(relay, /const waitUntil = Date\.now\(\) \+ 10_000/);
+  assert.match(relay, /shouldWaitForQuestionExpansion\(sortedQuestions, currentQuestionIndex\)/);
+  assert.match(relay, /while \(isProgressiveOpeningOnly\(sortedQuestions\)/);
   assert.match(openAiRelay, /do not end the interview/);
+  assert.match(openAiRelay, /pendingProgressiveTransition/);
+  assert.match(
+    openAiRelay,
+    /!isProgressiveOpeningOnly\(sortedQuestions\) &&\s*currentQuestionIndex/,
+  );
 });
 
 test("the browser pushes generated questions into an already-open relay", () => {

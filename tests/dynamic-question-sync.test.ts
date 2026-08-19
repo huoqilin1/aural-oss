@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   isProgressiveOpeningOnly,
   mergeExpandedQuestionSet,
+  shouldWaitForQuestionExpansion,
 } from "../src/lib/voice/dynamic-question-sync";
 
 const opening = {
@@ -11,12 +12,36 @@ const opening = {
   description: "oprun_dimension:communication",
 };
 
-test("recognizes only the OpRun progressive opening as incomplete", () => {
+const openingWithFallback = [
+  opening,
+  { text: "条件式岗位过渡题", order: 1, description: "oprun_dimension:job_duty_primary" },
+];
+
+test("recognizes Q1 plus the optional fallback Q2 as incomplete", () => {
   assert.equal(isProgressiveOpeningOnly([opening]), true);
+  assert.equal(isProgressiveOpeningOnly(openingWithFallback), true);
   assert.equal(
     isProgressiveOpeningOnly([{ text: "独立单题", order: 0, description: null }]),
     false,
   );
+  assert.equal(
+    isProgressiveOpeningOnly([
+      ...openingWithFallback,
+      { text: "岗位协作", order: 2, description: "oprun_dimension:job_duty_secondary" },
+      { text: "核心经历", order: 3, description: "oprun_dimension:core_experience" },
+      { text: "问题解决", order: 4, description: "oprun_dimension:problem_solving" },
+      { text: "AI 协作", order: 5, description: "oprun_dimension:ai_collaboration" },
+      { text: "学习", order: 6, description: "oprun_dimension:learning" },
+      { text: "动机", order: 7, description: "oprun_dimension:motivation_stability" },
+    ]),
+    false,
+  );
+});
+
+test("advances from Q1 to an available fallback Q2 without waiting", () => {
+  assert.equal(shouldWaitForQuestionExpansion([opening], 0), true);
+  assert.equal(shouldWaitForQuestionExpansion(openingWithFallback, 0), false);
+  assert.equal(shouldWaitForQuestionExpansion(openingWithFallback, 1), true);
 });
 
 test("expands a live one-question snapshot without changing the active opening", () => {
@@ -45,4 +70,19 @@ test("rejects an expansion that mutates an already active question", () => {
     0,
   );
   assert.equal(merged, null);
+});
+
+test("expands a conditional fallback snapshot without changing answered questions", () => {
+  const generated = [
+    ...openingWithFallback,
+    { text: "岗位协作", order: 2, description: "oprun_dimension:job_duty_secondary" },
+    { text: "核心经历", order: 3, description: "oprun_dimension:core_experience" },
+    { text: "问题解决", order: 4, description: "oprun_dimension:problem_solving" },
+    { text: "AI 协作", order: 5, description: "oprun_dimension:ai_collaboration" },
+    { text: "学习", order: 6, description: "oprun_dimension:learning" },
+    { text: "动机", order: 7, description: "oprun_dimension:motivation_stability" },
+  ];
+  const merged = mergeExpandedQuestionSet(openingWithFallback, generated, 1);
+  assert.equal(merged?.length, 8);
+  assert.deepEqual(merged?.slice(0, 2), openingWithFallback);
 });

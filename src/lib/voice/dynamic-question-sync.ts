@@ -4,13 +4,45 @@ export interface DynamicQuestionLike {
   description?: string | null;
 }
 
+const OPRUN_MAIN_DIMENSIONS = new Set([
+  "communication",
+  "job_duty_primary",
+  "job_duty_secondary",
+  "core_experience",
+  "problem_solving",
+  "ai_collaboration",
+  "learning",
+  "motivation_stability",
+]);
+
+export function isProgressiveQuestionSet(
+  questions: readonly DynamicQuestionLike[],
+): boolean {
+  if (questions.length < 1 || questions.length >= OPRUN_MAIN_DIMENSIONS.size) {
+    return false;
+  }
+  const dimensions = questions.map((question) => {
+    const description = String(question.description ?? "");
+    const marker = "oprun_dimension:";
+    return description.startsWith(marker) ? description.slice(marker.length) : "";
+  });
+  return dimensions[0] === "communication"
+    && dimensions.every((dimension) => OPRUN_MAIN_DIMENSIONS.has(dimension))
+    && new Set(dimensions).size === dimensions.length;
+}
+
 export function isProgressiveOpeningOnly(
   questions: readonly DynamicQuestionLike[],
 ): boolean {
-  if (questions.length !== 1) return false;
-  return String(questions[0]?.description ?? "").includes(
-    "oprun_dimension:communication",
-  );
+  return isProgressiveQuestionSet(questions);
+}
+
+export function shouldWaitForQuestionExpansion(
+  questions: readonly DynamicQuestionLike[],
+  activeQuestionIndex: number,
+): boolean {
+  return isProgressiveQuestionSet(questions)
+    && activeQuestionIndex >= questions.length - 1;
 }
 
 export function mergeExpandedQuestionSet<T extends DynamicQuestionLike>(

@@ -16,7 +16,18 @@ const RECRUIT_GENERATOR_MODEL = "deepseek-v4-pro";
 // The fixed opening is already usable.  Do not let a slow deep model keep the
 // remaining interview unavailable: fall back to the balanced blueprint within
 // the public 30-second preparation target.
-const GENERATION_BUDGET_MS = 18_000;
+const GENERATION_BUDGET_MS = 8_000;
+const RECRUIT_DIMENSIONS = [
+  "communication",
+  "job_duty_primary",
+  "job_duty_secondary",
+  "core_experience",
+  "problem_solving",
+  "ai_collaboration",
+  "learning",
+  "motivation_stability",
+] as const;
+const RECRUIT_DIMENSION_SET = new Set<string>(RECRUIT_DIMENSIONS);
 
 async function withGenerationBudget<T>(promise: Promise<T>): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -80,6 +91,7 @@ function buildRecruitPrompt(opts: {
   jobQuestions: number;
   expertExamples?: Array<{ question?: string; answer?: string }>;
   preserveOpening?: boolean;
+  preserveDimensions?: string[];
 }) {
   const {
     jobTitle,
@@ -90,7 +102,11 @@ function buildRecruitPrompt(opts: {
     jobQuestions,
     expertExamples,
     preserveOpening,
+    preserveDimensions = [],
   } = opts;
+  const preserved = new Set(preserveDimensions);
+  if (preserveOpening) preserved.add("communication");
+  const remaining = RECRUIT_DIMENSIONS.filter((dimension) => !preserved.has(dimension));
   const expertBlock =
     expertExamples && expertExamples.length
       ? expertExamples
@@ -108,11 +124,11 @@ function buildRecruitPrompt(opts: {
       content: `你是一位资深的招聘一面出题官。请为一位候选人设计 AI 一面（结构化岗位面试）的题目。全部用中文。
 
 要求:
-1. ${preserveOpening ? "第 1 题 communication 已由系统固定写入；只生成第 2 至第 8 题，严禁再次生成 communication 或自我介绍题" : "固定生成 8 道主问题"}，顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:
-   ${preserveOpening ? "" : "1) communication: 用大约 3 分钟自我介绍，观察信息组织与表达；"}
-   2) core_experience: 从简历选最相关的一段经历，核验本人职责、行动和量化结果；
-   3) job_duty_primary: 核验岗位最核心职责；
-   4) job_duty_secondary: 核验岗位另一项重要职责或跨团队协作；
+1. 系统已固定写入的维度为 ${Array.from(preserved).join(", ") || "无"}；只生成剩余 ${remaining.length} 道主问题，严禁重复固定题。完整顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:
+   1) communication: 用大约 3 分钟自我介绍，观察信息组织与表达；
+   2) job_duty_primary: 核验岗位最核心职责；
+   3) job_duty_secondary: 核验岗位另一项重要职责或跨团队协作；
+   4) core_experience: 从简历选最相关的一段经历，核验本人职责、行动和量化结果；
    5) problem_solving: 用具体复杂场景考察分析、取舍与落地；
    6) ai_collaboration: 核验如何用 AI 改造工作，而不是只问是否用过工具；
    7) learning: 核验学习速度、复盘和迁移能力；
@@ -191,6 +207,15 @@ export async function POST(
     ? (body.expertExamples as Array<{ question?: string; answer?: string }>).slice(0, 8)
     : [];
   const preserveOpening = body.preserveOpening === true;
+  const preserveDimensions = Array.isArray(body.preserveDimensions)
+    ? Array.from(new Set(body.preserveDimensions.flatMap((value) => {
+        const dimension = typeof value === "string" ? value.trim() : "";
+        return RECRUIT_DIMENSION_SET.has(dimension) ? [dimension] : [];
+      })))
+    : [];
+  if (preserveOpening && !preserveDimensions.includes("communication")) {
+    preserveDimensions.unshift("communication");
+  }
 
   if (!jobTitle && !resumeText) {
     return apiError("BAD_REQUEST", "jobTitle 或 resumeText 至少要有一个", 400);
@@ -208,12 +233,13 @@ export async function POST(
       jobQuestions,
       expertExamples,
       preserveOpening,
+      preserveDimensions,
     });
     const resp = await withGenerationBudget(
       provider.generateResponse({
         messages,
         temperature: 0.5,
-        maxTokens: preserveOpening ? 4500 : 6000,
+        maxTokens: preserveDimensions.length ? 4500 : 6000,
         model: RECRUIT_GENERATOR_MODEL,
       }),
     );
@@ -235,11 +261,6 @@ export async function POST(
       seconds: 180,
     },
     {
-      key: "core_experience",
-      fallback: "请选择一段与本岗位最相关的经历，说明你本人负责什么、采取了哪些行动，以及结果如何量化。",
-      seconds: 210,
-    },
-    {
       key: "job_duty_primary",
       fallback: `围绕${jobTitle || "这个岗位"}最核心的职责，请举一个你独立完成类似任务的具体案例。`,
       seconds: 210,
@@ -247,6 +268,11 @@ export async function POST(
     {
       key: "job_duty_secondary",
       fallback: `在${jobTitle || "相关工作"}中需要跨团队协作时，你如何明确目标、处理分歧并推动结果？请讲一个具体案例。`,
+      seconds: 210,
+    },
+    {
+      key: "core_experience",
+      fallback: "请选择一段与本岗位最相关的经历，说明你本人负责什么、采取了哪些行动，以及结果如何量化。",
       seconds: 210,
     },
     {
@@ -279,7 +305,7 @@ export async function POST(
   );
   const usedQuestionTexts = new Set<string>();
   const questions = blueprint
-    .filter((item) => !preserveOpening || item.key !== "communication")
+    .filter((item) => !preserveDimensions.includes(item.key))
     .map((item, index) => {
     const generatedText = generatedByDimension.get(item.key);
     let text =
@@ -310,10 +336,13 @@ export async function POST(
         : [];
     }),
   );
-  if (preserveOpening && !existingDimensions.has("communication")) {
+  const missingPreservedDimensions = preserveDimensions.filter(
+    (dimension) => !existingDimensions.has(dimension),
+  );
+  if (missingPreservedDimensions.length) {
     return apiError(
       "CONFLICT",
-      "preserveOpening requires an existing communication opening question",
+      `preserveDimensions missing existing questions: ${missingPreservedDimensions.join(",")}`,
       409,
     );
   }

@@ -15,6 +15,7 @@ import { createLogger } from "../src/lib/logger";
 import {
   isProgressiveOpeningOnly,
   mergeExpandedQuestionSet,
+  shouldWaitForQuestionExpansion,
 } from "../src/lib/voice/dynamic-question-sync";
 import {
     DEFAULT_TTS_BARGE_IN_MIN_AUDIO_BYTES,
@@ -751,6 +752,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   let reconnecting = false;
   let browserClosed = false;
   let questionRefreshInFlight = false;
+  let pendingProgressiveTransition: "button" | "user_request" | null = null;
 
   function normalizeDynamicQuestions(rows: unknown): typeof sortedQuestions {
     if (!Array.isArray(rows)) return [];
@@ -783,6 +785,25 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     sortedQuestions = merged;
     send({ type: "question_count_update", totalQuestions: sortedQuestions.length });
     log.info(`Dynamic questions refreshed from ${source}: total=${sortedQuestions.length}`);
+    if (
+      pendingProgressiveTransition
+      && !isProgressiveOpeningOnly(sortedQuestions)
+      && currentQuestionIndex < sortedQuestions.length - 1
+    ) {
+      const reason = pendingProgressiveTransition;
+      pendingProgressiveTransition = null;
+      if (interviewCompleteTimer) {
+        clearTimeout(interviewCompleteTimer);
+        interviewCompleteTimer = null;
+      }
+      pendingInterviewComplete = false;
+      interviewDone = false;
+      setTimeout(() => {
+        if (!browserClosed && !isTransitioning && !interviewDone) {
+          requestTransition(currentQuestionIndex + 1, "Next Question", reason);
+        }
+      }, 0);
+    }
     return true;
   }
 
@@ -1646,7 +1667,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               if (
                 newIdx >= sortedQuestions.length
                 && ctx.interviewId
-                && sortedQuestions.length <= 1
+                && isProgressiveOpeningOnly(sortedQuestions)
               ) {
                 refreshDynamicQuestions().catch(log.error);
                 pendingFunctionCalls.push({
@@ -1769,6 +1790,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
             modelIsSpeaking = false;
             const inferredFarewell =
               !pendingInterviewComplete &&
+              !isProgressiveOpeningOnly(sortedQuestions) &&
               currentQuestionIndex >= sortedQuestions.length - 1 &&
               !!capturedModelText &&
               looksLikeFarewell(capturedModelText, isZh);
@@ -2094,6 +2116,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     directionLabel: string,
     reason: "button" | "user_request" = "button",
   ) {
+    pendingProgressiveTransition = null;
     clearPendingTransition();
     clearQuestionPrompt();
     cancelOngoingResponse();
@@ -2150,14 +2173,14 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     reason: "button" | "user_request" = "button",
   ) {
     if (interviewDone || isTransitioning) return;
-    if (!isProgressiveOpeningOnly(sortedQuestions)) {
+    if (!shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex)) {
       requestTransition(currentQuestionIndex + 1, "Next Question", reason);
       return;
     }
 
     isTransitioning = true;
     send({ type: "transitioning", direction: "next" });
-    const waitUntil = Date.now() + 20_000;
+    const waitUntil = Date.now() + 10_000;
     while (isProgressiveOpeningOnly(sortedQuestions) && Date.now() < waitUntil) {
       await refreshDynamicQuestions();
       if (!isProgressiveOpeningOnly(sortedQuestions)) break;
@@ -2166,6 +2189,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     isTransitioning = false;
 
     if (isProgressiveOpeningOnly(sortedQuestions)) {
+      pendingProgressiveTransition = reason;
       send({
         type: "transition_cancelled",
         direction: "next",

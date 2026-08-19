@@ -27,6 +27,7 @@ import { createLogger } from "../src/lib/logger";
 import {
   isProgressiveOpeningOnly,
   mergeExpandedQuestionSet,
+  shouldWaitForQuestionExpansion,
 } from "../src/lib/voice/dynamic-question-sync";
 import { callRelayLLM, logRelayLlmStartup } from "./relay-llm";
 import {
@@ -2127,17 +2128,17 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     const transitionId = ++transitionGeneration;
     isTransitioning = true;
 
-    // A candidate may finish the fixed opening before personalized questions
-    // arrive.  Keep the current question active instead of treating the
-    // opening-only snapshot as a completed interview.
-    if (isProgressiveOpeningOnly(sortedQuestions)) {
-      const waitUntil = Date.now() + 20_000;
-      while (sortedQuestions.length <= 1 && Date.now() < waitUntil) {
+    // Only wait when the candidate reaches the final currently available
+    // progressive question. If a conditional transition Q2 already exists,
+    // Q1 must advance to it immediately.
+    if (shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex)) {
+      const waitUntil = Date.now() + 10_000;
+      while (isProgressiveOpeningOnly(sortedQuestions) && Date.now() < waitUntil) {
         await refreshDynamicQuestions();
-        if (sortedQuestions.length > 1) break;
+        if (!isProgressiveOpeningOnly(sortedQuestions)) break;
         await new Promise((resolve) => setTimeout(resolve, 2_000));
       }
-      if (sortedQuestions.length <= 1) {
+      if (isProgressiveOpeningOnly(sortedQuestions)) {
         isTransitioning = false;
         await speakAndHandle(
           isZh
