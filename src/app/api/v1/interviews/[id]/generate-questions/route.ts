@@ -17,12 +17,13 @@ const RECRUIT_GENERATOR_MODEL = process.env.RECRUIT_GENERATOR_MODEL?.trim() || "
 // The fixed opening is already usable.  The deep generator (deepseek-v4-pro,
 // up to 6000 tokens) routinely needs 10-20s; an 8s budget made it lose the
 // race by milliseconds and every session fell back to the blueprint
-// template.  40s keeps the full set ready while the candidate is still on the fixed
-// opening (self-intro takes minutes); two live sessions lost the 25s race by
-// <100ms (verified 2026-08-20), the deep model needs ~25-35s for 8 questions.
+// template.  60s + reduced maxTokens (3500): even at 40s the deep model lost the race
+// (three live data points 2026-08-20). The candidate is still answering the
+// fixed opening (self-intro takes minutes), so a 60s full-set budget stays
+// invisible in practice.
 // candidate perceives (they can already start on the fixed opening), while
 // the blueprint stays as the safety net.
-const GENERATION_BUDGET_MS = 40_000;
+const GENERATION_BUDGET_MS = 60_000;
 const RECRUIT_DIMENSIONS = [
   "communication",
   "job_duty_primary",
@@ -42,7 +43,7 @@ async function withGenerationBudget<T>(promise: Promise<T>): Promise<T> {
       promise,
       new Promise<T>((_, reject) => {
         timeout = setTimeout(
-          () => reject(new Error("generation_budget_exceeded")),
+          () => reject(new Error(`generation_budget_exceeded (budget=${GENERATION_BUDGET_MS}ms)`)),
           GENERATION_BUDGET_MS,
         );
       }),
@@ -245,7 +246,7 @@ export async function POST(
       provider.generateResponse({
         messages,
         temperature: 0.5,
-        maxTokens: preserveDimensions.length ? 4500 : 6000,
+        maxTokens: preserveDimensions.length ? 2500 : 3500,
         model: RECRUIT_GENERATOR_MODEL,
       }),
     );
