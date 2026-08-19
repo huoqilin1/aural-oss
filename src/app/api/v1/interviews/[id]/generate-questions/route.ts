@@ -17,10 +17,12 @@ const RECRUIT_GENERATOR_MODEL = process.env.RECRUIT_GENERATOR_MODEL?.trim() || "
 // The fixed opening is already usable.  The deep generator (deepseek-v4-pro,
 // up to 6000 tokens) routinely needs 10-20s; an 8s budget made it lose the
 // race by milliseconds and every session fell back to the blueprint
-// template.  25s keeps the full set within the ~30s preparation target the
+// template.  40s keeps the full set ready while the candidate is still on the fixed
+// opening (self-intro takes minutes); two live sessions lost the 25s race by
+// <100ms (verified 2026-08-20), the deep model needs ~25-35s for 8 questions.
 // candidate perceives (they can already start on the fixed opening), while
 // the blueprint stays as the safety net.
-const GENERATION_BUDGET_MS = 25_000;
+const GENERATION_BUDGET_MS = 40_000;
 const RECRUIT_DIMENSIONS = [
   "communication",
   "job_duty_primary",
