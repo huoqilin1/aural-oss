@@ -725,7 +725,9 @@ async function summarizeQuestion(
     .join("\n");
 
   try {
-    const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)));
+    const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), 150, {
+      stage: "q-summary",
+    });
     log.info(`Q summary: "${result.slice(0, 100)}..."`);
     return result;
   } catch (err) {
@@ -1086,10 +1088,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   // ── LLM-controlled response state ─────────────────────────────
   let generatingResponse = false;
   let userTurnsOnCurrentQ = 0;
-  // Recruitment interviews use at most two AI follow-ups across the entire
-  // session so eight distinct assessment dimensions are all covered.
+  // Recruitment interviews previously capped AI follow-ups at two across the
+  // entire session. 2026-08-20 王总拍板：Token 无上限，追问按"证据式面试"放开——
+  // 全局上限提到 15，每题预算由深度档位控制，30 分钟面试时长才是真正的预算。
   let totalFollowUpsUsed = 0;
-  const GLOBAL_FOLLOW_UP_LIMIT = 2;
+  const GLOBAL_FOLLOW_UP_LIMIT = 15;
   // 候选人静默 30 秒自动进入下一题(王总 2026-06-21)
   let silenceAutoSkipTimer: ReturnType<typeof setTimeout> | null = null;
   const SILENCE_AUTO_SKIP_MS = 30_000;
@@ -1266,6 +1269,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     case "MODERATE": maxFollowUps = 7; break;
     case "DEEP":    maxFollowUps = 12; break;
     default:        maxFollowUps = 2;
+  }
+  // 招聘一面按证据式面试至少给到 MODERATE 深度（每题 7 次追问），
+  // 由全局上限与面试时长兜底，避免 LIGHT 档把深挖掐死。
+  if (/^数君招聘\s*·\s*/.test(ctx.title) && maxFollowUps < 7) {
+    maxFollowUps = 7;
   }
 
   log.info(
@@ -1970,7 +1978,10 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
     const maxTokens = getMaxTokensForQuestion(currentQ.type);
     const startMs = Date.now();
-    let response = await callRelayLLM(prompt, maxTokens);
+    let response = await callRelayLLM(prompt, maxTokens, {
+      stage: "interview-turn",
+      question: currentQuestionIndex + 1,
+    });
 
     response = response.replace(/^(追问型|结束型|FOLLOW[- ]?UP|WRAP[- ]?UP)\s*[:：]\s*/i, "").trim();
 

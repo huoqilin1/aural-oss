@@ -1,7 +1,9 @@
 /**
  * Voice-relay text LLM (summaries + interviewer replies).
- * Default: Gemini gemini-3.1-flash-lite @ temperature 0.
- * Fallback: MiniMax abab6.5s-chat when Gemini fails and MINIMAX_API_KEY is set.
+ * 2026-08-20 王总拍板：质量优先、Token 无上限——默认链 DeepThink 优先，
+ * 智谱 GLM 次之，Kimi 兜底（排最后），按已配置的密钥自动裁剪。
+ * 显式设置 RELAY_LLM_MODEL 时保持旧的单端点 + 旧回退行为（兼容自管配置）。
+ * 注意：语音转写/播报走豆包（volcengine ASR/TTS），不经本模块。
  */
 
 import { GoogleGenAI } from "@google/genai";
@@ -9,8 +11,23 @@ import { createLogger } from "../src/lib/logger";
 
 const log = createLogger("relay-llm");
 
-export const RELAY_LLM_PRIMARY_MODEL = "gemini-3.1-flash-lite";
-export const RELAY_LLM_FALLBACK_MODEL = "abab6.5s-chat";
+export const RELAY_LLM_PRIMARY_MODEL = "deepseek-v4-pro";
+export const RELAY_LLM_FALLBACK_MODEL = "glm-5.3";
+const RELAY_LLM_LAST_RESORT_MODEL = "kimi-latest";
+const ZHIPU_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
+const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
+const KIMI_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1";
+
+export interface RelayLlmCallMeta {
+  stage?: string;
+  session?: string;
+  question?: number;
+}
+
+interface RelayLlmUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
 
 interface RelayLlmEndpoint {
   model: string;
@@ -42,8 +59,8 @@ function usesGemini(model: string): boolean {
   return model.toLowerCase().startsWith("gemini");
 }
 
-function resolvePrimaryEndpoint(): RelayLlmEndpoint {
-  const model = process.env.RELAY_LLM_MODEL?.trim() || RELAY_LLM_PRIMARY_MODEL;
+function resolveLegacyPrimaryEndpoint(): RelayLlmEndpoint {
+  const model = process.env.RELAY_LLM_MODEL?.trim() || "gemini-3.1-flash-lite";
   const useGemini = usesGemini(model);
   const apiKey = useGemini
     ? (process.env.RELAY_LLM_API_KEY?.trim() || process.env.GEMINI_API_KEY?.trim() || "")
@@ -56,7 +73,7 @@ function resolvePrimaryEndpoint(): RelayLlmEndpoint {
   const baseUrl =
     process.env.RELAY_LLM_BASE_URL?.trim() ||
     (process.env.KIMI_API_KEY
-      ? process.env.KIMI_BASE_URL?.trim() || "https://api.moonshot.cn/v1"
+      ? process.env.KIMI_BASE_URL?.trim() || KIMI_DEFAULT_BASE_URL
       : process.env.MINIMAX_BASE_URL?.trim() || "https://api.minimaxi.com/v1");
 
   return {
@@ -70,7 +87,7 @@ function resolvePrimaryEndpoint(): RelayLlmEndpoint {
 
 function resolveFallbackEndpoint(primary: RelayLlmEndpoint): RelayLlmEndpoint | null {
   const model =
-    process.env.RELAY_LLM_FALLBACK_MODEL?.trim() || RELAY_LLM_FALLBACK_MODEL;
+    process.env.RELAY_LLM_FALLBACK_MODEL?.trim() || "abab6.5s-chat";
   const apiKey = process.env.RELAY_LLM_FALLBACK_API_KEY?.trim() || process.env.MINIMAX_API_KEY?.trim() || "";
   if (!apiKey) return null;
 
@@ -98,12 +115,60 @@ function resolveFallbackEndpoint(primary: RelayLlmEndpoint): RelayLlmEndpoint | 
   return fallback;
 }
 
-function buildEndpointChain(): RelayLlmEndpoint[] {
-  const primary = resolvePrimaryEndpoint();
-  const chain = [primary];
-  const fallback = resolveFallbackEndpoint(primary);
-  if (fallback) chain.push(fallback);
+// 按密钥可用性构建默认链：DeepThink → 智谱 GLM → Kimi（王总 2026-08-20 排序）。
+function buildProviderChain(): RelayLlmEndpoint[] {
+  const temperature = parseTemperature();
+  const chain: RelayLlmEndpoint[] = [];
+
+  const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim();
+  if (deepseekKey) {
+    chain.push({
+      model: RELAY_LLM_PRIMARY_MODEL,
+      temperature,
+      apiKey: deepseekKey,
+      baseUrl: process.env.DEEPSEEK_BASE_URL?.trim() || DEEPSEEK_DEFAULT_BASE_URL,
+      useGemini: false,
+    });
+  }
+
+  const zhipuKey = process.env.ZHIPU_API_KEY?.trim() || process.env.GLM_API_KEY?.trim();
+  if (zhipuKey) {
+    chain.push({
+      model: RELAY_LLM_FALLBACK_MODEL,
+      temperature,
+      apiKey: zhipuKey,
+      baseUrl: process.env.ZHIPU_BASE_URL?.trim() || ZHIPU_DEFAULT_BASE_URL,
+      useGemini: false,
+    });
+  }
+
+  const kimiKey = process.env.KIMI_API_KEY?.trim();
+  if (kimiKey) {
+    chain.push({
+      model: process.env.KIMI_MODEL?.trim() || RELAY_LLM_LAST_RESORT_MODEL,
+      temperature,
+      apiKey: kimiKey,
+      baseUrl: process.env.KIMI_BASE_URL?.trim() || KIMI_DEFAULT_BASE_URL,
+      useGemini: false,
+    });
+  }
+
   return chain;
+}
+
+function buildEndpointChain(): RelayLlmEndpoint[] {
+  if (process.env.RELAY_LLM_MODEL?.trim()) {
+    // 显式指定模型：保持旧的单端点 + 旧回退行为。
+    const primary = resolveLegacyPrimaryEndpoint();
+    const chain = [primary];
+    const fallback = resolveFallbackEndpoint(primary);
+    if (fallback) chain.push(fallback);
+    return chain;
+  }
+  const providerChain = buildProviderChain();
+  if (providerChain.length > 0) return providerChain;
+  // 没有任何供应商密钥时保持旧行为（Gemini 默认端点）。
+  return [resolveLegacyPrimaryEndpoint()];
 }
 
 function getEndpointChain(): RelayLlmEndpoint[] {
@@ -174,7 +239,7 @@ async function callGemini(
   endpoint: RelayLlmEndpoint,
   prompt: string,
   maxTokens: number,
-): Promise<string> {
+): Promise<{ text: string; usage?: RelayLlmUsage }> {
   const client = getGeminiClient(endpoint.apiKey);
   const stream = await client.models.generateContentStream({
     model: endpoint.model,
@@ -186,24 +251,33 @@ async function callGemini(
   });
 
   let text = "";
+  let usage: RelayLlmUsage | undefined;
   for await (const chunk of stream) {
     if (chunk.text) text += chunk.text;
+    const meta = chunk.usageMetadata;
+    if (meta) {
+      usage = {
+        promptTokens: meta.promptTokenCount ?? 0,
+        completionTokens: meta.candidatesTokenCount ?? 0,
+      };
+    }
   }
-  return text.trim();
+  return { text: text.trim(), usage };
 }
 
 async function callOpenAICompatible(
   endpoint: RelayLlmEndpoint,
   prompt: string,
   maxTokens: number,
-): Promise<string> {
+): Promise<{ text: string; usage?: RelayLlmUsage }> {
   const reqBody: Record<string, unknown> = {
     model: endpoint.model,
     messages: [{ role: "user", content: prompt }],
     temperature: endpoint.temperature,
     max_tokens: maxTokens,
   };
-  // 关思考(GLM/deepseek 支持):RELAY_LLM_DISABLE_THINKING=1 时禁用推理,秒回省成本(2026-06-27 换 glm-5.2 关思考)
+  // 关思考(GLM/deepseek 支持):RELAY_LLM_DISABLE_THINKING=1 时禁用推理,秒回省成本。
+  // 注意:DeepThink 优先策略下不要设置此变量(2026-08-20 王总要的是深思考质量)。
   if (process.env.RELAY_LLM_DISABLE_THINKING?.trim() === "1") {
     reqBody.thinking = { type: "disabled" };
   }
@@ -222,14 +296,20 @@ async function callOpenAICompatible(
   }
 
   const data = await res.json();
-  return data.choices?.[0]?.message?.content?.trim() || "";
+  const usage = data.usage
+    ? {
+        promptTokens: Number(data.usage.prompt_tokens ?? 0) || 0,
+        completionTokens: Number(data.usage.completion_tokens ?? 0) || 0,
+      }
+    : undefined;
+  return { text: data.choices?.[0]?.message?.content?.trim() || "", usage };
 }
 
 async function callEndpoint(
   endpoint: RelayLlmEndpoint,
   prompt: string,
   maxTokens: number,
-): Promise<string> {
+): Promise<{ text: string; usage?: RelayLlmUsage }> {
   if (!endpoint.apiKey) {
     throw new Error(`No API key for relay model ${endpoint.model}`);
   }
@@ -238,7 +318,11 @@ async function callEndpoint(
     : callOpenAICompatible(endpoint, prompt, maxTokens);
 }
 
-export async function callRelayLLM(prompt: string, maxTokens = 150): Promise<string> {
+export async function callRelayLLM(
+  prompt: string,
+  maxTokens = 150,
+  meta?: RelayLlmCallMeta,
+): Promise<string> {
   const chain = getEndpointChain();
   logConfig(chain);
 
@@ -253,14 +337,16 @@ export async function callRelayLLM(prompt: string, maxTokens = 150): Promise<str
   for (let i = 0; i < configured.length; i++) {
     const endpoint = configured[i]!;
     try {
-      const text = await callEndpoint(endpoint, prompt, maxTokens);
-      if (i > 0) {
-        log.warn(
-          `Relay LLM recovered via fallback ${endpoint.model} (${Date.now() - startMs}ms)`,
-        );
-      } else {
-        log.info(`Relay LLM took ${Date.now() - startMs}ms`);
-      }
+      const { text, usage } = await callEndpoint(endpoint, prompt, maxTokens);
+      const latencyMs = Date.now() - startMs;
+      // Token 分类账：每笔调用一行，stage 区分环节（turn/summarize/generate…），
+      // 供"每场消耗多少、花在哪"的看板汇总。
+      log.info(
+        `relay-llm usage: stage=${meta?.stage ?? "unlabeled"} session=${meta?.session ?? "-"} ` +
+        `q=${meta?.question ?? "-"} model=${endpoint.model} ` +
+        `tokens_in=${usage?.promptTokens ?? "?"} tokens_out=${usage?.completionTokens ?? "?"} ` +
+        `latency_ms=${latencyMs}${i > 0 ? ` recovered_from=${configured[0]!.model}` : ""}`,
+      );
       return text;
     } catch (err) {
       lastError = err;

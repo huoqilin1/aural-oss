@@ -31,13 +31,50 @@ afterEach(() => {
   relayLlm.resetRelayLlmCacheForTests();
 });
 
-test("default primary is gemini-3.1-flash-lite with abab6.5s-chat fallback when MiniMax key set", () => {
+test("default chain is deepseek-v4-pro -> glm-5.3 -> kimi when provider keys set", () => {
   withEnv(
     {
       RELAY_LLM_MODEL: undefined,
+      DEEPSEEK_API_KEY: "d-test",
+      ZHIPU_API_KEY: "z-test",
+      KIMI_API_KEY: "k-test",
+      GEMINI_API_KEY: undefined,
+      MINIMAX_API_KEY: undefined,
+    },
+    () => {
+      assert.equal(relayLlm.getRelayLlmModel(), "deepseek-v4-pro");
+      assert.equal(relayLlm.getRelayLlmFallbackModel(), "glm-5.3");
+    },
+  );
+});
+
+test("chain trims to configured providers (deepseek + kimi only)", () => {
+  withEnv(
+    {
+      RELAY_LLM_MODEL: undefined,
+      DEEPSEEK_API_KEY: "d-test",
+      ZHIPU_API_KEY: undefined,
+      GLM_API_KEY: undefined,
+      KIMI_API_KEY: "k-test",
+      GEMINI_API_KEY: undefined,
+      MINIMAX_API_KEY: undefined,
+    },
+    () => {
+      assert.equal(relayLlm.getRelayLlmModel(), "deepseek-v4-pro");
+      assert.equal(relayLlm.getRelayLlmFallbackModel(), "kimi-latest");
+    },
+  );
+});
+
+test("explicit RELAY_LLM_MODEL keeps the legacy single-endpoint behavior", () => {
+  withEnv(
+    {
+      RELAY_LLM_MODEL: "gemini-3.1-flash-lite",
       GEMINI_API_KEY: "g-test",
       MINIMAX_API_KEY: "m-test",
       MINIMAX_BASE_URL: "https://api.minimaxi.com/v1",
+      DEEPSEEK_API_KEY: undefined,
+      KIMI_API_KEY: undefined,
     },
     () => {
       assert.equal(relayLlm.getRelayLlmModel(), "gemini-3.1-flash-lite");
@@ -67,6 +104,10 @@ test("no fallback without MINIMAX_API_KEY", () => {
     {
       GEMINI_API_KEY: "g-test",
       MINIMAX_API_KEY: undefined,
+      DEEPSEEK_API_KEY: undefined,
+      ZHIPU_API_KEY: undefined,
+      GLM_API_KEY: undefined,
+      KIMI_API_KEY: undefined,
     },
     () => {
       assert.equal(relayLlm.getRelayLlmFallbackModel(), null);

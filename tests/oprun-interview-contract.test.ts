@@ -97,7 +97,7 @@ test("invited candidates resume the persisted question and transcript", () => {
 });
 
 test("OpRun recruitment relay caps follow-ups across the entire interview", () => {
-  assert.match(relay, /GLOBAL_FOLLOW_UP_LIMIT = 2/);
+  assert.match(relay, /GLOBAL_FOLLOW_UP_LIMIT = 15/);
   assert.match(relay, /GLOBAL_FOLLOW_UP_LIMIT - totalFollowUpsUsed/);
 });
 

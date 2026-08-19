@@ -138,7 +138,7 @@ function buildRecruitPrompt(opts: {
    8) motivation_stability: 核验求职动机、岗位理解与稳定性。
 2. 每题都要结合岗位或简历中的具体证据；简历没有的信息不得臆造。
 3. 全部用 OPEN_ENDED 类型，一题只考一个主要方向；不同题不得换一种说法重复追问同一段经历。
-4. 整场目标约 ${durationMinutes} 分钟，系统全场最多只允许 2 次追问，因此主问题必须独立、完整、可直接作答。${expertBlock ? `
+4. 整场目标约 ${durationMinutes} 分钟。系统支持证据式深挖：每道主问题最多可追问 7 次、全场追问上限 15 次；主问题仍必须独立、完整、可直接作答（追问是用于挖细节的，不是替你把题问完整）。${expertBlock ? `
 5. 下面给了资深面试官(王总/凌总等专家)在本岗位问过的「经典问答范例」。请学习这些范例的提问深度、角度和挖人方式,出题向这个水准看齐——可借鉴角度,但要结合本候选人简历,不要照抄。` : ""}
 
 只输出合法 JSON,不要 markdown、不要解释:
@@ -245,6 +245,12 @@ export async function POST(
         maxTokens: preserveDimensions.length ? 4500 : 6000,
         model: RECRUIT_GENERATOR_MODEL,
       }),
+    );
+    log.info(
+      `generate-questions usage: model=${RECRUIT_GENERATOR_MODEL} ` +
+      `tokens_in=${resp.usage?.promptTokens ?? "?"} ` +
+      `tokens_out=${resp.usage?.completionTokens ?? "?"} ` +
+      `budget_ms=${GENERATION_BUDGET_MS}`,
     );
     generated = parseJsonSafe(resp.content) as {
       questions?: Array<{ text?: unknown; dimension?: unknown }>;
