@@ -196,7 +196,8 @@ $applyContent = [System.IO.File]::ReadAllText($applyScript).Replace("`r`n", "`n"
 if ($LASTEXITCODE -ne 0) { throw "无法创建临时上传目录" }
 $artifactSizeMb = [math]::Round((Get-Item $artifact).Length / 1MB, 0)
 Write-Host "上传=${artifactSizeMb}MB 制品，经跳板传输约 2-10 分钟，请耐心等待"
-& $scpExe @sshCommonArgs $artifact, $applyTemp "${TargetHost}:$remoteBootstrap/"
+$uploadFiles = @($artifact, $applyTemp)
+& $scpExe @sshCommonArgs @uploadFiles "${TargetHost}:$remoteBootstrap/"
 if ($LASTEXITCODE -ne 0) { throw "上传制品失败" }
 & $sshExe @sshCommonArgs $TargetHost "OPRUN_AURAL_RELEASE_APPROVED_SHA=$sha bash $remoteBootstrap/$(Split-Path $applyTemp -Leaf) $remoteBootstrap/aural-$sha.tar.gz $checksum $sha"
 if ($LASTEXITCODE -ne 0) { throw "正式制品应用失败" }
