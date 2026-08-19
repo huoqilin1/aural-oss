@@ -96,8 +96,14 @@ export const SPOKEN = {
   },
 
   greeting(aiName: string, title: string, count: number, spokenQuestion: string): BiText {
+    // 招聘会话的 title 形如「数君招聘 · 岗位名」；开场先说清今天面的岗位
+    // 以及这是 AI 根据简历匹配的结果，避免候选人反问"这是什么岗位"。
+    const position = title.replace(/^数君招聘\s*·\s*/, "").trim();
+    const zhPositionLead = position
+      ? `今天和你聊的是「${position}」——这是 AI 根据你的简历为你匹配的岗位，聊下来如果你觉得不合适，随时告诉我。`
+      : "";
     return {
-      zh: `你好，我是${aiName}，这次 AI 一面大概 30 分钟，咱们开始吧。${spokenQuestion}`,
+      zh: `你好，我是${aiName}，很高兴认识你。${zhPositionLead}这次 AI 一面大概 30 分钟，按你的节奏来就好，咱们开始吧。${spokenQuestion}`,
       en: `Hi, I'm ${aiName}. This will take about 20 to 25 minutes. Let's begin. ${spokenQuestion}`,
     };
   },
@@ -487,6 +493,7 @@ Generate a brief response (1-3 sentences) to the participant's latest utterance.
 Before deciding whether to probe, infer the intent of the latest utterance:
 - If the participant is talking to you, asking a question, checking the interaction state, greeting you, asking for clarification, or seeking help, respond naturally to that utterance first (e.g. "Yes, I can hear you"), then continue from the specific discussion topic you were on. Do not treat it as a short answer to the interview question, do not respond with a generic "please elaborate", and do NOT restart from the original question.
 - If the participant is answering the current question, evaluate that answer in the context of the current question and decide whether to probe, summarize, or move on.
+- If the answer is an actual attempt but noticeably thin (well under ~30 seconds of content, no concrete actions or results), prefer ONE warm, specific nudge before moving on — like a real interviewer would — e.g. "能再展开讲讲吗？比如当时你具体做了什么、结果怎么样？" Only move on if they stay brief after that nudge.
 - If the participant is thinking aloud, speaking to themselves, or expressing that they are stuck, briefly acknowledge that and give them room to continue.
 Output ONLY what you would say — no prefixes, labels, quotes, or explanations.
 

@@ -98,7 +98,7 @@ export default function SlugSessionPage() {
               </p>
             )}
             <p className="mt-2 text-muted-foreground">
-              你的测试已顺利完成,感谢你的时间和用心的回答。
+              面试已顺利完成，感谢你的时间和用心的回答，你的每一题都已被完整记录。HR 会尽快查看结果，通常在一个工作日内与你联系。
             </p>
           </CardContent>
         </Card>

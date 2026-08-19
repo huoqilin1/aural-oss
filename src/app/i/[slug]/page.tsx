@@ -130,7 +130,7 @@ export default function PublicInterviewPage() {
             <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
             <h2 className="mt-4 text-2xl font-bold">测试已完成</h2>
             <p className="mt-2 text-muted-foreground">
-              你的测试已顺利完成,感谢你的时间和用心的回答。
+              面试已顺利完成，感谢你的时间和用心的回答，你的每一题都已被完整记录。HR 会尽快查看结果，通常在一个工作日内与你联系。
             </p>
           </CardContent>
         </Card>

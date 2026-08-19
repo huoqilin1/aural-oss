@@ -13,10 +13,13 @@ const log = createLogger("api/v1/generate-questions");
 // 招聘一面出题:深度思考模型(最新深度版),按岗位+简历提前出题。
 // 现场追问走另一条快线(relay-llm,deepseek-v4-flash),不在这里。
 const RECRUIT_GENERATOR_MODEL = "deepseek-v4-pro";
-// The fixed opening is already usable.  Do not let a slow deep model keep the
-// remaining interview unavailable: fall back to the balanced blueprint within
-// the public 30-second preparation target.
-const GENERATION_BUDGET_MS = 8_000;
+// The fixed opening is already usable.  The deep generator (deepseek-v4-pro,
+// up to 6000 tokens) routinely needs 10-20s; an 8s budget made it lose the
+// race by milliseconds and every session fell back to the blueprint
+// template.  25s keeps the full set within the ~30s preparation target the
+// candidate perceives (they can already start on the fixed opening), while
+// the blueprint stays as the safety net.
+const GENERATION_BUDGET_MS = 25_000;
 const RECRUIT_DIMENSIONS = [
   "communication",
   "job_duty_primary",

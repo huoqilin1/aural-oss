@@ -1426,11 +1426,11 @@ export function VoiceInterface({
       : voice.isSpeaking
         ? `${aiName} 正在提问`
         : voice.isProcessing
-          ? "AI 正在分析回答"
+          ? `${aiName} 正在思考…`
           : voice.isTransitioning
-            ? "AI 正在准备下一题"
+            ? `${aiName} 正在准备下一题`
             : voice.isListening
-              ? "正在听取回答"
+              ? "正在听取回答，慢慢来"
               : "面试进行中";
 
   useEffect(() => {
@@ -1448,14 +1448,32 @@ export function VoiceInterface({
     }, 8000);
     return () => clearTimeout(timer);
   }, [voice.isInterviewComplete, locallyCompleted, hasVisibleFarewell]);
+
+  // 看门狗：最后一题答完后，如果「思考/准备下一题」状态卡住（现场曾卡 5 分钟
+  // 直到候选人手动结束），30 秒后按正常收尾流程自动结束，进度不丢。
+  const questionTotal = voice.totalQuestions;
+  const onFinalQuestion =
+    questionTotal > 0 && voice.currentQuestionIndex === questionTotal - 1;
+  const stuckAfterFinalAnswer =
+    onFinalQuestion && (voice.isProcessing || voice.isTransitioning) && !voice.isListening;
+  useEffect(() => {
+    if (!stuckAfterFinalAnswer || locallyCompleted) return;
+    const timer = setTimeout(() => {
+      handleEndInterviewRef.current();
+    }, 30_000);
+    return () => clearTimeout(timer);
+  }, [stuckAfterFinalAnswer, locallyCompleted]);
   const completionScreen = (
     <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
       <Card className="w-full max-w-md">
         <CardContent className="py-12 text-center">
           <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
-          <h2 className="mt-4 text-2xl font-bold">谢谢!</h2>
+          <h2 className="mt-4 text-2xl font-bold">面试已顺利完成</h2>
           <p className="mt-2 text-muted-foreground">
-            测试已顺利完成,感谢你的时间和用心的回答。
+            感谢你的时间和用心的回答，你的每一题都已被完整记录。
+          </p>
+          <p className="mt-1 text-sm text-muted-foreground">
+            HR 会尽快查看你的面试结果，通常在一个工作日内与你联系。辛苦了，好好休息。
           </p>
         </CardContent>
       </Card>
@@ -1739,7 +1757,7 @@ export function VoiceInterface({
                 </div>
               </div>
               <div className={`rounded-xl border-l-4 px-4 py-2.5 text-xs md:text-sm ${isTimeCritical ? "border-destructive bg-destructive/10 text-destructive" : isTimeWarning ? "border-amber-500 bg-amber-500/10 text-amber-800 dark:text-amber-200" : "border-primary/60 bg-primary/5 text-muted-foreground"}`}>
-                剩余 5 分钟时转为黄色提醒；剩余 1 分钟时转为红色强提醒，但不会遮挡题目或打断回答。
+                不用赶时间，按你的节奏来；临近结束时我们会轻轻提醒，不会打扰你的回答。
               </div>
             </div>
           </div>
@@ -2650,9 +2668,9 @@ export function VoiceInterface({
       <AlertDialog open={showEndDialog} onOpenChange={setShowEndDialog}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>结束测试?</AlertDialogTitle>
+            <AlertDialogTitle>结束面试？</AlertDialogTitle>
             <AlertDialogDescription>
-              这会保存你的进度并结束当前测试,结束后将无法继续。
+              这会保存你的进度并结束当前面试，结束后将无法继续。
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -2661,7 +2679,7 @@ export function VoiceInterface({
               className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
               onClick={handleEndInterview}
             >
-              结束测试
+              结束面试
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -59,7 +59,10 @@ fi
 STAMP=$(date +%Y%m%d-%H%M%S)-$$
 STAGING=$(mktemp -d "$RELEASES/.${REVISION}.next.XXXXXX")
 SNAPSHOT="$BACKUP_ROOT/pre-$REVISION-$STAMP"
-PREVIOUS_TARGET=$(readlink -f "$CURRENT" 2>/dev/null || true)
+# Only report a previous target when the current symlink actually exists;
+# readlink -f on a missing path still prints the path itself.
+PREVIOUS_TARGET=""
+[ -L "$CURRENT" ] && PREVIOUS_TARGET=$(readlink -f "$CURRENT")
 DROPINS_INSTALLED=false
 CURRENT_SWITCHED=false
 mkdir -p "$SNAPSHOT"
@@ -143,6 +146,11 @@ ExecStart=/bin/bash -lc 'cd $CURRENT && npm run dev:voice'
 UNIT
 DROPINS_INSTALLED=true
 systemctl daemon-reload
+
+# Keep the stale-session sweeper current on every deploy (idempotent).
+APPLY_DIR=$(dirname "$(readlink -f "$0")")
+[ -f "$APPLY_DIR/install-stale-session-sweeper.sh" ] && \
+  bash "$APPLY_DIR/install-stale-session-sweeper.sh" || true
 
 ln -s "$RELEASE_FINAL" "${CURRENT}.next-$$"
 mv -Tf "${CURRENT}.next-$$" "$CURRENT"

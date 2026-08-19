@@ -45,7 +45,7 @@ test("progressive generation preserves Q1 and optional fallback Q2 safely", () =
   assert.match(generationRoute, /const preserveOpening = body\.preserveOpening === true/);
   assert.match(generationRoute, /const preserveDimensions = Array\.isArray/);
   assert.match(generationRoute, /preserveDimensions\.includes\(item\.key\)/);
-  assert.match(generationRoute, /const GENERATION_BUDGET_MS = 8_000/);
+  assert.match(generationRoute, /const GENERATION_BUDGET_MS = 25_000/);
   assert.match(generationRoute, /withGenerationBudget\(/);
   assert.match(generationRoute, /generated = \{ questions: \[\] \}/);
   assert.match(generationRoute, /missingPreservedDimensions/);
@@ -107,8 +107,7 @@ test("candidate interface keeps the full question and hybrid timing visible", ()
   assert.match(voiceInterface, /formatTime\(remainingSeconds\)/);
   assert.match(voiceInterface, /targetDurationMinutes.*分钟目标/);
   assert.match(voiceInterface, /durationMinutes.*分钟硬截止/);
-  assert.match(voiceInterface, /剩余 5 分钟时转为黄色提醒/);
-  assert.match(voiceInterface, /剩余 1 分钟时转为红色强提醒/);
+  assert.match(voiceInterface, /按你的节奏来/);
   assert.match(voiceInterface, /当前题目 · 始终显示/);
   assert.match(voiceInterface, /md:text-6xl/);
   assert.match(
