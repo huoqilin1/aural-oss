@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  candidateFacingQuestionCount,
+  isInternalQuestionDescription,
   isProgressiveOpeningOnly,
   mergeExpandedQuestionSet,
   shouldWaitForQuestionExpansion,
@@ -43,6 +45,24 @@ test("advances from Q1 to an available fallback Q2 without waiting", () => {
   assert.equal(shouldWaitForQuestionExpansion([opening], 0), true);
   assert.equal(shouldWaitForQuestionExpansion(openingWithFallback, 0), false);
   assert.equal(shouldWaitForQuestionExpansion(openingWithFallback, 1), true);
+});
+
+test("never exposes a progressive seed as the candidate-facing total", () => {
+  assert.equal(candidateFacingQuestionCount([opening]), 8);
+  assert.equal(candidateFacingQuestionCount(openingWithFallback), 8);
+  assert.equal(
+    candidateFacingQuestionCount([
+      { text: "普通题一", order: 0, description: null },
+      { text: "普通题二", order: 1, description: null },
+    ]),
+    2,
+  );
+});
+
+test("recognizes internal question metadata that candidates must not see", () => {
+  assert.equal(isInternalQuestionDescription("oprun_dimension:communication"), true);
+  assert.equal(isInternalQuestionDescription("条件式岗位过渡题"), true);
+  assert.equal(isInternalQuestionDescription("请结合实际案例作答"), false);
 });
 
 test("expands a live one-question snapshot without changing the active opening", () => {

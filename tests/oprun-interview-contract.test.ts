@@ -120,3 +120,18 @@ test("candidate interface keeps the full question and hybrid timing visible", ()
     /currentQuestionText[\s\S]{0,200}line-clamp-1/,
   );
 });
+
+test("invited recruitment candidates enter directly without exposing seed metadata", () => {
+  assert.match(
+    invitedCandidateSession,
+    /!onboardingDone && !isOprunRecruitmentInterview/,
+  );
+  assert.match(
+    invitedCandidateSession,
+    /autoStart=\{isOprunRecruitmentInterview\}/,
+  );
+  assert.match(voiceInterface, /void voice\.connect\(\)/);
+  assert.match(voiceInterface, /OPRUN_PLANNED_MAIN_QUESTION_COUNT/);
+  assert.match(voiceInterface, /isInternalQuestionDescription/);
+  assert.match(voiceInterface, /允许麦克风并开始面试/);
+});

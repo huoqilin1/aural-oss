@@ -35,6 +35,10 @@ import { useInterviewRecording } from "@/hooks/use-interview-recording";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { useVoice, type InterviewContext } from "@/hooks/use-voice";
 import {
+    isInternalQuestionDescription,
+    OPRUN_PLANNED_MAIN_QUESTION_COUNT,
+} from "@/lib/voice/dynamic-question-sync";
+import {
     AlertCircle,
     Check,
     CheckCircle2,
@@ -429,6 +433,8 @@ interface VoiceInterfaceProps {
   videoMode?: boolean;
   /** 候选人姓名（保留接口兼容；候选人面试页不展示个人信息） */
   candidateName?: string;
+  /** Start an invited recruitment interview as soon as the page opens. */
+  autoStart?: boolean;
   /** Render in static preview mode — shows full layout without connecting */
   preview?: boolean;
 }
@@ -451,6 +457,7 @@ export function VoiceInterface({
   onComplete,
   videoMode = false,
   preview = false,
+  autoStart = false,
 }: VoiceInterfaceProps) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
@@ -468,7 +475,7 @@ export function VoiceInterface({
   const [isSaving, setIsSaving] = useState(false);
   const [locallyCompleted, setLocallyCompleted] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
-  const [isStartingInterview, setIsStartingInterview] = useState(false);
+  const [isStartingInterview, setIsStartingInterview] = useState(autoStart);
   const [desktopTranscriptCollapsed, setDesktopTranscriptCollapsed] = useState(false);
   const [mobileTranscriptCollapsed, setMobileTranscriptCollapsed] = useState(true);
   const [chatInput, setChatInput] = useState("");
@@ -740,6 +747,20 @@ export function VoiceInterface({
       setIsStartingInterview(false);
     }
   }, [error]);
+
+  const autoStartAttemptedRef = useRef(false);
+  useEffect(() => {
+    if (
+      !autoStart
+      || preview
+      || voice.isConnected
+      || autoStartAttemptedRef.current
+    ) return;
+    autoStartAttemptedRef.current = true;
+    setError("");
+    setIsStartingInterview(true);
+    void voice.connect().catch(() => setIsStartingInterview(false));
+  }, [autoStart, preview, voice.isConnected, voice.connect]);
 
   // ── Start recording when voice connects (video mode) ───────────
   const recordingStartedRef = useRef(false);
@@ -1348,9 +1369,12 @@ export function VoiceInterface({
   }, [voice]);
 
   // ── Derived state ───────────────────────────────────────────────
+  const displayedTotalQuestions = /^数君招聘\s*·\s*/.test(interviewTitle)
+    ? Math.max(OPRUN_PLANNED_MAIN_QUESTION_COUNT, voice.totalQuestions)
+    : voice.totalQuestions;
   const progress =
-    voice.totalQuestions > 0
-      ? ((voice.currentQuestionIndex + 1) / voice.totalQuestions) * 100
+    displayedTotalQuestions > 0
+      ? ((voice.currentQuestionIndex + 1) / displayedTotalQuestions) * 100
       : 0;
   const lastAssistantMessage = useMemo(
     () => [...messages].reverse().find((message) => message.role === "assistant") ?? null,
@@ -1441,6 +1465,11 @@ export function VoiceInterface({
   const sortedQuestions = interviewContext.questions.slice().sort((a, b) => a.order - b.order);
   const currentQVoice = sortedQuestions[voice.currentQuestionIndex];
   const currentQuestionText = currentQVoice?.text || "";
+  const currentQuestionDescription = isInternalQuestionDescription(
+    currentQVoice?.description,
+  )
+    ? null
+    : currentQVoice?.description;
   const isCodingQuestion = currentQVoice?.type === "CODING";
   const isWhiteboardQuestion = currentQVoice?.type === "WHITEBOARD";
   const showVoiceTransitioning = voice.isTransitioning;
@@ -1686,12 +1715,12 @@ export function VoiceInterface({
             )}
 
             <div className="space-y-3">
-              {voice.totalQuestions > 0 && (
+              {displayedTotalQuestions > 0 && (
                 <div>
                   <Progress value={progress} className="h-2.5" />
                   <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground md:text-sm">
                     <span>已进行 {Math.round(progress)}%</span>
-                    <span>第 {voice.currentQuestionIndex + 1} / {voice.totalQuestions} 题</span>
+                    <span>第 {voice.currentQuestionIndex + 1} / {displayedTotalQuestions} 题</span>
                   </div>
                 </div>
               )}
@@ -1719,7 +1748,7 @@ export function VoiceInterface({
           {currentQuestionText && (
             <div className="rounded-2xl border border-primary/20 bg-card px-4 py-3 md:px-5 md:py-4">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-muted-foreground md:text-sm">
-                <span className="text-primary">第 {voice.currentQuestionIndex + 1} 题 / 共 {voice.totalQuestions} 题</span>
+                <span className="text-primary">第 {voice.currentQuestionIndex + 1} 题 / 共 {displayedTotalQuestions} 题</span>
                 <span className="rounded-lg bg-muted px-3 py-1.5 tabular-nums">
                   本题建议用时 {currentQVoice?.timeLimitSeconds
                     ? formatTime(currentQVoice.timeLimitSeconds)
@@ -1970,8 +1999,8 @@ export function VoiceInterface({
                         <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">题目</span>
                       </div>
                       <p className="mb-3 text-sm font-medium leading-snug">{currentQVoice.text}</p>
-                      {currentQVoice.description && (
-                        <p className="mb-3 text-xs text-muted-foreground whitespace-pre-wrap">{currentQVoice.description}</p>
+                      {currentQuestionDescription && (
+                        <p className="mb-3 text-xs text-muted-foreground whitespace-pre-wrap">{currentQuestionDescription}</p>
                       )}
                     </div>
                     {/* Draggable divider */}
@@ -2013,8 +2042,8 @@ export function VoiceInterface({
                         <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">题目</span>
                       </div>
                       <p className="mb-3 text-sm font-medium leading-snug">{currentQVoice.text}</p>
-                      {currentQVoice.description && (
-                        <p className="mb-3 text-xs text-muted-foreground">{currentQVoice.description}</p>
+                      {currentQuestionDescription && (
+                        <p className="mb-3 text-xs text-muted-foreground">{currentQuestionDescription}</p>
                       )}
                       {currentQVoice.starterCode?.code && (
                         <div className="overflow-hidden rounded-md border bg-zinc-950">
@@ -2171,7 +2200,7 @@ export function VoiceInterface({
                 )}
               </div>
 
-              {!voice.isConnected && !preview && (
+              {!voice.isConnected && !preview && !autoStart && (
                 <div className="mb-3 max-w-md rounded-xl border bg-card/60 px-4 py-3 text-left text-xs leading-relaxed text-muted-foreground">
                   <p className="mb-1.5 text-sm font-medium text-foreground">答题方式</p>
                   <p>· 对着麦克风说话,会实时变成文字</p>
@@ -2181,7 +2210,7 @@ export function VoiceInterface({
                 </div>
               )}
 
-              {!voice.isConnected && !preview && (
+              {!voice.isConnected && !preview && (!autoStart || !isStartingInterview) && (
                 <Button
                   size="lg"
                   disabled={isStartingInterview}
@@ -2201,13 +2230,17 @@ export function VoiceInterface({
                   ) : (
                     <Mic className="h-5 w-5" />
                   )}
-                  {isStartingInterview ? "连接中…" : "开始语音测试"}
+                  {isStartingInterview
+                    ? "连接中…"
+                    : autoStart
+                      ? "允许麦克风并开始面试"
+                      : "开始语音测试"}
                 </Button>
               )}
 
               {!voice.isConnected && !preview && isStartingInterview && (
                 <p className="text-sm text-muted-foreground">
-                  正在连接测试,需要几秒钟。
+                  正在进入面试,需要几秒钟。
                 </p>
               )}
 

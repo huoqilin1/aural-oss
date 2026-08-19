@@ -7,7 +7,10 @@ import { IntervieweeOnboarding } from "@/components/session/interviewee-onboardi
 import { PreparingScreen } from "@/components/session/preparing-screen";
 import { Card, CardContent } from "@/components/ui/card";
 import { trpc } from "@/lib/trpc/client";
-import { isProgressiveOpeningOnly } from "@/lib/voice/dynamic-question-sync";
+import {
+  candidateFacingQuestionCount,
+  isProgressiveOpeningOnly,
+} from "@/lib/voice/dynamic-question-sync";
 import { buildInviteResumeState } from "@/lib/voice/invite-resume-state";
 import { CheckCircle2 } from "lucide-react";
 import dynamic from "next/dynamic";
@@ -74,6 +77,12 @@ export default function InviteSessionPage() {
 
   const session = (candidate.data as any).session;
   const interview = (candidate.data as any).interview;
+  const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(
+    String(interview.title ?? ""),
+  );
+  const displayedQuestionCount = candidateFacingQuestionCount(
+    interview.questions ?? [],
+  );
 
   if (!session) {
     return <PreparingScreen />;
@@ -120,12 +129,12 @@ export default function InviteSessionPage() {
     );
   }
 
-  if (!onboardingDone) {
+  if (!onboardingDone && !isOprunRecruitmentInterview) {
     return (
       <IntervieweeOnboarding
         interviewTitle={interview.title}
         interviewDescription={interview.description}
-        questionCount={interview.questions?.length ?? 0}
+        questionCount={displayedQuestionCount}
         timeLimitMinutes={interview.timeLimitMinutes}
         language={interview.language}
         antiCheatingEnabled={!!interview.antiCheatingEnabled}
@@ -177,6 +186,7 @@ export default function InviteSessionPage() {
           onComplete={handleComplete}
           videoMode={!!interview.videoEnabled}
           candidateName={(candidate.data as any).name}
+          autoStart={isOprunRecruitmentInterview}
         />
       </>
     );

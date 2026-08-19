@@ -15,6 +15,8 @@ const OPRUN_MAIN_DIMENSIONS = new Set([
   "motivation_stability",
 ]);
 
+export const OPRUN_PLANNED_MAIN_QUESTION_COUNT = OPRUN_MAIN_DIMENSIONS.size;
+
 export function isProgressiveQuestionSet(
   questions: readonly DynamicQuestionLike[],
 ): boolean {
@@ -35,6 +37,22 @@ export function isProgressiveOpeningOnly(
   questions: readonly DynamicQuestionLike[],
 ): boolean {
   return isProgressiveQuestionSet(questions);
+}
+
+export function candidateFacingQuestionCount(
+  questions: readonly DynamicQuestionLike[],
+): number {
+  return isProgressiveQuestionSet(questions)
+    ? OPRUN_PLANNED_MAIN_QUESTION_COUNT
+    : questions.length;
+}
+
+export function isInternalQuestionDescription(
+  description: string | null | undefined,
+): boolean {
+  const value = String(description ?? "").trim();
+  return value.startsWith("oprun_dimension:")
+    || /(?:固定|过渡|兜底)题/.test(value);
 }
 
 export function shouldWaitForQuestionExpansion(
