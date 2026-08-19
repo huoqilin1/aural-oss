@@ -41,3 +41,7 @@ test-results/
 # Misc
 *.pem
 .vercel
+
+# Release pipeline local outputs
+.artifacts/
+.tmp/
