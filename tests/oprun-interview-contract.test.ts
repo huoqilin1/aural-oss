@@ -13,6 +13,10 @@ const invitedCandidateSession = readFileSync(
   "src/app/i/invite/[token]/session/page.tsx",
   "utf8",
 );
+const candidateRouter = readFileSync(
+  "src/server/routers/candidate.ts",
+  "utf8",
+);
 const voiceInterface = readFileSync(
   "src/components/session/voice-interface.tsx",
   "utf8",
@@ -77,6 +81,19 @@ test("the browser pushes generated questions into an already-open relay", () => 
   assert.match(voiceHook, /type: "question_set_update"/);
   assert.match(voiceHook, /questions,/);
   assert.match(voiceHook, /Math\.max\(current\.totalQuestions, questions\.length\)/);
+});
+
+test("invited candidates resume the persisted question and transcript", () => {
+  assert.match(candidateRouter, /session:sessions\(\*, messages\(\*\)\)/);
+  assert.match(invitedCandidateSession, /session\.currentQuestionId/);
+  assert.match(invitedCandidateSession, /buildInviteResumeState/);
+  assert.match(invitedCandidateSession, /startQuestionIndex: resumeState\.questionIndex/);
+  assert.match(invitedCandidateSession, /initialMessages=\{resumeState\.isResuming \? resumeTextMessages/);
+  assert.match(invitedCandidateSession, /initialDrawings=\{resumeState\.isResuming && resumeDrawings\.length/);
+
+  const voiceHook = readFileSync("src/hooks/use-voice.ts", "utf8");
+  assert.match(voiceHook, /keepalive: true/);
+  assert.match(voiceHook, /Progress save failed with HTTP/);
 });
 
 test("OpRun recruitment relay caps follow-ups across the entire interview", () => {

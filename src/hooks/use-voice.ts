@@ -549,11 +549,15 @@ export function useVoice({
       if (messages.length === 0 && typeof currentQuestionIndex !== "number") return;
 
       try {
-        await fetch("/api/voice/save", {
+        const response = await fetch("/api/voice/save", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ sessionId, messages, currentQuestionIndex }),
+          keepalive: true,
         });
+        if (!response.ok) {
+          throw new Error(`Progress save failed with HTTP ${response.status}`);
+        }
         log.info(
           `Progress saved: ${messages.length} msgs, Q${currentQuestionIndex + 1}`
         );

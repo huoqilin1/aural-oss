@@ -8,6 +8,7 @@ import { PreparingScreen } from "@/components/session/preparing-screen";
 import { Card, CardContent } from "@/components/ui/card";
 import { trpc } from "@/lib/trpc/client";
 import { isProgressiveOpeningOnly } from "@/lib/voice/dynamic-question-sync";
+import { buildInviteResumeState } from "@/lib/voice/invite-resume-state";
 import { CheckCircle2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
@@ -78,6 +79,26 @@ export default function InviteSessionPage() {
     return <PreparingScreen />;
   }
 
+  const resumeState = buildInviteResumeState(
+    interview.questions ?? [],
+    session.currentQuestionId,
+    session.messages ?? [],
+  );
+  const resumeTextMessages = resumeState.orderedMessages
+    .filter((message: any) => message.contentType === "TEXT")
+    .map((message: any) => ({
+      id: message.id,
+      role: message.role,
+      content: message.content,
+    }));
+  const resumeDrawings = resumeState.orderedMessages
+    .filter((message: any) => message.contentType === "WHITEBOARD" && message.whiteboardData)
+    .map((message: any) => ({
+      id: message.content,
+      label: (message.whiteboardData as Record<string, unknown>)?.label as string ?? "Drawing",
+      snapshotData: JSON.stringify(message.whiteboardData),
+    }));
+
   if (completed || session.status === "COMPLETED") {
     return (
       <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
@@ -111,7 +132,7 @@ export default function InviteSessionPage() {
         voiceEnabled={!!interview.voiceEnabled}
         chatEnabled={!!interview.chatEnabled}
         aiName={interview.aiName}
-        questionTypes={(interview.questions ?? []).map((q: any) => q.type as string)}
+        questionTypes={resumeState.orderedQuestions.map((q: any) => q.type as string)}
         onComplete={() => setOnboardingDone(true)}
       />
     );
@@ -128,7 +149,8 @@ export default function InviteSessionPage() {
       aiTone: interview.aiTone,
       language: interview.language,
       followUpDepth: interview.followUpDepth,
-      questions: interview.questions.map((q: any) => ({
+      startQuestionIndex: resumeState.questionIndex,
+      questions: resumeState.orderedQuestions.map((q: any) => ({
         text: q.text,
         type: q.type,
         description: q.description,
@@ -149,6 +171,8 @@ export default function InviteSessionPage() {
           questionCount={interview.questions.length}
           interviewContext={interviewContext}
           durationMinutes={interview.timeLimitMinutes ?? undefined}
+          initialMessages={resumeState.isResuming ? resumeTextMessages : undefined}
+          initialDrawings={resumeState.isResuming && resumeDrawings.length ? resumeDrawings : undefined}
           chatEnabled={!!interview.chatEnabled}
           onComplete={handleComplete}
           videoMode={!!interview.videoEnabled}

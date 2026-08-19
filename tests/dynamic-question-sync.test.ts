@@ -5,6 +5,7 @@ import {
   mergeExpandedQuestionSet,
   shouldWaitForQuestionExpansion,
 } from "../src/lib/voice/dynamic-question-sync";
+import { buildInviteResumeState } from "../src/lib/voice/invite-resume-state";
 
 const opening = {
   text: "固定开场题",
@@ -85,4 +86,35 @@ test("expands a conditional fallback snapshot without changing answered question
   const merged = mergeExpandedQuestionSet(openingWithFallback, generated, 1);
   assert.equal(merged?.length, 8);
   assert.deepEqual(merged?.slice(0, 2), openingWithFallback);
+});
+
+test("restores an invited candidate to the persisted question", () => {
+  const state = buildInviteResumeState(
+    [
+      { id: "q-3", order: 2, text: "第三题" },
+      { id: "q-1", order: 0, text: "第一题" },
+      { id: "q-2", order: 1, text: "第二题" },
+    ],
+    "q-2",
+    [
+      { id: "m-2", timestamp: "2026-08-19T08:02:00.000Z", content: "后保存" },
+      { id: "m-1", timestamp: "2026-08-19T08:01:00.000Z", content: "先保存" },
+    ],
+  );
+
+  assert.equal(state.questionIndex, 1);
+  assert.equal(state.isResuming, true);
+  assert.deepEqual(state.orderedQuestions.map((question) => question.id), ["q-1", "q-2", "q-3"]);
+  assert.deepEqual(state.orderedMessages.map((message) => message.id), ["m-1", "m-2"]);
+});
+
+test("falls back safely when a persisted question no longer exists", () => {
+  const state = buildInviteResumeState(
+    [{ id: "q-1", order: 0 }],
+    "removed-question",
+    [],
+  );
+
+  assert.equal(state.questionIndex, 0);
+  assert.equal(state.isResuming, false);
 });
