@@ -725,7 +725,7 @@ async function summarizeQuestion(
     .join("\n");
 
   try {
-    const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), 150, {
+    const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), undefined, {
       stage: "q-summary",
     });
     log.info(`Q summary: "${result.slice(0, 100)}..."`);
@@ -1866,20 +1866,6 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     return agentCtx;
   }
 
-  function getMaxTokensForQuestion(type: string): number {
-    switch (type) {
-      case "CODING":
-      case "WHITEBOARD":
-      case "RESEARCH":
-        return 250;
-      case "SINGLE_CHOICE":
-      case "MULTIPLE_CHOICE":
-        return 200;
-      default:
-        return 150;
-    }
-  }
-
   async function generateControlledResponse(opts?: { forceSkip?: boolean }): Promise<string> {
     const forceSkip = opts?.forceSkip ?? false;
     const currentQ = sortedQuestions[currentQuestionIndex];
@@ -1976,9 +1962,8 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       ? PROMPTS.response.codingWb(promptParams)
       : PROMPTS.response.normal(promptParams));
 
-    const maxTokens = getMaxTokensForQuestion(currentQ.type);
     const startMs = Date.now();
-    let response = await callRelayLLM(prompt, maxTokens, {
+    let response = await callRelayLLM(prompt, undefined, {
       stage: "interview-turn",
       question: currentQuestionIndex + 1,
     });
@@ -2049,7 +2034,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       if (recentAgentResponses.length > 5) recentAgentResponses.shift();
     }
 
-    log.info(`Response LLM (${Date.now() - startMs}ms, ${maxTokens}tok, turn ${userTurnsOnCurrentQ}): "${response.slice(0, 100)}..."`);
+    log.info(`Response LLM (${Date.now() - startMs}ms, turn ${userTurnsOnCurrentQ}): "${response.slice(0, 100)}..."`);
     return response;
   }
 

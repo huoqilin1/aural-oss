@@ -140,7 +140,7 @@ export class GeminiProvider implements LLMProvider {
           config: {
             systemInstruction: systemInstruction || undefined,
             temperature: params.temperature ?? 0.25,
-            maxOutputTokens: params.maxTokens ?? 2048,
+            ...(params.maxTokens !== undefined ? { maxOutputTokens: params.maxTokens } : {}),
           },
         });
         break;
@@ -183,7 +183,7 @@ export class GeminiProvider implements LLMProvider {
       config: {
         systemInstruction: systemInstruction || undefined,
         temperature: params.temperature ?? 0.25,
-        maxOutputTokens: params.maxTokens ?? 2048,
+        ...(params.maxTokens !== undefined ? { maxOutputTokens: params.maxTokens } : {}),
       },
     });
 

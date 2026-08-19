@@ -107,6 +107,8 @@ free -m | awk 'NR==2{print "mem_avail_mb=" $7}'
 systemctl is-active --quiet aural.service aural-voice.service && echo "services=ok" || echo "services=down"
 systemctl is-active --quiet docker && echo "docker=ok" || echo "docker=down"
 if [ -f /root/aural/current/REVISION ]; then echo "revision=$(cat /root/aural/current/REVISION)"; elif [ -f /root/aural-oss/REVISION ]; then echo "revision=$(cat /root/aural-oss/REVISION)"; else echo "revision=unknown"; fi
+A=$(docker exec supabase_db_aural psql -U postgres -d postgres -t -A -c "select count(*) from sessions where status='IN_PROGRESS' AND \"lastActivityAt\" > now() - interval '5 minutes'" 2>/dev/null | tr -d '[:space:]')
+echo "active_sessions=${A:-0}"
 '@
 $probeOutput = (& $sshExe @sshCommonArgs $TargetHost $remoteProbe) -join "`n"
 if ($LASTEXITCODE -ne 0 -or $probeOutput -notmatch 'conn=ok') {
@@ -130,6 +132,23 @@ if ($PreflightOnly) {
   exit 0
 }
 if (-not $Apply) { Write-Host "DRY-RUN：添加 -Apply 后才会构建和发布"; exit 0 }
+
+# 活跃面试排空（2026-08-20）：5 分钟内有活动的会话存在时等待其结束再切换，
+# 避免发布重启打断真人面试（当晚已误伤两次）。
+if ($probeOutput -match 'active_sessions=(\d+)') {
+  $activeSessions = [int]$Matches[1]
+  if ($activeSessions -gt 0) {
+    Write-Host "排空=${activeSessions} 场面试进行中，等待结束（最多 20 分钟）…"
+    for ($waitRound = 1; $waitRound -le 20; $waitRound++) {
+      Start-Sleep -Seconds 60
+      $reProbe = (& $sshExe @sshCommonArgs $TargetHost $remoteProbe) -join "`n"
+      if ($reProbe -match 'active_sessions=(\d+)') { $activeSessions = [int]$Matches[1] }
+      Write-Host "排空=第 ${waitRound} 分钟，剩余 ${activeSessions} 场"
+      if ($activeSessions -eq 0) { break }
+    }
+    if ($activeSessions -gt 0) { throw "仍有 ${activeSessions} 场活跃面试，为避免打断已中止发布（稍后重试）" }
+  }
+}
 
 # ---- 4. 构建或复用制品 -----------------------------------------------------
 $artifactDir = Join-Path $repoRoot ".artifacts\production"

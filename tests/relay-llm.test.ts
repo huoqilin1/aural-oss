@@ -42,7 +42,7 @@ test("default chain is deepseek-v4-pro -> glm-5.3 -> kimi when provider keys set
       MINIMAX_API_KEY: undefined,
     },
     () => {
-      assert.equal(relayLlm.getRelayLlmModel(), "deepseek-v4-pro");
+      assert.equal(relayLlm.getRelayLlmModel(), "deepseek-v4-flash");
       assert.equal(relayLlm.getRelayLlmFallbackModel(), "glm-5.3");
     },
   );
@@ -60,7 +60,7 @@ test("chain trims to configured providers (deepseek + kimi only)", () => {
       MINIMAX_API_KEY: undefined,
     },
     () => {
-      assert.equal(relayLlm.getRelayLlmModel(), "deepseek-v4-pro");
+      assert.equal(relayLlm.getRelayLlmModel(), "deepseek-v4-flash");
       assert.equal(relayLlm.getRelayLlmFallbackModel(), "kimi-latest");
     },
   );

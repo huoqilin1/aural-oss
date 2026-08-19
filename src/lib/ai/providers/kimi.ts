@@ -37,7 +37,7 @@ export class KimiProvider implements LLMProvider {
       ...(FIXED_TEMPERATURE_MODELS.has(model)
         ? {}
         : { temperature: params.temperature ?? 0.7 }),
-      max_tokens: params.maxTokens ?? 2048,
+      ...(params.maxTokens !== undefined ? { max_tokens: params.maxTokens } : {}),
     });
 
     const choice = response.choices[0];
@@ -64,7 +64,7 @@ export class KimiProvider implements LLMProvider {
       ...(FIXED_TEMPERATURE_MODELS.has(model)
         ? {}
         : { temperature: params.temperature ?? 0.7 }),
-      max_tokens: params.maxTokens ?? 2048,
+      ...(params.maxTokens !== undefined ? { max_tokens: params.maxTokens } : {}),
       stream: true,
     });
 

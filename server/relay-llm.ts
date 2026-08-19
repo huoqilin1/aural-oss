@@ -11,15 +11,15 @@ import { createLogger } from "../src/lib/logger";
 
 const log = createLogger("relay-llm");
 
-// 模型策略（王总 2026-08-20）：
-// - DeepSeek 固定写死"深思考"变体（它有快反应/长反应/深思考三档，自动追新可能漂到
-//   快档；深思考是质量底线，禁止漂移）。
-// - GLM / Kimi 追各家最新版：检测到新版本（如 glm-5.2 → glm-5.3）就更新默认值。
-// - 所有 ID 均可环境变量覆盖（DEEPSEEK_MODEL / ZHIPU_MODEL / KIMI_MODEL /
-//   RECRUIT_GENERATOR_MODEL），升级改 env 即生效，无需改代码重发版。
-// 各默认值核查日期 2026-08-20。
+// 模型策略（王总 2026-08-20 定稿，两条线并行）：
+// - 前台对话线（本模块）：deepseek-v4-flash 快模型，现场问答秒级回应。
+// - 后台出题线（generate-questions 路由）：deepseek-v4-pro 深思考模型，
+//   候选人答开场题时后台慢慢生成简历+岗位融合题。
+// - DeepSeek 档位写死（快/深两档不得互换漂移）；GLM / Kimi 追各家最新版。
+// - 所有 ID 可环境变量覆盖（DEEPSEEK_MODEL / ZHIPU_MODEL / KIMI_MODEL /
+//   RECRUIT_GENERATOR_MODEL），升级改 env 即生效。核查日期 2026-08-20。
 function deepseekRelayModel(): string {
-  return process.env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-pro";
+  return process.env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash";
 }
 function zhipuRelayModel(): string {
   return process.env.ZHIPU_MODEL?.trim() || process.env.GLM_MODEL?.trim() || "glm-5.3";
@@ -251,7 +251,7 @@ function getGeminiClient(apiKey: string): GoogleGenAI {
 async function callGemini(
   endpoint: RelayLlmEndpoint,
   prompt: string,
-  maxTokens: number,
+  maxTokens?: number,
 ): Promise<{ text: string; usage?: RelayLlmUsage }> {
   const client = getGeminiClient(endpoint.apiKey);
   const stream = await client.models.generateContentStream({
@@ -259,7 +259,7 @@ async function callGemini(
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     config: {
       temperature: endpoint.temperature,
-      maxOutputTokens: maxTokens,
+      ...(maxTokens ? { maxOutputTokens: maxTokens } : {}),
     },
   });
 
@@ -281,13 +281,14 @@ async function callGemini(
 async function callOpenAICompatible(
   endpoint: RelayLlmEndpoint,
   prompt: string,
-  maxTokens: number,
+  maxTokens?: number,
 ): Promise<{ text: string; usage?: RelayLlmUsage }> {
+  // 2026-08-20 王总指令：Token 无上限——不传 max_tokens，让模型自然收尾。
   const reqBody: Record<string, unknown> = {
     model: endpoint.model,
     messages: [{ role: "user", content: prompt }],
     temperature: endpoint.temperature,
-    max_tokens: maxTokens,
+    ...(maxTokens ? { max_tokens: maxTokens } : {}),
   };
   // 关思考(GLM/deepseek 支持):RELAY_LLM_DISABLE_THINKING=1 时禁用推理,秒回省成本。
   // 注意:DeepThink 优先策略下不要设置此变量(2026-08-20 王总要的是深思考质量)。
@@ -321,7 +322,7 @@ async function callOpenAICompatible(
 async function callEndpoint(
   endpoint: RelayLlmEndpoint,
   prompt: string,
-  maxTokens: number,
+  maxTokens?: number,
 ): Promise<{ text: string; usage?: RelayLlmUsage }> {
   if (!endpoint.apiKey) {
     throw new Error(`No API key for relay model ${endpoint.model}`);
@@ -333,7 +334,7 @@ async function callEndpoint(
 
 export async function callRelayLLM(
   prompt: string,
-  maxTokens = 150,
+  maxTokens?: number,
   meta?: RelayLlmCallMeta,
 ): Promise<string> {
   const chain = getEndpointChain();
