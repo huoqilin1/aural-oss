@@ -31,7 +31,10 @@ export class DeepSeekProvider implements LLMProvider {
       messages: this.toOpenAIMessages(params.messages),
       temperature: params.temperature ?? 0.7,
       max_tokens: params.maxTokens ?? 2048,
-    });
+      ...(params.disableThinking
+        ? { thinking: { type: "disabled" } } as Record<string, unknown>
+        : {}),
+    } as Parameters<typeof this.client.chat.completions.create>[0]);
     const choice = response.choices[0];
     return {
       content: choice.message.content ?? "",

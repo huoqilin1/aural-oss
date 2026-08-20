@@ -261,9 +261,11 @@ export async function POST(
       provider.generateResponse({
         messages,
         temperature: 0.5,
-        // 供应商默认 max_tokens 只有 2048，深度模型的思考过程就能吃满，
-        // JSON 挤不进去（实测 2026-08-20）。显式给 8000 思考+正文才够。
-        maxTokens: 8000,
+        // 思考型模型会把输出预算全部烧在隐藏思考通道、正文为空（实测
+        // tokens_out=2048/8000 两次打满且无 JSON）。出题的"深度"已编码在
+        // 提示词（维度骨架+专家范例+难度要求），此处显式关思考直出 JSON。
+        maxTokens: 4000,
+        disableThinking: true,
         model: RECRUIT_GENERATOR_MODEL,
       }),
     );

@@ -12,6 +12,7 @@ export interface GenerationParams {
   messages: LLMMessage[];
   temperature?: number;
   maxTokens?: number;
+  disableThinking?: boolean;
   stream?: boolean;
 }
 
