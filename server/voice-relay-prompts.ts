@@ -98,7 +98,8 @@ export const SPOKEN = {
   greeting(aiName: string, title: string, count: number, spokenQuestion: string): BiText {
     // 招聘会话的 title 形如「数君招聘 · 岗位名」；开场先说清今天面的岗位
     // 以及这是 AI 根据简历匹配的结果，避免候选人反问"这是什么岗位"。
-    const position = title.replace(/^数君招聘\s*·\s*/, "").trim();
+    const rawTitle = title.replace(/^数君招聘\s*·\s*/, "").trim();
+    const position = rawTitle && !rawTitle.includes("数君") ? rawTitle : "";
     const zhPositionLead = position
       ? `今天和你聊的是「${position}」——这是 AI 根据你的简历为你匹配的岗位，聊下来如果你觉得不合适，随时告诉我。`
       : "";
