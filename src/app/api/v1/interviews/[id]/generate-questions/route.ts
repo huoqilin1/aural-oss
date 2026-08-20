@@ -261,6 +261,9 @@ export async function POST(
       provider.generateResponse({
         messages,
         temperature: 0.5,
+        // 供应商默认 max_tokens 只有 2048，深度模型的思考过程就能吃满，
+        // JSON 挤不进去（实测 2026-08-20）。显式给 8000 思考+正文才够。
+        maxTokens: 8000,
         model: RECRUIT_GENERATOR_MODEL,
       }),
     );
