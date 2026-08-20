@@ -129,7 +129,9 @@ export default function InviteSessionPage() {
     );
   }
 
-  if (!onboardingDone && !isOprunRecruitmentInterview) {
+  // 招聘面试同样先看「面试须知」:候选人读说明的同时,后台正好继续生成定制题
+  // (王总 2026-08-20:说明要放在最前面,答完题怎么进下一题必须提前告知)
+  if (!onboardingDone) {
     return (
       <IntervieweeOnboarding
         interviewTitle={interview.title}

@@ -498,6 +498,8 @@ export function VoiceInterface({
   // ── Countdown timer state ────────────────────────────────────────
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
   const [questionElapsedSeconds, setQuestionElapsedSeconds] = useState(0);
+  // 本题是否已有作答(候选人说过话):用于答完后醒目提示「下一题」(王总 2026-08-20)
+  const [answeredCurrentQuestion, setAnsweredCurrentQuestion] = useState(false);
   const timerExpiredRef = useRef(false);
   const timerStartedRef = useRef(false);
 
@@ -682,6 +684,7 @@ export function VoiceInterface({
         const normalized = normalizeTranscript(text);
         if (normalized === lastFinalTranscriptRef.current) return;
         lastFinalTranscriptRef.current = normalized;
+        setAnsweredCurrentQuestion(true);
         setMessages((prev) => upsertFinalVoiceTranscript(prev, text));
       } else if (!isFinal && text.trim()) {
         lastFinalTranscriptRef.current = "";
@@ -800,6 +803,7 @@ export function VoiceInterface({
 
   useEffect(() => {
     setQuestionElapsedSeconds(0);
+    setAnsweredCurrentQuestion(false);
   }, [voice.currentQuestionIndex]);
 
   useEffect(() => {
@@ -1363,6 +1367,7 @@ export function VoiceInterface({
     if (!trimmed) return;
     voice.interruptPlayback();
     const msg: Message = { id: crypto.randomUUID(), role: "user", content: trimmed, source: "chat" };
+    setAnsweredCurrentQuestion(true);
     setMessages((prev) => [...prev, msg]);
     setChatMessages((prev) => [...prev, msg]);
     voice.sendTextMessage(trimmed);
@@ -1410,8 +1415,13 @@ export function VoiceInterface({
       : 0;
   const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(interviewTitle);
   const conciseInterviewTitle = interviewTitle.replace(/^数君招聘\s*·\s*/, "");
+  // 占位符标题(分岗等待超时的兜底)不当作岗位名展示
+  const placeholderInterviewTitle =
+    /^(?:数君岗位|待自动分岗|岗位确认中)$/.test(conciseInterviewTitle.trim());
   const displayInterviewTitle = isOprunRecruitmentInterview
-    ? `OpRun AI 面试 · ${conciseInterviewTitle}`
+    ? placeholderInterviewTitle
+      ? "OpRun AI 面试"
+      : `OpRun AI 面试 · ${conciseInterviewTitle}`
     : conciseInterviewTitle;
   const targetDurationMinutes = durationMinutes === 32 ? 30 : durationMinutes;
   const durationDescription = durationMinutes
@@ -2216,6 +2226,30 @@ export function VoiceInterface({
                       : voice.aiTranscript}
                   </p>
                 )}
+
+                {/* 答完本题后的醒目「下一题」入口(王总 2026-08-20):AI 没在说话/思考时出现 */}
+                {voice.isConnected &&
+                  !preview &&
+                  !locallyCompleted &&
+                  answeredCurrentQuestion &&
+                  !onFinalQuestion &&
+                  !showVoiceTransitioning &&
+                  !showVoiceProcessing &&
+                  !showVoiceSpeaking && (
+                    <div className="flex flex-col items-center gap-1.5">
+                      <Button
+                        size="lg"
+                        onClick={handleNextQuestion}
+                        className="gap-2 rounded-full px-10 text-base font-semibold shadow-lg"
+                      >
+                        <SkipForward className="h-5 w-5" />
+                        下一题
+                      </Button>
+                      <span className="text-xs text-muted-foreground">
+                        本题答完了就点这里，或直接说「我答完了」
+                      </span>
+                    </div>
+                  )}
               </div>
 
               {!voice.isConnected && !preview && !autoStart && (
@@ -2628,7 +2662,7 @@ export function VoiceInterface({
                   <SkipForward className="h-4 w-4" />
                 )}
               </Button>
-              <span onClick={handleNextQuestion} className="hidden text-[10px] text-muted-foreground md:block cursor-pointer hover:text-foreground">{voice.totalQuestions === 0 ? "我答完了" : "下一题"}</span>
+              <span onClick={handleNextQuestion} className="text-[10px] text-muted-foreground cursor-pointer hover:text-foreground">{voice.totalQuestions === 0 ? "我答完了" : "下一题"}</span>
             </div>
 
             <div className="flex flex-col items-center gap-0.5">

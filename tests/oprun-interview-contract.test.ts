@@ -7,6 +7,7 @@ const generationRoute = readFileSync(
   "utf8",
 );
 const relay = readFileSync("server/voice-relay.ts", "utf8");
+const relayPrompts = readFileSync("server/voice-relay-prompts.ts", "utf8");
 const openAiRelay = readFileSync("server/openai-voice-relay.ts", "utf8");
 const candidateSession = readFileSync("src/app/i/[slug]/session/page.tsx", "utf8");
 const invitedCandidateSession = readFileSync(
@@ -19,6 +20,10 @@ const candidateRouter = readFileSync(
 );
 const voiceInterface = readFileSync(
   "src/components/session/voice-interface.tsx",
+  "utf8",
+);
+const intervieweeOnboarding = readFileSync(
+  "src/components/session/interviewee-onboarding.tsx",
   "utf8",
 );
 
@@ -120,8 +125,14 @@ test("candidate interface keeps the full question and hybrid timing visible", ()
   );
 });
 
-test("invited recruitment candidates enter directly without exposing seed metadata", () => {
+test("invited recruitment candidates see the interview notice before entering", () => {
+  // 招聘面试同样先看「面试须知」(怎么进下一题/时长/环境要求),读须知的时间
+  // 正好掩盖后台定制题生成;确认后才自动连接开始 (王总 2026-08-20)
   assert.match(
+    invitedCandidateSession,
+    /!onboardingDone\) \{/,
+  );
+  assert.doesNotMatch(
     invitedCandidateSession,
     /!onboardingDone && !isOprunRecruitmentInterview/,
   );
@@ -133,4 +144,25 @@ test("invited recruitment candidates enter directly without exposing seed metada
   assert.match(voiceInterface, /OPRUN_PLANNED_MAIN_QUESTION_COUNT/);
   assert.match(voiceInterface, /isInternalQuestionDescription/);
   assert.match(voiceInterface, /允许麦克风并开始面试/);
+  assert.match(intervieweeOnboarding, /面试须知/);
+  assert.match(intervieweeOnboarding, /如何进入下一题/);
+  assert.match(intervieweeOnboarding, /isRecruitmentInterview/);
+});
+
+test("answered questions surface a prominent next-question control", () => {
+  // 答完本题后屏幕中央出现大按钮「下一题」,口说「我答完了」同样生效 (王总 2026-08-20)
+  assert.match(voiceInterface, /answeredCurrentQuestion/);
+  assert.match(voiceInterface, /setAnsweredCurrentQuestion\(true\)/);
+  assert.match(voiceInterface, /本(?:题)?答完了就点这里，或直接说「我答完了」/);
+  assert.match(relay, /答完了\|我答完了/);
+});
+
+test("questions stay tactful about employment status", () => {
+  // 生成题与追问都不得以「你目前离职正在找工作」这类求职状态为提问前提
+  assert.match(generationRoute, /严禁把候选人的离职状态/);
+  assert.match(
+    generationRoute,
+    /直接问职业选择、岗位理解和未来规划本身/,
+  );
+  assert.match(relayPrompts, /绝不提候选人的离职状态/);
 });

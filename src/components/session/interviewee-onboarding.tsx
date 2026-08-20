@@ -1170,6 +1170,9 @@ export function IntervieweeOnboarding({
   const [step, setStep] = useState<OnboardingStep>("info");
   const [agreed, setAgreed] = useState(false);
 
+  // 招聘语音面(数君招聘):给出操作型须知——怎么进下一题、多长时间、语音对话形式
+  const isRecruitmentInterview = /^数君招聘\s*·\s*/.test(interviewTitle || "");
+
   const [cameraDone, setCameraDone] = useState(false);
   const [micDone, setMicDone] = useState(false);
   const [screenDone, setScreenDone] = useState(false);
@@ -1222,8 +1225,34 @@ export function IntervieweeOnboarding({
 
           <Card className="mt-4">
             <CardContent className="space-y-3 p-4 sm:p-6">
-              <h3 className="font-semibold">测试须知</h3>
-              {antiCheatingEnabled ? (
+              <h3 className="font-semibold">{isRecruitmentInterview ? "面试须知" : "测试须知"}</h3>
+              {isRecruitmentInterview ? (
+                <ol className="list-inside list-decimal space-y-2 text-sm text-muted-foreground">
+                  <li>
+                    本次为 <span className="font-medium text-foreground">AI 语音面试</span>
+                    ，面试官为 AI 助手「{aiName || "小君"}」。第 1 题是自我介绍，之后会围绕你的简历和应聘岗位提问
+                    {questionCount > 0 ? `，共 ${questionCount} 道题` : ""}。
+                  </li>
+                  <li>
+                    <span className="font-medium text-foreground">如何进入下一题：</span>{" "}
+                    每题答完后，点击屏幕下方的{" "}
+                    <span className="font-medium text-primary">「下一题」按钮</span> 立即进入下一题；
+                    也可以直接说「我答完了」；停顿超过 30 秒会自动进入下一题。
+                  </li>
+                  <li>
+                    全程约 {timeLimitMinutes ? `${timeLimitMinutes} 分钟` : "30 分钟"}
+                    ，<span className="font-medium text-foreground">不用赶时间</span>，按你的节奏回答；
+                    临近结束时我们会轻声提醒，不会打断你。
+                  </li>
+                  <li>
+                    请在<span className="font-medium text-foreground">安静环境</span>下使用最新版
+                    Chrome 浏览器，允许麦克风（和摄像头）权限，确保声音清晰可辨。
+                  </li>
+                  <li>
+                    题目会始终显示在页面上，随时可以看到当前题目；测试过程中请勿离开本页面。
+                  </li>
+                </ol>
+              ) : antiCheatingEnabled ? (
                 <>
                   <div className="rounded-md bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 dark:bg-amber-950/30 dark:text-amber-200">
                     为保证测试公平,以下监考措施将在本次测试全程生效。
@@ -1269,15 +1298,20 @@ export function IntervieweeOnboarding({
                 checked={agreed}
                 onCheckedChange={(v) => setAgreed(v === true)}
               />
-              我已阅读并同意以上测试须知
+              我已阅读并同意以上{isRecruitmentInterview ? "面试" : "测试"}须知
             </label>
             <Button
               disabled={!agreed}
               onClick={() => handleComplete()}
               className="w-40"
             >
-              进入测试
+              {isRecruitmentInterview ? "开始面试" : "进入测试"}
             </Button>
+            {isRecruitmentInterview && (
+              <p className="text-xs text-muted-foreground">
+                点击开始后 AI 会先自我介绍并说出第 1 题，直接开口回答即可。
+              </p>
+            )}
           </div>
         </div>
       </div>

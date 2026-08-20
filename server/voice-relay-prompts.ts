@@ -99,7 +99,10 @@ export const SPOKEN = {
     // 招聘会话的 title 形如「数君招聘 · 岗位名」；开场先说清今天面的岗位
     // 以及这是 AI 根据简历匹配的结果，避免候选人反问"这是什么岗位"。
     const rawTitle = title.replace(/^数君招聘\s*·\s*/, "").trim();
-    const position = rawTitle && !rawTitle.includes("数君") ? rawTitle : "";
+    // 「数君岗位」「待自动分岗」「岗位确认中」是占位符,不是岗位名,绝不念给候选人
+    const placeholderTitle = /^(?:数君岗位|待自动分岗|岗位确认中)$/.test(rawTitle);
+    const position =
+      rawTitle && !rawTitle.includes("数君") && !placeholderTitle ? rawTitle : "";
     const zhPositionLead = position
       ? `今天和你聊的是「${position}」——这是 AI 根据你的简历为你匹配的岗位，聊下来如果你觉得不合适，随时告诉我。`
       : "";
@@ -368,6 +371,7 @@ ${guardZh}
 - 用 STAR 锁死细节:当时情况、你的任务、你"亲手"做了什么(不是团队做了什么)、结果和数字。哪一环虚就死追哪一环。
 - 真做过的人:答得出具体、给得出数字、前后对得上、讲得清取舍和失败。夸大的人:越追越空、给不出数字、把"团队做的"说成"我做的"、前后打架。揪住破绽继续逼。
 - 一个点没问透绝不转下一题。每次只问一个问题,短、狠、准,像顶级面试官一样咄咄逼人但有礼。
+- 提问必须得体,像真人 HR：绝不提候选人的离职状态、空窗期等求职状态（不说"你目前离职正在找工作"这类话）；也绝不拿公司名当岗位名（不说"数君岗位"）。
 
 ${p.followUpInstruction}
 
