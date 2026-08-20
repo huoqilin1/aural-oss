@@ -45,7 +45,7 @@ test("progressive generation preserves Q1 and optional fallback Q2 safely", () =
   assert.match(generationRoute, /const preserveOpening = body\.preserveOpening === true/);
   assert.match(generationRoute, /const preserveDimensions = Array\.isArray/);
   assert.match(generationRoute, /preserveDimensions\.includes\(item\.key\)/);
-  assert.match(generationRoute, /const GENERATION_BUDGET_MS = 60_000/);
+  assert.match(generationRoute, /const GENERATION_BUDGET_MS = 150_000/);
   assert.match(generationRoute, /withGenerationBudget\(/);
   assert.match(generationRoute, /generated = \{ questions: \[\] \}/);
   assert.match(generationRoute, /missingPreservedDimensions/);

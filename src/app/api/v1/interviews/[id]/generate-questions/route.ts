@@ -10,6 +10,12 @@ import { createLogger } from "@/lib/logger";
 
 const log = createLogger("api/v1/generate-questions");
 
+// 重入锁：平台 attempt 重试（指数退避最长 6 小时）可能再次触发出题。
+// 同一面试的生成进行中时直接跳过，避免并发深度生成白烧 Token。
+// 单进程部署下进程内 Map 足够；TTL 兜底防止异常路径漏删。
+const generationInFlight = new Map<string, number>();
+const GENERATION_LOCK_TTL_MS = 180_000;
+
 // 招聘一面出题:深度思考模型,按岗位+简历提前出题。现场追问走 relay-llm,不在这里。
 // 模型策略(王总 2026-08-20):DeepSeek 固定写死"深思考"变体(三档中锁深思考,禁止漂移);
 // 其余模型追最新版。环境变量 RECRUIT_GENERATOR_MODEL 可覆盖,升级改 env 即生效。核查日期 2026-08-20。
@@ -17,13 +23,15 @@ const RECRUIT_GENERATOR_MODEL = process.env.RECRUIT_GENERATOR_MODEL?.trim() || "
 // The fixed opening is already usable.  The deep generator (deepseek-v4-pro,
 // up to 6000 tokens) routinely needs 10-20s; an 8s budget made it lose the
 // race by milliseconds and every session fell back to the blueprint
-// template.  60s + reduced maxTokens (3500): even at 40s the deep model lost the race
-// (three live data points 2026-08-20). The candidate is still answering the
-// fixed opening (self-intro takes minutes), so a 60s full-set budget stays
-// invisible in practice.
+// template.  150s aligns with the real parallel window: the candidate spends 2-3
+// minutes on the fixed opening (self-intro), so the deep generation completes
+// invisibly in the background (王总 2026-08-20: the budget hides behind the
+// self-intro; Q2 uses the backup question only if generation is late, and
+// Q3+ are guaranteed custom because Q1+Q2 exceed the window). The platform
+// caller timeout was raised to 180s (AURAL_TIMEOUT) to match.
 // candidate perceives (they can already start on the fixed opening), while
 // the blueprint stays as the safety net.
-const GENERATION_BUDGET_MS = 60_000;
+const GENERATION_BUDGET_MS = 150_000;
 const RECRUIT_DIMENSIONS = [
   "communication",
   "job_duty_primary",
@@ -228,6 +236,13 @@ export async function POST(
     return apiError("BAD_REQUEST", "jobTitle 或 resumeText 至少要有一个", 400);
   }
 
+  const lockNow = Date.now();
+  const lockStarted = generationInFlight.get(interviewId);
+  if (lockStarted && lockNow - lockStarted < GENERATION_LOCK_TTL_MS) {
+    return Response.json({ data: { count: 0, skipped: "generation_in_progress" } });
+  }
+  generationInFlight.set(interviewId, lockNow);
+
   let generated: { questions?: Array<{ text?: unknown; dimension?: unknown }> };
   try {
     const provider = getProvider(RECRUIT_GENERATOR_MODEL);
@@ -395,6 +410,7 @@ export async function POST(
   });
 
   if (rows.length === 0) {
+    generationInFlight.delete(interviewId);
     return Response.json({ data: { count: 0 } });
   }
 
@@ -407,5 +423,6 @@ export async function POST(
     return apiError("INTERNAL_ERROR", error.message, 500);
   }
 
+  generationInFlight.delete(interviewId);
   return Response.json({ data: { count: created?.length ?? 0 } });
 }
