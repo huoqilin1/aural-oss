@@ -1,0 +1,12 @@
+{
+  "name": "aural-e2e",
+  "private": true,
+  "description": "OpRun 招聘面试全链路 E2E：投递→面试就绪→须知→答题→下一题→结束。独立依赖树，不进入生产发布包（发布用 git archive 只打包已跟踪源码）。",
+  "scripts": {
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "docx": "^9.1.0"
+  }
+}

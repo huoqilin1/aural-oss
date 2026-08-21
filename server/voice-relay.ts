@@ -61,6 +61,10 @@ import {
     type TtsAuthConfig,
     type TtsSynthesisOptions,
 } from "./volcengine-tts";
+import {
+  planSessionFinalization,
+  type LiveSessionRecord,
+} from "./session-finalization";
 
 const log = createLogger("voice-relay");
 
@@ -233,6 +237,10 @@ if (!ASR_ACCESS_TOKEN && !ASR_API_KEY) {
 
 interface InterviewContext {
   interviewId?: string;
+  /** 真实会话 ID(tRPC 建的 sessions 行):relay 据此做服务端收尾落库 */
+  sessionId?: string;
+  /** 面试硬限(分钟):服务端兜底,浏览器关掉/后台挂着也必须按时结束 */
+  timeLimitMinutes?: number | null;
   title: string;
   objective?: string | null;
   aiName: string;
@@ -779,6 +787,86 @@ wss.on("connection", (browserWs) => {
   browserWs.on("message", handler);
 });
 
+// ── 服务端会话收尾(王总 2026-08-21:聊完/关页/后台挂着,计时不能失控) ──
+// 此前完成落库全靠前端调 /api/session/complete;浏览器一关或页面在后台
+// 挂着,会话就 IN_PROGRESS 无限"活跃"(实测出现过 77 分钟)。relay 在服务
+// 端兜底:告别说完即落库 COMPLETED、断线宽限后 ABANDONED、超硬限强制结束。
+// 判定逻辑在 ./session-finalization(独立模块可单测)。
+
+const SESSION_DISCONNECT_GRACE_MS =
+  Number(process.env.SESSION_DISCONNECT_GRACE_MS) || 10 * 60_000;
+
+const liveSessions = new Map<string, LiveSessionRecord>();
+
+async function persistSessionStatus(
+  sessionId: string,
+  status: string,
+  reason: string,
+): Promise<void> {
+  if (!dynamicQuestionClient) {
+    log.warn(`session persist skipped (${sessionId} -> ${status} ${reason}): no service client`);
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const patch: Record<string, unknown> = {
+    status,
+    lastActivityAt: nowIso,
+    updatedAt: nowIso,
+  };
+  if (status === "COMPLETED") patch.completedAt = nowIso;
+  const { error } = await dynamicQuestionClient
+    .from("sessions")
+    .update(patch)
+    .eq("id", sessionId);
+  if (error) {
+    log.error(`session persist failed (${sessionId} -> ${status}):`, error.message);
+    return;
+  }
+  log.info(`Session ${sessionId} -> ${status} (${reason})`);
+}
+
+function registerLiveSession(ctx: InterviewContext): void {
+  const sessionId = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
+  if (!sessionId) return;
+  const nowMs = Date.now();
+  liveSessions.set(sessionId, {
+    sessionId,
+    startedAtMs: nowMs,
+    lastActiveAtMs: nowMs,
+    timeLimitMinutes:
+      typeof ctx.timeLimitMinutes === "number" && ctx.timeLimitMinutes > 0
+        ? ctx.timeLimitMinutes
+        : null,
+    status: "live",
+  });
+  if (dynamicQuestionClient) {
+    dynamicQuestionClient
+      .from("sessions")
+      .select("startedAt")
+      .eq("id", sessionId)
+      .maybeSingle()
+      .then(({ data }) => {
+        const record = liveSessions.get(sessionId);
+        if (!record || record.status === "ended") return;
+        const startedMs = data?.startedAt ? new Date(data.startedAt as string).getTime() : 0;
+        if (startedMs > 0 && startedMs < record.startedAtMs) {
+          record.startedAtMs = startedMs;
+        }
+      })
+      .catch(() => undefined);
+  }
+}
+
+setInterval(() => {
+  const nowMs = Date.now();
+  for (const [sessionId, record] of liveSessions) {
+    const plan = planSessionFinalization(record, nowMs, SESSION_DISCONNECT_GRACE_MS);
+    if (!plan) continue;
+    record.status = "ended";
+    void persistSessionStatus(sessionId, plan.status, plan.reason);
+  }
+}, 60_000).unref();
+
 // ── Mic test handler (ASR-only, no LLM/TTS) ────────────────────────
 
 async function handleMicTestConnection(browserWs: WebSocket) {
@@ -1028,6 +1116,14 @@ async function handleMicTestConnection(browserWs: WebSocket) {
 // ── Interview handler ───────────────────────────────────────────────
 
 async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewContext) {
+  // ── 服务端收尾登记:本连接活跃时持续摸时间,关页后由宽限/硬限兜底 ──
+  registerLiveSession(ctx);
+  const ctxSessionId = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
+  browserWs.on("message", () => {
+    const record = ctxSessionId ? liveSessions.get(ctxSessionId) : undefined;
+    if (record && record.status === "live") record.lastActiveAtMs = Date.now();
+  });
+
   // ── ASR state ──────────────────────────────────────────────────
   let asrWs: WebSocket | null = null;
   let asrAlive = false;
@@ -1066,6 +1162,8 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   let transitionGeneration = 0;
   let pendingManualTransitionDirection: "next" | "previous" | null = null;
   let interviewDone = false;
+  /** endInterview 已执行(告别播完/收尾信号已发):断线时据此判断要不要落库完成 */
+  let farewellCompleted = false;
   /** True as soon as we start farewell shutdown; blocks duplicate ASR finals until interviewDone. */
   let endingInterview = false;
 
@@ -1745,6 +1843,13 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     }
     browserWs.send(JSON.stringify({ type: "interview_complete" }));
     log.info("Interview complete signal sent");
+    farewellCompleted = true;
+    // 服务端权威收尾:告别已说完,无论浏览器随后是否还在,立即落库
+    if (ctxSessionId) {
+      const record = liveSessions.get(ctxSessionId);
+      if (record) record.status = "ended";
+      void persistSessionStatus(ctxSessionId, "COMPLETED", "relay_farewell_done");
+    }
   }
 
   function queueFarewellAndEnd(reason: string) {
@@ -3141,6 +3246,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
   browserWs.on("close", () => {
     log.info("Browser disconnected");
+    const wasFarewellDone = farewellCompleted;
     interviewDone = true;
     clearPendingAsrFinal();
     settleAllWhiteboardSnapshotRequests(false);
@@ -3157,6 +3263,13 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     }
     asrWs?.removeAllListeners();
     asrWs?.close();
+    // 告别已播完但浏览器在收尾窗口内关掉:落库不能丢
+    if (wasFarewellDone && ctxSessionId) {
+      const record = liveSessions.get(ctxSessionId);
+      if (record) record.status = "ended";
+      void persistSessionStatus(ctxSessionId, "COMPLETED", "closed_after_farewell");
+    }
+    // 其余情况(答到一半离开)交给断线宽限 + 硬限定时器收尾
   });
 
   browserWs.on("error", (err) => {

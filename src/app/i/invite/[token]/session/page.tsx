@@ -154,6 +154,8 @@ export default function InviteSessionPage() {
   if (useVoice) {
     const interviewContext = {
       interviewId: interview.id,
+      sessionId: session.id,
+      timeLimitMinutes: interview.timeLimitMinutes ?? null,
       title: interview.title,
       objective: interview.objective,
       aiName: interview.aiName,

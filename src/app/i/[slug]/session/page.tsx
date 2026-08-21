@@ -215,6 +215,8 @@ export default function SlugSessionPage() {
   if (useVoice) {
     const interviewContext = {
       interviewId: interview.data.id,
+      sessionId: session.data?.id,
+      timeLimitMinutes: interview.data.timeLimitMinutes ?? null,
       title: interview.data.title,
       objective: interview.data.objective,
       aiName: interview.data.aiName,

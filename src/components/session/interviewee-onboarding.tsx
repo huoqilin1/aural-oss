@@ -1247,6 +1247,8 @@ export function IntervieweeOnboarding({
                   <li>
                     请在<span className="font-medium text-foreground">安静环境</span>下使用最新版
                     Chrome 浏览器，允许麦克风（和摄像头）权限，确保声音清晰可辨。
+                    <span className="font-medium text-foreground">建议佩戴耳机（带麦克风）</span>
+                    ：耳麦离嘴更近，能明显减少周围人声和环境噪音的干扰。
                   </li>
                   <li>
                     题目会始终显示在页面上，随时可以看到当前题目；测试过程中请勿离开本页面。
