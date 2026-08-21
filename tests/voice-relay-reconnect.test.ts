@@ -42,9 +42,12 @@ describe("server/voice-relay.ts reconnect & lifecycle (source checks)", () => {
     const src = readVoiceRelaySource();
     assert.match(
       src,
-      /browserWs\.on\("close", \(\) => \{\r?\n\s+log\.info\("Browser disconnected"\);\r?\n\s+interviewDone = true;/,
+      /browserWs\.on\("close", \(\) => \{\r?\n\s+log\.info\("Browser disconnected"\);\r?\n\s+(?:const wasFarewellDone = farewellCompleted;\r?\n\s+)?interviewDone = true;/,
     );
     assert.ok(src.includes("asrWs?.removeAllListeners();"));
+    // 断线收尾:告别已完成要落库;没完成交给宽限+硬限定时器(王总 2026-08-21)
+    assert.ok(src.includes('persistSessionStatus(ctxSessionId, "COMPLETED", "closed_after_farewell")'));
+    assert.ok(src.includes("planSessionFinalization"));
   });
 
   it("installs a 10s safety timeout after farewell audio is queued", () => {
