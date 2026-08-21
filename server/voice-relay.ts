@@ -1191,9 +1191,23 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   // 全局上限提到 15，每题预算由深度档位控制，30 分钟面试时长才是真正的预算。
   let totalFollowUpsUsed = 0;
   const GLOBAL_FOLLOW_UP_LIMIT = 15;
-  // 候选人静默 30 秒自动进入下一题(王总 2026-06-21)
+  // 候选人静默处理(王总 2026-08-21):不再"静默即切题"——
+  // 静默 45s 先问"答完了吗?",开口即留在本题;确认后再切题;
+  // 连续多题零回答(AFK/人已离开)提前诚实收尾,不空转不烧算力。
   let silenceAutoSkipTimer: ReturnType<typeof setTimeout> | null = null;
-  const SILENCE_AUTO_SKIP_MS = 30_000;
+  const SILENCE_ASK_MS = Math.max(
+    10_000,
+    (Number(process.env.SILENCE_ASK_SECONDS) || 45) * 1000,
+  );
+  const SILENCE_CONFIRM_MS = Math.max(
+    5_000,
+    (Number(process.env.SILENCE_CONFIRM_SECONDS) || 20) * 1000,
+  );
+  const MAX_SILENT_ASKS_PER_QUESTION = 2;
+  const MAX_UNANSWERED_QUESTIONS_STREAK = 2;
+  let silenceAskCount = 0;
+  let silenceConfirmPending = false;
+  let unansweredQuestionsStreak = 0;
   /** Wall time when the latest assistant line was appended to questionTranscript (split-noise heuristic). */
   let lastAssistantMessageWallClockMs = 0;
   const recentAcceptedUserFinals: RecentAsrFinal[] = [];
@@ -2221,6 +2235,9 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   }
 
   async function handleTransition(auto = false) {
+    // 切题:重置本题的静默询问状态
+    silenceAskCount = 0;
+    silenceConfirmPending = false;
     if (interviewDone) return;
     if (isTransitioning) {
       if (!auto) queueManualTransition("next");
@@ -2523,6 +2540,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
     // A second final can arrive while we're still in handleUserUtterance (LLM/TTS).
     // The client has already received asr_ended — queue and run after this cycle finishes.
+    // 候选人开口:取消"询问后确认切题",留在本题继续听,重置 AFK 计数
+    clearSilenceAutoSkip();
+    silenceConfirmPending = false;
+    unansweredQuestionsStreak = 0;
+
     if (generatingResponse) {
       const duplicateWhileGenerating =
         isReplayOfPendingUserTurn(userText) ||
@@ -2710,20 +2732,79 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       silenceAutoSkipTimer = null;
     }
   }
+  /** 静默计时:先问是否答完,绝不直接切题(王总 2026-08-21) */
   function armSilenceAutoSkip() {
     clearSilenceAutoSkip();
     if (interviewDone || endingInterview) return;
     silenceAutoSkipTimer = setTimeout(() => {
       silenceAutoSkipTimer = null;
       if (interviewDone || endingInterview) return;
-      // 小君还在说话/出题/切题时,顺延 30 秒再看(不打断小君)
+      // 小君还在说话/出题/切题时,顺延再看(不打断小君)
       if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
         armSilenceAutoSkip();
         return;
       }
-      log.info("候选人静默 30 秒无新内容,自动进入下一题");
-      handleTransition(true).catch(log.error);
-    }, SILENCE_AUTO_SKIP_MS);
+      if (silenceAskCount >= MAX_SILENT_ASKS_PER_QUESTION) {
+        log.info("本题已询问 2 次仍无回应,判定确认答完,进入下一题");
+        void advanceAfterSilence();
+        return;
+      }
+      silenceAskCount += 1;
+      silenceConfirmPending = true;
+      log.info(`候选人静默 ${SILENCE_ASK_MS / 1000}s,小君询问是否答完(第 ${silenceAskCount} 次)`);
+      void speakText(bt(isZh, SPOKEN.silenceAsk())).catch((err) =>
+        log.error("静默询问 TTS 失败:", err),
+      );
+      armSilenceConfirm();
+    }, SILENCE_ASK_MS);
+  }
+
+  /** 询问后继续沉默 = 确认答完 → 切题 */
+  function armSilenceConfirm() {
+    clearSilenceAutoSkip();
+    if (interviewDone || endingInterview) return;
+    silenceAutoSkipTimer = setTimeout(() => {
+      silenceAutoSkipTimer = null;
+      if (interviewDone || endingInterview) return;
+      if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+        armSilenceConfirm();
+        return;
+      }
+      log.info("询问后候选人继续沉默,视为确认答完,进入下一题");
+      void advanceAfterSilence();
+    }, SILENCE_CONFIRM_MS);
+  }
+
+  async function advanceAfterSilence() {
+    // AFK 守卫:连续 2 道题零回答(两次询问均无回应) → 提前诚实收尾
+    if (unansweredQuestionsStreak >= MAX_UNANSWERED_QUESTIONS_STREAK) {
+      log.warn("连续多题零回答,判定候选人已离开,提前收尾");
+      abandonForInactivity();
+      return;
+    }
+    unansweredQuestionsStreak += 1;
+    silenceAskCount = 0;
+    silenceConfirmPending = false;
+    await handleTransition(true).catch(log.error);
+  }
+
+  /** AFK 守卫:页面开着但人不在,空转两题后诚实收尾,不留全空回答记录 */
+  function abandonForInactivity() {
+    if (interviewDone || endingInterview) return;
+    endingInterview = true;
+    interviewDone = true;
+    clearSilenceAutoSkip();
+    clearPendingAsrFinal();
+    cancelTts();
+    if (ctxSessionId) {
+      const record = liveSessions.get(ctxSessionId);
+      if (record) record.status = "ended";
+      void persistSessionStatus(ctxSessionId, "ABANDONED", "candidate_inactive");
+    }
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({ type: "interview_complete" }));
+    }
+    log.info("Interview abandoned for inactivity");
   }
 
   async function reopenAsr() {

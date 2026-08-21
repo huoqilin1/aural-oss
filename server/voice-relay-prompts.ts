@@ -113,6 +113,14 @@ export const SPOKEN = {
     };
   },
 
+  /** 静默询问:先问是否答完,不直接切题(王总 2026-08-21) */
+  silenceAsk(): BiText {
+    return {
+      zh: "这道题你答完了吗？答完我就进入下一题；还想补充的话，可以继续说。",
+      en: "Are you done with this question? If so, I will move on; if not, feel free to keep going.",
+    };
+  },
+
   transition: {
     codingWb(qNum: number, intro: string): BiText {
       return {

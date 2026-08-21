@@ -1253,7 +1253,7 @@ export function IntervieweeOnboarding({
                     <span className="font-medium text-foreground">如何进入下一题：</span>{" "}
                     每题答完后，点击屏幕下方的{" "}
                     <span className="font-medium text-primary">「下一题」按钮</span> 立即进入下一题；
-                    也可以直接说「我答完了」；停顿超过 30 秒会自动进入下一题。
+                    也可以直接说「我答完了」；如果停顿较久，小君会先问你是否答完，确认后再进入下一题。
                   </li>
                   <li>
                     全程约 {timeLimitMinutes ? `${isRecruitmentInterview ? 25 : timeLimitMinutes} 分钟` : "25 分钟"}

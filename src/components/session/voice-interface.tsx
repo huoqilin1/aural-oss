@@ -2267,7 +2267,7 @@ export function VoiceInterface({
                   <p className="mb-1.5 text-sm font-medium text-foreground">答题方式</p>
                   <p>· 对着麦克风说话,会实时变成文字</p>
                   <p>· 说「我答完了 / 下一题」自动进入下一题</p>
-                  <p>· 停顿超过 30 秒,自动进入下一题</p>
+                  <p>· 停顿较久时,小君会先问你是否答完,确认后再进入下一题</p>
                   <p>· 想重答上一题,点下方「上一题」</p>
                 </div>
               )}

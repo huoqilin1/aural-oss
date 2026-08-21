@@ -63,3 +63,20 @@ describe("server/voice-relay.ts reconnect & lifecycle (source checks)", () => {
     );
   });
 });
+
+describe("server/voice-relay.ts silence ask-confirm flow (source checks)", () => {
+  it("asks before advancing instead of silently skipping questions", () => {
+    const src = readVoiceRelaySource();
+    assert.match(src, /SPOKEN\.silenceAsk\(\)/);
+    assert.match(src, /armSilenceConfirm\(\)/);
+    assert.match(src, /MAX_SILENT_ASKS_PER_QUESTION = 2/);
+    assert.match(src, /silenceConfirmPending = false;\r?\n\s+unansweredQuestionsStreak = 0;/);
+  });
+
+  it("abandons honestly when the candidate is away (AFK guard)", () => {
+    const src = readVoiceRelaySource();
+    assert.match(src, /MAX_UNANSWERED_QUESTIONS_STREAK = 2/);
+    assert.match(src, /persistSessionStatus\(ctxSessionId, "ABANDONED", "candidate_inactive"\)/);
+    assert.match(src, /Interview abandoned for inactivity/);
+  });
+});
