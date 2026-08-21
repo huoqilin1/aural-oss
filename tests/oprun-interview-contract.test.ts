@@ -109,9 +109,11 @@ test("OpRun recruitment relay caps follow-ups across the entire interview", () =
 test("candidate interface keeps the full question and hybrid timing visible", () => {
   assert.match(voiceInterface, /本题已用/);
   assert.match(voiceInterface, /剩余时间/);
-  assert.match(voiceInterface, /formatTime\(remainingSeconds\)/);
-  assert.match(voiceInterface, /targetDurationMinutes.*分钟目标/);
-  assert.match(voiceInterface, /durationMinutes.*分钟硬截止/);
+  // 展示口径 25 分钟(真实 32 硬限隐藏),倒计时按展示口径走(王总 2026-08-21)
+  assert.match(voiceInterface, /formatTime\(displayedRemainingSeconds\)/);
+  assert.match(voiceInterface, /displayShowsWrapUp \? "请收尾"/);
+  assert.match(voiceInterface, /targetDurationMinutes = durationMinutes === 32 \? 25/);
+  assert.match(voiceInterface, /全程约 \$\{targetDurationMinutes\} 分钟/);
   assert.match(voiceInterface, /按你的节奏来/);
   assert.match(voiceInterface, /当前题目 · 始终显示/);
   assert.match(voiceInterface, /md:text-6xl/);

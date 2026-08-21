@@ -1219,7 +1219,7 @@ export function IntervieweeOnboarding({
               <div className="mt-2 text-sm text-muted-foreground">
                 {questionCount > 0 ? `${questionCount} 道题` : "AI 对话式测试"} &middot;{" "}
                 {timeLimitMinutes
-                  ? `${timeLimitMinutes} 分钟`
+                  ? `${isRecruitmentInterview ? 25 : timeLimitMinutes} 分钟`
                   : "不限时"}
               </div>
 
@@ -1256,7 +1256,7 @@ export function IntervieweeOnboarding({
                     也可以直接说「我答完了」；停顿超过 30 秒会自动进入下一题。
                   </li>
                   <li>
-                    全程约 {timeLimitMinutes ? `${timeLimitMinutes} 分钟` : "30 分钟"}
+                    全程约 {timeLimitMinutes ? `${isRecruitmentInterview ? 25 : timeLimitMinutes} 分钟` : "25 分钟"}
                     ，<span className="font-medium text-foreground">不用赶时间</span>，按你的节奏回答；
                     临近结束时我们会轻声提醒，不会打断你。
                   </li>

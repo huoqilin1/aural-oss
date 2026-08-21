@@ -1406,12 +1406,25 @@ export function VoiceInterface({
     const s = totalSec % 60;
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
-  const isTimeCritical = remainingSeconds !== null && remainingSeconds <= 60;
+  // 王总 2026-08-21:对候选人显示 25 分钟减轻压力,真实预算(32 分钟硬限)不变,
+  // 倒计时/已用时按 25 分钟口径展示,多出的时间是隐性缓冲,绝口不提。
+  const targetDurationMinutes = durationMinutes === 32 ? 25 : durationMinutes;
+  const hiddenBufferSeconds = Math.max(
+    0,
+    Math.round(((durationMinutes || 0) - targetDurationMinutes) * 60),
+  );
+  const displayedRemainingSeconds =
+    remainingSeconds === null
+      ? null
+      : Math.max(0, remainingSeconds - hiddenBufferSeconds);
+  const displayShowsWrapUp =
+    displayedRemainingSeconds === 0 && remainingSeconds !== null && remainingSeconds > 0;
+  const isTimeCritical = displayedRemainingSeconds !== null && displayedRemainingSeconds <= 60;
   const isTimeWarning =
-    remainingSeconds !== null && remainingSeconds <= 5 * 60 && !isTimeCritical;
+    displayedRemainingSeconds !== null && displayedRemainingSeconds <= 5 * 60 && !isTimeCritical;
   const elapsedSeconds =
-    remainingSeconds !== null && durationMinutes
-      ? Math.max(0, durationMinutes * 60 - remainingSeconds)
+    displayedRemainingSeconds !== null && durationMinutes
+      ? Math.max(0, targetDurationMinutes * 60 - displayedRemainingSeconds)
       : 0;
   const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(interviewTitle);
   const conciseInterviewTitle = interviewTitle.replace(/^数君招聘\s*·\s*/, "");
@@ -1423,11 +1436,8 @@ export function VoiceInterface({
       ? "OpRun AI 面试"
       : `OpRun AI 面试 · ${conciseInterviewTitle}`
     : conciseInterviewTitle;
-  const targetDurationMinutes = durationMinutes === 32 ? 30 : durationMinutes;
   const durationDescription = durationMinutes
-    ? targetDurationMinutes !== durationMinutes
-      ? `${targetDurationMinutes} 分钟目标 · ${durationMinutes} 分钟硬截止`
-      : `${durationMinutes} 分钟上限`
+    ? `全程约 ${targetDurationMinutes} 分钟`
     : null;
   const interviewActivityLabel = preview
     ? "预览"
@@ -1732,7 +1742,7 @@ export function VoiceInterface({
                   剩余时间
                 </div>
                 <div className={`mt-1 text-4xl font-bold tracking-tight tabular-nums md:text-6xl ${isTimeCritical ? "text-destructive" : isTimeWarning ? "text-amber-700 dark:text-amber-300" : "text-foreground"}`}>
-                  {formatTime(remainingSeconds)}
+                  {displayShowsWrapUp ? "请收尾" : formatTime(displayedRemainingSeconds)}
                 </div>
                 {durationDescription && (
                   <p className="mt-1 text-xs text-muted-foreground md:text-sm">
