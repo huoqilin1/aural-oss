@@ -1,7 +1,14 @@
 import { test, expect, Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { applyAndWaitForInvite, saveState, RESUME_LIBRARY } from "../helpers/apply";
+import {
+  applyAndWaitForInvite,
+  applyWithoutPosition,
+  listOpenPositions,
+  saveState,
+  HR_API_BASE,
+  RESUME_LIBRARY,
+} from "../helpers/apply";
 
 const RESUME_INDEX = Number(process.env.RESUME_INDEX ?? 3);
 
@@ -18,6 +25,41 @@ test.describe("投递管线", () => {
     expect(application.readyElapsedMs).toBeLessThan(60_000);
     expect(application.positionName).toBeTruthy();
     expect(application.positionName).not.toContain("数君");
+  });
+
+  test("不选岗位进不了面试:拦截并等待手动选择", async () => {
+    test.skip(!RESUME_LIBRARY, "简历库不可用时跳过");
+    const { applicationToken } = await applyWithoutPosition(RESUME_INDEX + 1);
+
+    // 简历解析完成后应转入"待手动选择",且拿不到面试邀请
+    let sawNeedsSelection = false;
+    for (let i = 0; i < 12; i++) {
+      const status = (await (
+        await fetch(
+          `${HR_API_BASE}/v1/recruit/application/status?token=${encodeURIComponent(applicationToken)}`,
+        )
+      ).json()) as {
+        ready?: boolean;
+        invite_url?: string | null;
+        position_resolution?: { status?: string };
+      };
+      if (status.position_resolution?.status === "needs_manual_selection") sawNeedsSelection = true;
+      expect(status.invite_url, "未选岗位不得发放面试邀请").toBeNull();
+      if (sawNeedsSelection) break;
+      await new Promise((resolve) => setTimeout(resolve, 4_000));
+    }
+    expect(sawNeedsSelection, "解析完成后应进入待手动选择状态").toBe(true);
+
+    // 手动确认岗位后,面试正常就绪
+    const [position] = await listOpenPositions();
+    const confirm = await fetch(`${HR_API_BASE}/v1/recruit/application/position/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: applicationToken, position_id: position.id }),
+    });
+    expect(confirm.ok).toBe(true);
+    const payload = (await confirm.json()) as { success?: boolean };
+    expect(payload.success).toBe(true);
   });
 
   test("生成题目质量扫描:无离职前提、无占位岗位名、开场为自我介绍", async ({

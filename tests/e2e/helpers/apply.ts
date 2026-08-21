@@ -85,13 +85,29 @@ async function buildResumeDocx(index: number): Promise<Blob> {
   });
 }
 
-async function applyWithResume(index: number): Promise<{
+export interface OpenPosition {
+  id: number;
+  name: string;
+}
+
+/** 在招岗位列表(手动选岗流程:投递必须带 position_id)。 */
+export async function listOpenPositions(): Promise<OpenPosition[]> {
+  const response = await fetch(`${HR_API_BASE}/v1/recruit/positions`);
+  if (!response.ok) throw new Error(`岗位列表失败 HTTP ${response.status}`);
+  const payload = (await response.json()) as { positions?: OpenPosition[] };
+  const rows = payload.positions || [];
+  if (!rows.length) throw new Error("没有在招岗位");
+  return rows;
+}
+
+async function applyWithResume(index: number, position?: OpenPosition): Promise<{
   candidateId: number;
   applicationToken: string;
 }> {
   const resumeBlob = await buildResumeDocx(index);
   const form = new FormData();
-  form.append("position", "");
+  form.append("position", position?.name || "");
+  if (position) form.append("position_id", String(position.id));
   form.append("idempotency_key", randomUUID().replaceAll("-", ""));
   form.append("resume", resumeBlob, "resume-e2e.docx");
   const response = await fetch(`${HR_API_BASE}/v1/recruit/apply`, {
@@ -137,7 +153,9 @@ export async function applyAndWaitForInvite(
   index: number,
   timeoutMs = 60_000,
 ): Promise<ApplicationHandle> {
-  const { candidateId, applicationToken } = await applyWithResume(index);
+  // 手动选岗(王总 2026-08-21):投递必须带岗位,题目锚定所选岗位 JD
+  const [position] = await listOpenPositions();
+  const { candidateId, applicationToken } = await applyWithResume(index, position);
   const started = Date.now();
   let lastStage = "";
   for (;;) {
@@ -157,12 +175,20 @@ export async function applyAndWaitForInvite(
         candidateId,
         applicationToken,
         inviteUrl: status.invite_url,
-        positionName,
+        positionName: positionName || position.name,
         readyElapsedMs: Date.now() - started,
       };
     }
     await new Promise((resolve) => setTimeout(resolve, 4_000));
   }
+}
+
+/** 无岗投递:用于断言"不选岗位进不了面试"的拦截行为。 */
+export async function applyWithoutPosition(index: number): Promise<{
+  candidateId: number;
+  applicationToken: string;
+}> {
+  return applyWithResume(index);
 }
 
 /** 用一个新申请(或复用 30 分钟内的旧申请)驱动面试流程用例。 */

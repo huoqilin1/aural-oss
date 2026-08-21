@@ -144,6 +144,7 @@ export default function InviteSessionPage() {
         chatEnabled={!!interview.chatEnabled}
         aiName={interview.aiName}
         questionTypes={resumeState.orderedQuestions.map((q: any) => q.type as string)}
+        questionsReady={!isWaitingForGeneratedQuestions}
         onComplete={() => setOnboardingDone(true)}
       />
     );

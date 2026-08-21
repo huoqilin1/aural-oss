@@ -96,18 +96,19 @@ export const SPOKEN = {
   },
 
   greeting(aiName: string, title: string, count: number, spokenQuestion: string): BiText {
-    // 招聘会话的 title 形如「数君招聘 · 岗位名」；开场先说清今天面的岗位
-    // 以及这是 AI 根据简历匹配的结果，避免候选人反问"这是什么岗位"。
+    // 招聘会话的 title 形如「数君招聘 · 岗位名」；开场说清今天面的岗位。
+    // 岗位是候选人自己选的:不提"匹配"、不建议换岗、不客套,一句话进正题
+    // (王总 2026-08-21 定稿话术)。
     const rawTitle = title.replace(/^数君招聘\s*·\s*/, "").trim();
     // 「数君岗位」「待自动分岗」「岗位确认中」是占位符,不是岗位名,绝不念给候选人
     const placeholderTitle = /^(?:数君岗位|待自动分岗|岗位确认中)$/.test(rawTitle);
     const position =
       rawTitle && !rawTitle.includes("数君") && !placeholderTitle ? rawTitle : "";
     const zhPositionLead = position
-      ? `今天和你聊的是「${position}」——这是 AI 根据你的简历为你匹配的岗位，聊下来如果你觉得不合适，随时告诉我。`
+      ? `今天面试的是你应聘的「${position}」岗位。`
       : "";
     return {
-      zh: `你好，我是${aiName}，很高兴认识你。${zhPositionLead}这次 AI 一面大概 30 分钟，按你的节奏来就好，咱们开始吧。${spokenQuestion}`,
+      zh: `你好，我是${aiName}。${zhPositionLead}面试大约 30 分钟，按你的节奏来。${spokenQuestion}`,
       en: `Hi, I'm ${aiName}. This will take about 20 to 25 minutes. Let's begin. ${spokenQuestion}`,
     };
   },

@@ -2,8 +2,8 @@ import { Loader2 } from "lucide-react";
 import { AuralLogo } from "@/components/ui/aural-logo";
 
 export function PreparingScreen({
-  title = "正在准备你的测试…",
-  description = "马上就好。",
+  title = "小君正在分析你的简历，马上要打开面试，请你稍等",
+  description = "准备工作完成后会自动继续。",
 }: {
   title?: string;
   description?: string;

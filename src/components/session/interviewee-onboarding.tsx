@@ -58,6 +58,7 @@ interface IntervieweeOnboardingProps {
   chatEnabled?: boolean;
   aiName?: string;
   questionTypes?: string[];
+  questionsReady?: boolean;
   onComplete: () => void;
 }
 
@@ -1165,6 +1166,7 @@ export function IntervieweeOnboarding({
   chatEnabled = false,
   aiName = "AI Interviewer",
   questionTypes = [],
+  questionsReady = true,
   onComplete,
 }: IntervieweeOnboardingProps) {
   const [step, setStep] = useState<OnboardingStep>("info");
@@ -1220,6 +1222,20 @@ export function IntervieweeOnboarding({
                   ? `${timeLimitMinutes} 分钟`
                   : "不限时"}
               </div>
+
+              {isRecruitmentInterview && (
+                <div
+                  className={`mt-3 rounded-md px-3 py-2 text-xs font-medium ${
+                    questionsReady
+                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200"
+                      : "bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-200"
+                  }`}
+                >
+                  {questionsReady
+                    ? "面试题已就绪，读完后点击开始面试即可。"
+                    : "小君正在分析你的简历、准备面试题，读完须知即可开始。"}
+                </div>
+              )}
             </CardContent>
           </Card>
 
