@@ -1217,25 +1217,12 @@ export function IntervieweeOnboarding({
               </div>
 
               <div className="mt-2 text-sm text-muted-foreground">
-                {questionCount > 0 ? `${questionCount} 道题` : "AI 对话式测试"} &middot;{" "}
+                {isRecruitmentInterview ? "9~10 道题" : questionCount > 0 ? `${questionCount} 道题` : "AI 对话式测试"} &middot;{" "}
                 {timeLimitMinutes
                   ? `${isRecruitmentInterview ? 25 : timeLimitMinutes} 分钟`
                   : "不限时"}
               </div>
 
-              {isRecruitmentInterview && (
-                <div
-                  className={`mt-3 rounded-md px-3 py-2 text-xs font-medium ${
-                    questionsReady
-                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-200"
-                      : "bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-200"
-                  }`}
-                >
-                  {questionsReady
-                    ? "面试题已就绪，读完后点击开始面试即可。"
-                    : "小君正在分析你的简历、准备面试题，读完须知即可开始。"}
-                </div>
-              )}
             </CardContent>
           </Card>
 
@@ -1247,7 +1234,7 @@ export function IntervieweeOnboarding({
                   <li>
                     本次为 <span className="font-medium text-foreground">AI 语音面试</span>
                     ，面试官为 AI 助手「{aiName || "小君"}」。第 1 题是自我介绍，之后会围绕你的简历和应聘岗位提问
-                    {questionCount > 0 ? `，共 ${questionCount} 道题` : ""}。
+                    {isRecruitmentInterview ? "，共 9~10 道题" : questionCount > 0 ? `，共 ${questionCount} 道题` : ""}。
                   </li>
                   <li>
                     <span className="font-medium text-foreground">如何进入下一题：</span>{" "}

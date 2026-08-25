@@ -1713,9 +1713,6 @@ export function VoiceInterface({
               <h1 className="truncate text-base font-bold text-foreground md:text-2xl">
                 {displayInterviewTitle}
               </h1>
-              <p className="mt-0.5 hidden text-sm text-muted-foreground sm:block">
-                系统正在记录并分析回答，题目会始终保留在页面中
-              </p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -1777,7 +1774,7 @@ export function VoiceInterface({
                 </div>
               </div>
               <div className={`rounded-xl border-l-4 px-4 py-2.5 text-xs md:text-sm ${isTimeCritical ? "border-destructive bg-destructive/10 text-destructive" : isTimeWarning ? "border-amber-500 bg-amber-500/10 text-amber-800 dark:text-amber-200" : "border-primary/60 bg-primary/5 text-muted-foreground"}`}>
-                不用赶时间，按你的节奏来；临近结束时我们会轻轻提醒，不会打扰你的回答。
+                不用赶时间，按你的节奏来；剩余 5 分钟时转为黄色提醒；剩余 1 分钟时转为红色强提醒，但不会遮挡题目或打断回答。
               </div>
             </div>
           </div>
