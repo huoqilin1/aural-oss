@@ -1186,11 +1186,20 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   // ── LLM-controlled response state ─────────────────────────────
   let generatingResponse = false;
   let userTurnsOnCurrentQ = 0;
-  // Recruitment interviews previously capped AI follow-ups at two across the
-  // entire session. 2026-08-20 王总拍板：Token 无上限，追问按"证据式面试"放开——
-  // 全局上限提到 15，每题预算由深度档位控制，30 分钟面试时长才是真正的预算。
+  const isOprunRecruitmentInterview = ctx.title.includes("数君招聘");
+  // Recruitment interviews may use up to four concise verification follow-ups:
+  // Q2-Q7 share three in-place evidence checks and Q8 reserves one final
+  // cross-question verification. Q1 and an optional candidate-closing Q9 do
+  // not consume or expose a verification turn.
   let totalFollowUpsUsed = 0;
+  let recruitmentInlineFollowUpsUsed = 0;
+  let recruitmentFinalFollowUpsUsed = 0;
+  // Preserve the upstream 15-turn allowance for non-recruitment interviews;
+  // OpRun recruitment uses the stricter evidence-verification budget below.
   const GLOBAL_FOLLOW_UP_LIMIT = 15;
+  const OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT = 4;
+  const RECRUITMENT_INLINE_FOLLOW_UP_LIMIT = 3;
+  const RECRUITMENT_FINAL_FOLLOW_UP_LIMIT = 1;
   // 候选人静默处理(王总 2026-08-21):不再"静默即切题"——
   // 静默 45s 先问"答完了吗?",开口即留在本题;确认后再切题;
   // 连续多题零回答(AFK/人已离开)提前诚实收尾,不空转不烧算力。
@@ -2012,9 +2021,32 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       ? Math.max(maxFollowUps, 7)
       : maxFollowUps;
     const followUpsDone = Math.max(0, userTurnsOnCurrentQ - 1);
+    const isRecruitmentInlineQuestion = (
+      isOprunRecruitmentInterview
+      && currentQuestionIndex >= 1
+      && currentQuestionIndex <= 6
+    );
+    const isRecruitmentFinalVerification = (
+      isOprunRecruitmentInterview && currentQuestionIndex === 7
+    );
+    const sessionTurnsLeft = isOprunRecruitmentInterview
+      ? isRecruitmentInlineQuestion
+        ? Math.max(
+            0,
+            RECRUITMENT_INLINE_FOLLOW_UP_LIMIT
+              - recruitmentInlineFollowUpsUsed,
+          )
+        : isRecruitmentFinalVerification
+          ? Math.max(
+              0,
+              RECRUITMENT_FINAL_FOLLOW_UP_LIMIT
+                - recruitmentFinalFollowUpsUsed,
+            )
+          : 0
+      : Math.max(0, GLOBAL_FOLLOW_UP_LIMIT - totalFollowUpsUsed);
     const turnsLeft = Math.min(
       effectiveMaxFollowUps - followUpsDone,
-      Math.max(0, GLOBAL_FOLLOW_UP_LIMIT - totalFollowUpsUsed),
+      sessionTurnsLeft,
     );
     let followUpInstruction: string;
     const isCodingOrWhiteboard = currentQ.type === "CODING" || currentQ.type === "WHITEBOARD";
@@ -2044,6 +2076,15 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     } else {
       followUpInstruction = bt(isZh, PROMPTS.followUp.remaining(turnsLeft, NEXT_TOKEN));
     }
+    if (!forceSkip && turnsLeft > 0 && isRecruitmentInlineQuestion) {
+      followUpInstruction = isZh
+        ? `这是Q2至Q7的就地证据核验机会。只有回答缺少以下一项关键证据时才追问一次：本人职责边界、实施机制或工具、选择依据、结果数据口径、失败与验证、时间线。每次只问一个最关键缺口，语气专业自然；回答已经充分就简短确认并加 ${NEXT_TOKEN} 进入下一题。`
+        : `This is an in-place evidence check for Q2-Q7. Ask one concise follow-up only when the answer lacks one material item: personal ownership, implementation mechanism or tools, decision rationale, metric definition, failure and validation, or timeline. Ask only the single most important gap. If evidence is sufficient, acknowledge and append ${NEXT_TOKEN}.`;
+    } else if (!forceSkip && turnsLeft > 0 && isRecruitmentFinalVerification) {
+      followUpInstruction = isZh
+        ? `这是全场唯一一次最终动态核验机会。结合之前各题摘要和当前回答，只选择对录用判断影响最大的一个未证实核心主张、技能缺口或前后矛盾，问一个简短确认问题；这是“只能围绕当前题”的唯一例外。若全场关键证据已经充分，不追问，简短确认并加 ${NEXT_TOKEN} 收尾。`
+        : `This is the single final cross-question verification. Using prior summaries and the current answer, choose only the most material unsupported core claim, skill gap, or inconsistency and ask one concise verification question. This is the only exception to staying within the current question. If core evidence is sufficient, do not probe; acknowledge and append ${NEXT_TOKEN}.`;
+    }
     const mustAdvanceForFollowUpLimit =
       !forceSkip &&
       !lastResponseWasCorrection &&
@@ -2053,6 +2094,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     const promptParams = {
       aiName: ctx.aiName,
       title: ctx.title,
+      objective: ctx.objective,
       qNum: currentQuestionIndex + 1,
       totalQs: sortedQuestions.length,
       qText: currentQ.text,
@@ -2143,10 +2185,29 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       replyKeepsConversationOpen(spokenResponse, isZh)
     ) {
       totalFollowUpsUsed = Math.min(
-        GLOBAL_FOLLOW_UP_LIMIT,
+        isOprunRecruitmentInterview
+          ? OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT
+          : GLOBAL_FOLLOW_UP_LIMIT,
         totalFollowUpsUsed + 1,
       );
-      log.info(`Global follow-up budget: ${totalFollowUpsUsed}/${GLOBAL_FOLLOW_UP_LIMIT}`);
+      if (isRecruitmentInlineQuestion) {
+        recruitmentInlineFollowUpsUsed = Math.min(
+          RECRUITMENT_INLINE_FOLLOW_UP_LIMIT,
+          recruitmentInlineFollowUpsUsed + 1,
+        );
+      } else if (isRecruitmentFinalVerification) {
+        recruitmentFinalFollowUpsUsed = Math.min(
+          RECRUITMENT_FINAL_FOLLOW_UP_LIMIT,
+          recruitmentFinalFollowUpsUsed + 1,
+        );
+      }
+      log.info(
+        `Global follow-up budget: ${totalFollowUpsUsed}/${
+          isOprunRecruitmentInterview
+            ? OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT
+            : GLOBAL_FOLLOW_UP_LIMIT
+        }`,
+      );
     }
     if (spokenResponse) {
       recentAgentResponses.push(spokenResponse);
@@ -2762,14 +2823,15 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   /** 询问后继续沉默 = 确认答完 → 切题 */
   function armSilenceConfirm() {
     clearSilenceAutoSkip();
-    if (interviewDone || endingInterview) return;
+    if (interviewDone || endingInterview || !silenceConfirmPending) return;
     silenceAutoSkipTimer = setTimeout(() => {
       silenceAutoSkipTimer = null;
-      if (interviewDone || endingInterview) return;
+      if (interviewDone || endingInterview || !silenceConfirmPending) return;
       if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
         armSilenceConfirm();
         return;
       }
+      silenceConfirmPending = false;
       log.info("询问后候选人继续沉默,视为确认答完,进入下一题");
       void advanceAfterSilence();
     }, SILENCE_CONFIRM_MS);

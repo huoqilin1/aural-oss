@@ -46,6 +46,33 @@ test("OpRun recruitment generator preserves eight distinct dimensions", () => {
   assert.match(generationRoute, /AI 一面（结构化岗位面试）/);
 });
 
+test("evidence v11 generator uses the scored self-intro and seven evidence dimensions", () => {
+  for (const dimension of [
+    "core_experience",
+    "project_ownership",
+    "core_skill_evidence",
+    "result_authenticity",
+    "job_work_sample",
+    "problem_solving",
+    "ai_learning_boundary",
+    "collaboration_motivation_stability",
+  ]) {
+    assert.match(generationRoute, new RegExp(`key: "${dimension}"`));
+  }
+  assert.match(generationRoute, /scored8-inline3-dynamic1-work-sample/);
+  assert.match(generationRoute, /questionSetVersion/);
+  assert.match(generationRoute, /第2至第8题每题都必须明确引用简历/);
+  assert.match(generationRoute, /第5题必须是工作样例/);
+  assert.match(generationRoute, /技术岗位允许并要求核验必要的代码、接口、数据流/);
+  assert.match(generationRoute, /selectRecruitAnchor\(resumeText/);
+  assert.match(generationRoute, /questionReferencesRecruitAnchor\(generatedText, selectedAnchors\.resume\)/);
+  assert.match(generationRoute, /questionReferencesRecruitAnchor\(generatedText, selectedAnchors\.job\)/);
+  assert.match(generationRoute, /const isTechnicalRole = roleType === "technical"/);
+  assert.match(generationRoute, /必要的伪代码、SQL或配置/);
+  assert.match(generationRoute, /一页可执行交付方案/);
+  assert.match(generationRoute, /seconds: 150/);
+});
+
 test("progressive generation preserves Q1 and optional fallback Q2 safely", () => {
   assert.match(generationRoute, /const preserveOpening = body\.preserveOpening === true/);
   assert.match(generationRoute, /const preserveDimensions = Array\.isArray/);
@@ -103,7 +130,17 @@ test("invited candidates resume the persisted question and transcript", () => {
 
 test("OpRun recruitment relay caps follow-ups across the entire interview", () => {
   assert.match(relay, /GLOBAL_FOLLOW_UP_LIMIT = 15/);
-  assert.match(relay, /GLOBAL_FOLLOW_UP_LIMIT - totalFollowUpsUsed/);
+  assert.match(relay, /OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT = 4/);
+  assert.match(relay, /RECRUITMENT_INLINE_FOLLOW_UP_LIMIT = 3/);
+  assert.match(relay, /RECRUITMENT_FINAL_FOLLOW_UP_LIMIT = 1/);
+  assert.match(relay, /currentQuestionIndex >= 1/);
+  assert.match(relay, /currentQuestionIndex <= 6/);
+  assert.match(relay, /currentQuestionIndex === 7/);
+  assert.match(relay, /objective: ctx\.objective/);
+  assert.match(openAiRelay, /ctx\.title\.includes\("数君招聘"\)/);
+  assert.match(openAiRelay, /Q2-Q7 allow at most one follow-up each and at most three combined/);
+  assert.match(openAiRelay, /Q8 allows one final follow-up only/);
+  assert.match(openAiRelay, /3次就地核验\+1次最终核验/);
 });
 
 test("candidate interface keeps the full question and hybrid timing visible", () => {
