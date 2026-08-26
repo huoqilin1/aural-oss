@@ -62,3 +62,12 @@ test("normal response prompt defaults to moving on after a direct answer", () =>
   assert.match(prompt, /默认应简短确认并进入下一题/);
   assert.match(prompt, /只有当关键信息仍明显缺失时/);
 });
+
+test("normal response prompt carries the interview-specific verification objective", () => {
+  const objective = "Q2至Q7最多3次就地核验，Q8最多1次最终动态核验。";
+  const prompt = PROMPTS.response.normal(basePromptParams({ objective })).zh;
+
+  assert.match(prompt, /本场访谈目标与控制规则/);
+  assert.match(prompt, new RegExp(objective));
+  assert.match(prompt, /优先遵守/);
+});

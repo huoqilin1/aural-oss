@@ -23,6 +23,7 @@ import {
 export interface ResponsePromptParams {
   aiName: string;
   title: string;
+  objective?: string | null;
   qNum: number;
   totalQs: number;
   qText: string;
@@ -343,9 +344,15 @@ Important: when you are asking the participant to explain their approach (catego
       const langInstr = p.forceLanguage
         ? `\n**语言要求：你必须用${p.forceLanguage === "en" ? "英文" : "中文"}回复，无论问题是什么语言。** / **Language: You MUST respond in ${p.forceLanguage === "en" ? "English" : "Chinese"}, regardless of the question language.**\n`
         : "";
+      const objectiveZh = p.objective
+        ? `\n本场访谈目标与控制规则（优先遵守）：${p.objective}\n`
+        : "";
+      const objectiveEn = p.objective
+        ? `\nInterview objective and control rules (follow with priority): ${p.objective}\n`
+        : "";
       return {
         zh: `你是面试官"${p.aiName}"，正在进行一场关于"${p.title}"的访谈。
-${memZh}${recentZh}${latestExchangeZh}${langInstr}
+${objectiveZh}${memZh}${recentZh}${latestExchangeZh}${langInstr}
 当前问题（第${p.qNum}/${p.totalQs}个）：「${p.qText}」${descZh}${p.choiceInstruction}
 ${codeZh}${wbZh}${visibilityZh}
 对话记录：
@@ -376,12 +383,12 @@ ${p.followUpInstruction}
 - 如果你的回复包含问号"？"或任何提问，绝对不能加 ${p.nextToken}
 - 如果你的回复是在邀请对方继续补充（例如"你可以继续分享"、"我很想听更多"、"如果你愿意也可以补充"），即使没有问号，也绝对不能加 ${p.nextToken}
 - ${p.nextToken} 只能出现在不含任何问题的简短句末尾
-- 只能围绕「${p.qText}」这个问题
+- 通常只能围绕「${p.qText}」这个问题；如果本场访谈目标明确授权在最后固定题进行跨题动态核验，可以引用之前摘要核验一个最重要的证据缺口
 - 禁止编造不相关的问题或话题
 - 如果受访者之前已经讨论过的内容与当前问题相关，可以引用但不要重复追问；如果他们已经回答了你的问题，不要换个措辞再问同一个问题
 - 不要重复你之前已经说过的话，每次回复都要有新的内容`,
         en: `You are interviewer "${p.aiName}" conducting an interview about "${p.title}".
-${memEn}${recentEn}${latestExchangeEn}${langInstr}
+${objectiveEn}${memEn}${recentEn}${latestExchangeEn}${langInstr}
 Current question (${p.qNum}/${p.totalQs}): "${p.qText}"${descEn}${p.choiceInstruction}
 ${codeEn}${wbEn}${visibilityEn}
 Conversation so far:
@@ -405,7 +412,7 @@ Rules:
 - If your reply contains a question mark "?" or any question, you MUST NOT include ${p.nextToken}
 - If your reply invites the participant to continue or share more (for example "feel free to continue", "I'd love to hear more", or "I would appreciate hearing about that"), you MUST NOT include ${p.nextToken} even if there is no question mark
 - ${p.nextToken} may ONLY appear at the end of a short statement with NO questions
-- Only discuss the question "${p.qText}"
+- Normally discuss only the question "${p.qText}"; if the interview objective explicitly authorizes a final cross-question verification on the last fixed question, you may use prior summaries to verify one most material evidence gap
 - Never invent unrelated questions or topics
 - If something the participant discussed earlier is relevant to the current question, you may reference it but do NOT re-ask about it; if they already answered your question, do not ask the same question with different wording
 - Do NOT repeat what you already said — each response must contain new content`,
@@ -440,9 +447,15 @@ Rules:
       const langInstr = p.forceLanguage
         ? `\n**语言要求：你必须用${p.forceLanguage === "en" ? "英文" : "中文"}回复，无论问题是什么语言。** / **Language: You MUST respond in ${p.forceLanguage === "en" ? "English" : "Chinese"}, regardless of the question language.**\n`
         : "";
+      const objectiveZh = p.objective
+        ? `\n本场访谈目标与控制规则（优先遵守）：${p.objective}\n`
+        : "";
+      const objectiveEn = p.objective
+        ? `\nInterview objective and control rules (follow with priority): ${p.objective}\n`
+        : "";
       return {
         zh: `你是面试官"${p.aiName}"，正在进行一场关于"${p.title}"的访谈。
-${memZh}${recentZh}${latestExchangeZh}${noRequestionZh}${langInstr}
+${objectiveZh}${memZh}${recentZh}${latestExchangeZh}${noRequestionZh}${langInstr}
 当前问题（第${p.qNum}/${p.totalQs}个）：「${p.qText}」${descZh}${p.choiceInstruction}
 对方已发言${p.userTurns}轮。
 
@@ -471,12 +484,12 @@ ${p.followUpInstruction}
 - 如果你的回复包含问号"？"或任何提问，绝对不能加 ${p.nextToken}
 - 如果你的回复是在邀请对方继续补充（例如"你可以继续分享"、"我很想听更多"、"如果你愿意也可以补充"），即使没有问号，也绝对不能加 ${p.nextToken}
 - ${p.nextToken} 只能出现在不含任何问题的简短感谢句末尾（如"好的，谢谢你的分享${p.nextToken}"）
-- 只能围绕「${p.qText}」这个问题
+- 通常只能围绕「${p.qText}」这个问题；如果本场访谈目标明确授权在最后固定题进行跨题动态核验，可以引用之前摘要核验一个最重要的证据缺口
 - 禁止编造不相关的问题或话题
 - 如果受访者之前已经讨论过的内容与当前问题相关，可以引用但不要重复追问；如果他们已经回答了你的问题，不要换个措辞再问同一个问题
 - 不要重复你之前已经说过的话，每次回复都要有新的内容`,
         en: `You are interviewer "${p.aiName}" conducting an interview about "${p.title}".
-${memEn}${recentEn}${latestExchangeEn}${noRequestionEn}${langInstr}
+${objectiveEn}${memEn}${recentEn}${latestExchangeEn}${noRequestionEn}${langInstr}
 Current question (${p.qNum}/${p.totalQs}): "${p.qText}"${descEn}${p.choiceInstruction}
 The participant has spoken ${p.userTurns} time(s) so far.
 
@@ -505,7 +518,7 @@ Rules:
 - If your reply contains a question mark "?" or any question, you MUST NOT include ${p.nextToken}
 - If your reply invites the participant to continue or share more (for example "feel free to continue", "I'd love to hear more", or "I would appreciate hearing about that"), you MUST NOT include ${p.nextToken} even if there is no question mark
 - ${p.nextToken} may ONLY appear at the end of a short acknowledgement with NO questions (e.g. "Thank you for sharing${p.nextToken}")
-- Only discuss the question "${p.qText}"
+- Normally discuss only the question "${p.qText}"; if the interview objective explicitly authorizes a final cross-question verification on the last fixed question, you may use prior summaries to verify one most material evidence gap
 - Never invent unrelated questions or topics
 - If something the participant discussed earlier is relevant to the current question, you may reference it but do NOT re-ask about it; if they already answered your question, do not ask the same question with different wording
 - Do NOT repeat what you already said — each response must contain new content`,

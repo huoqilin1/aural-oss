@@ -7,6 +7,10 @@ import {
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { getProvider } from "@/lib/ai/registry";
 import { createLogger } from "@/lib/logger";
+import {
+  questionReferencesRecruitAnchor,
+  selectRecruitAnchor,
+} from "@/lib/recruit-question-anchors";
 
 const log = createLogger("api/v1/generate-questions");
 
@@ -17,7 +21,7 @@ const RECRUIT_GENERATOR_MODEL = "deepseek-v4-pro";
 // remaining interview unavailable: fall back to the balanced blueprint within
 // the public 30-second preparation target.
 const GENERATION_BUDGET_MS = 8_000;
-const RECRUIT_DIMENSIONS = [
+const LEGACY_RECRUIT_DIMENSIONS = [
   "communication",
   "job_duty_primary",
   "job_duty_secondary",
@@ -27,7 +31,26 @@ const RECRUIT_DIMENSIONS = [
   "learning",
   "motivation_stability",
 ] as const;
-const RECRUIT_DIMENSION_SET = new Set<string>(RECRUIT_DIMENSIONS);
+const EVIDENCE_V11_RECRUIT_DIMENSIONS = [
+  "core_experience",
+  "project_ownership",
+  "core_skill_evidence",
+  "result_authenticity",
+  "job_work_sample",
+  "problem_solving",
+  "ai_learning_boundary",
+  "collaboration_motivation_stability",
+] as const;
+function isEvidenceV11(questionSetVersion: string): boolean {
+  return questionSetVersion.includes("v11")
+    || questionSetVersion.includes("scored8-inline3-dynamic1-work-sample");
+}
+
+function recruitDimensions(questionSetVersion: string): readonly string[] {
+  return isEvidenceV11(questionSetVersion)
+    ? EVIDENCE_V11_RECRUIT_DIMENSIONS
+    : LEGACY_RECRUIT_DIMENSIONS;
+}
 
 async function withGenerationBudget<T>(promise: Promise<T>): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -92,6 +115,8 @@ function buildRecruitPrompt(opts: {
   expertExamples?: Array<{ question?: string; answer?: string }>;
   preserveOpening?: boolean;
   preserveDimensions?: string[];
+  questionSetVersion?: string;
+  roleType?: string;
 }) {
   const {
     jobTitle,
@@ -103,10 +128,14 @@ function buildRecruitPrompt(opts: {
     expertExamples,
     preserveOpening,
     preserveDimensions = [],
+    questionSetVersion = "",
+    roleType = "nontechnical_core",
   } = opts;
+  const dimensions = recruitDimensions(questionSetVersion);
+  const evidenceV11 = isEvidenceV11(questionSetVersion);
   const preserved = new Set(preserveDimensions);
-  if (preserveOpening) preserved.add("communication");
-  const remaining = RECRUIT_DIMENSIONS.filter((dimension) => !preserved.has(dimension));
+  if (preserveOpening) preserved.add(dimensions[0]);
+  const remaining = dimensions.filter((dimension) => !preserved.has(dimension));
   const expertBlock =
     expertExamples && expertExamples.length
       ? expertExamples
@@ -118,13 +147,21 @@ function buildRecruitPrompt(opts: {
           .join(`
 `)
       : "";
-  return [
-    {
-      role: "system" as const,
-      content: `你是一位资深的招聘一面出题官。请为一位候选人设计 AI 一面（结构化岗位面试）的题目。全部用中文。
-
-要求:
-1. 系统已固定写入的维度为 ${Array.from(preserved).join(", ") || "无"}；只生成剩余 ${remaining.length} 道主问题，严禁重复固定题。完整顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:
+  const blueprintInstruction = evidenceV11
+    ? `完整顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:
+   1) core_experience: 约2分钟计分自我介绍，梳理经历主线和岗位相关能力；
+   2) project_ownership: 核验简历核心项目的本人职责、交付边界和上下游；
+   3) core_skill_evidence: 核验简历核心技能的真实使用、选择依据和验证方法；
+   4) result_authenticity: 核验结果数据口径、本人贡献、失败限制和复盘；
+   5) job_work_sample: 必须是岗位现场/假设情境工作样例，要求候选人实际分析、处理或推演；
+   6) problem_solving: 核验复杂问题、故障排查、证据顺序、方案取舍和回归；
+   7) ai_learning_boundary: 核验AI和工具的实际工作流、学习验证、错误案例和风险边界；
+   8) collaboration_motivation_stability: 核验协作交付、求职动机、时间线和现实条件。
+3. 第2至第8题每题都必须明确引用简历的一个具体锚点和岗位的一个具体要求；简历没有直接证据时，明确说“简历尚未体现该项”，询问迁移准备和现实差距，禁止臆造。
+4. 技术岗位允许并要求核验必要的代码、接口、数据流、配置、日志、指标、架构或验证细节，但不考冷门术语；非技术岗位核验工具、流程、文档、数据口径、交付物和验收方式。
+5. 第5题必须是工作样例，不能只问“做过没有”；题面只保留一个核心任务，运行时再根据证据缺口有限追问。
+6. 八道主问题之外，全场最多3次就地证据核验和1次最终动态核验，因此主问题应清晰、可在2至3分钟内回答。`
+    : `完整顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:
    1) communication: 用大约 3 分钟自我介绍，观察信息组织与表达；
    2) job_duty_primary: 核验岗位最核心职责；
    3) job_duty_secondary: 核验岗位另一项重要职责或跨团队协作；
@@ -133,21 +170,31 @@ function buildRecruitPrompt(opts: {
    6) ai_collaboration: 核验如何用 AI 改造工作，而不是只问是否用过工具；
    7) learning: 核验学习速度、复盘和迁移能力；
    8) motivation_stability: 核验求职动机、岗位理解与稳定性。
-2. 每题都要结合岗位或简历中的具体证据；简历没有的信息不得臆造。
 3. 全部用 OPEN_ENDED 类型，一题只考一个主要方向；不同题不得换一种说法重复追问同一段经历。
-4. 整场目标约 ${durationMinutes} 分钟，系统全场最多只允许 2 次追问，因此主问题必须独立、完整、可直接作答。${expertBlock ? `
+4. 整场目标约 ${durationMinutes} 分钟，主问题必须独立、完整、可直接作答。`;
+  return [
+    {
+      role: "system" as const,
+      content: `你是一位资深的招聘一面出题官。请为一位候选人设计 AI 一面（结构化岗位面试）的题目。全部用中文。
+
+要求:
+1. 题目契约版本为 ${questionSetVersion || "legacy"}。系统已固定写入的维度为 ${Array.from(preserved).join(", ") || "无"}；只生成剩余 ${remaining.length} 道主问题，严禁重复固定题。
+2. ${blueprintInstruction}
+3. 每题都要结合岗位或简历中的具体证据；简历没有的信息不得臆造。岗位题与简历题的目标配比为 ${jobQuestions}:${resumeQuestions}，但必须服从当前题目契约的固定八维结构。
+${expertBlock ? `
 5. 下面给了资深面试官(王总/凌总等专家)在本岗位问过的「经典问答范例」。请学习这些范例的提问深度、角度和挖人方式,出题向这个水准看齐——可借鉴角度,但要结合本候选人简历,不要照抄。` : ""}
 
 只输出合法 JSON,不要 markdown、不要解释:
 {
   "questions": [
-    { "order": 0, "text": "题面", "dimension": "communication" }
+    { "order": 0, "text": "题面", "dimension": "${dimensions[0]}" }
   ]
 }`,
     },
     {
       role: "user" as const,
       content: `岗位名称: ${jobTitle || "(未提供)"}
+岗位类型: ${roleType || "nontechnical_core"}
 
 --- 岗位描述 ---
 ${jobDescription || "(未提供岗位描述,按岗位名称常识出题)"}
@@ -206,15 +253,24 @@ export async function POST(
   const expertExamples = Array.isArray(body.expertExamples)
     ? (body.expertExamples as Array<{ question?: string; answer?: string }>).slice(0, 8)
     : [];
+  const questionSetVersion = typeof body.questionSetVersion === "string"
+    ? body.questionSetVersion.trim()
+    : "";
+  const roleType = typeof body.roleType === "string"
+    ? body.roleType.trim().toLocaleLowerCase()
+    : "nontechnical_core";
+  const selectedDimensions = recruitDimensions(questionSetVersion);
+  const selectedDimensionSet = new Set(selectedDimensions);
   const preserveOpening = body.preserveOpening === true;
   const preserveDimensions = Array.isArray(body.preserveDimensions)
     ? Array.from(new Set(body.preserveDimensions.flatMap((value) => {
         const dimension = typeof value === "string" ? value.trim() : "";
-        return RECRUIT_DIMENSION_SET.has(dimension) ? [dimension] : [];
+        return selectedDimensionSet.has(dimension) ? [dimension] : [];
       })))
     : [];
-  if (preserveOpening && !preserveDimensions.includes("communication")) {
-    preserveDimensions.unshift("communication");
+  const openingDimension = selectedDimensions[0];
+  if (preserveOpening && !preserveDimensions.includes(openingDimension)) {
+    preserveDimensions.unshift(openingDimension);
   }
 
   if (!jobTitle && !resumeText) {
@@ -234,6 +290,8 @@ export async function POST(
       expertExamples,
       preserveOpening,
       preserveDimensions,
+      questionSetVersion,
+      roleType,
     });
     const resp = await withGenerationBudget(
       provider.generateResponse({
@@ -254,7 +312,61 @@ export async function POST(
   }
 
   const rawQs = Array.isArray(generated?.questions) ? generated.questions : [];
-  const blueprint: Array<{ key: string; fallback: string; seconds: number }> = [
+  const evidenceV11 = isEvidenceV11(questionSetVersion);
+  const isTechnicalRole = roleType === "technical" || /(?:技术|开发|研发|运维|算法|数据|工程师|架构|程序)/i.test(
+    `${jobTitle}\n${jobDescription}`,
+  );
+  const workSampleInstruction = isTechnicalRole
+    ? "请现场给出最小可行方案，包括输入输出、关键数据流，以及必要的伪代码、SQL或配置，并列出至少两项验收或回归检查。"
+    : "请现场给出一页可执行交付方案，包括目标、处理步骤、使用的材料或工具、结果指标、主要风险和验收方式。";
+  const anchorKeywords: Record<string, { resume: string[]; job: string[] }> = {
+    project_ownership: {
+      resume: ["项目", "负责", "交付", "系统", "产品", "客户"],
+      job: ["职责", "负责", "交付", "项目", "目标"],
+    },
+    core_skill_evidence: {
+      resume: ["技能", "技术", "工具", "开发", "熟悉", "使用"],
+      job: ["技能", "能力", "要求", "工具", "技术"],
+    },
+    result_authenticity: {
+      resume: ["成果", "提升", "降低", "增长", "指标", "完成", "%"],
+      job: ["产出", "结果", "指标", "目标", "负责"],
+    },
+    job_work_sample: {
+      resume: ["项目", "负责", "交付", "运营", "开发", "分析"],
+      job: ["职责", "产出", "负责", "交付", "项目"],
+    },
+    problem_solving: {
+      resume: ["问题", "故障", "优化", "难点", "改进", "项目"],
+      job: ["问题", "解决", "质量", "风险", "负责"],
+    },
+    ai_learning_boundary: {
+      resume: ["AI", "人工智能", "大模型", "自动化", "学习", "工具"],
+      job: ["AI", "人工智能", "学习", "工具", "效率", "质量"],
+    },
+    collaboration_motivation_stability: {
+      resume: ["协作", "团队", "沟通", "管理", "工作", "负责"],
+      job: ["协作", "沟通", "团队", "岗位", "负责"],
+    },
+  };
+  const anchors = new Map(Object.entries(anchorKeywords).map(([dimension, keywords]) => [
+    dimension,
+    {
+      resume: selectRecruitAnchor(resumeText, keywords.resume),
+      job: selectRecruitAnchor(jobDescription || jobTitle, keywords.job) || jobTitle,
+    },
+  ]));
+  const anchorLead = (dimension: string): string => {
+    const selected = anchors.get(dimension) || { resume: "", job: jobTitle };
+    const resumeLead = selected.resume
+      ? `你在简历中写到“${selected.resume}”`
+      : "你的简历尚未体现与该项直接对应的经历";
+    const jobLead = selected.job
+      ? `岗位要求中强调“${selected.job}”`
+      : `你申请的是“${jobTitle || "当前岗位"}”`;
+    return `${resumeLead}，而${jobLead}。`;
+  };
+  const legacyBlueprint: Array<{ key: string; fallback: string; seconds: number }> = [
     {
       key: "communication",
       fallback: "请先花大约 3 分钟做自我介绍，重点说明与你申请岗位最相关的经历、成果和你承担的职责。",
@@ -296,6 +408,49 @@ export async function POST(
       seconds: 180,
     },
   ];
+  const evidenceV11Blueprint: Array<{ key: string; fallback: string; seconds: number }> = [
+    {
+      key: "core_experience",
+      fallback: "请先花大约2分钟做自我介绍，重点说明与你申请岗位最相关的一段经历、你本人承担的职责、关键行动和可验证结果。",
+      seconds: 150,
+    },
+    {
+      key: "project_ownership",
+      fallback: `${anchorLead("project_ownership")}请还原你本人负责的模块或交付边界、上下游以及最终交付；若没有直接经历，请说明最接近的真实经历和现实差距。`,
+      seconds: 150,
+    },
+    {
+      key: "core_skill_evidence",
+      fallback: `${anchorLead("core_skill_evidence")}请选择其中最关键的一项技能，说明你在真实任务中如何使用、为什么这样选择以及如何验证；若没有直接证据，请说明准备和差距。`,
+      seconds: 150,
+    },
+    {
+      key: "result_authenticity",
+      fallback: `${anchorLead("result_authenticity")}请说明相关成果的指标口径、实施前后变化、你的个人贡献、失败限制和复盘；如果没有量化数据，请说明实际验收证据。`,
+      seconds: 150,
+    },
+    {
+      key: "job_work_sample",
+      fallback: `${anchorLead("job_work_sample")}现在做一个现场工作样例：${workSampleInstruction}`,
+      seconds: 150,
+    },
+    {
+      key: "problem_solving",
+      fallback: `${anchorLead("problem_solving")}请现场推演一次相关故障或异常的排查顺序、证据、取舍、修复和回归。`,
+      seconds: 150,
+    },
+    {
+      key: "ai_learning_boundary",
+      fallback: `${anchorLead("ai_learning_boundary")}请说明你使用AI或快速学习的实际工作流、验证方法、错误案例以及不用AI的边界。`,
+      seconds: 150,
+    },
+    {
+      key: "collaboration_motivation_stability",
+      fallback: `${anchorLead("collaboration_motivation_stability")}请说明一次真实协作、你的求职动机、时间线和可能影响长期投入的现实条件。`,
+      seconds: 120,
+    },
+  ];
+  const blueprint = evidenceV11 ? evidenceV11Blueprint : legacyBlueprint;
   const generatedByDimension = new Map(
     rawQs.flatMap((question) => {
       const key = typeof question.dimension === "string" ? question.dimension.trim() : "";
@@ -306,12 +461,26 @@ export async function POST(
   const usedQuestionTexts = new Set<string>();
   const questions = blueprint
     .filter((item) => !preserveDimensions.includes(item.key))
-    .map((item, index) => {
+    .map((item) => {
     const generatedText = generatedByDimension.get(item.key);
+    const selectedAnchors = anchors.get(item.key);
+    const evidenceAnchoredGenerated = Boolean(
+      !evidenceV11
+      || item.key === "core_experience"
+      || (
+        generatedText
+        && selectedAnchors
+        && questionReferencesRecruitAnchor(generatedText, selectedAnchors.resume)
+        && questionReferencesRecruitAnchor(generatedText, selectedAnchors.job)
+      )
+    );
     let text =
-      item.key === "communication" && (!generatedText || !/自我介绍|介绍一下/.test(generatedText))
+      item.key === (evidenceV11 ? "core_experience" : "communication")
+        && (!generatedText || !/自我介绍|介绍一下/.test(generatedText))
         ? item.fallback
-        : generatedText || item.fallback;
+        : evidenceAnchoredGenerated && generatedText
+          ? generatedText
+          : item.fallback;
     const normalized = text.toLocaleLowerCase().replace(/[\s，。！？、；：,.!?;:()（）【】\[\]"“”'‘’]/g, "");
     if (usedQuestionTexts.has(normalized)) text = item.fallback;
     usedQuestionTexts.add(

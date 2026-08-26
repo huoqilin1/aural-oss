@@ -264,14 +264,34 @@ function resample16to24(input: Buffer): Buffer {
 function buildSystemPrompt(ctx: InterviewContext, startIdx: number): string {
   const isZh = isChineseInterview(ctx);
   const sorted = ctx.questions.sort((a, b) => a.order - b.order);
+  const isOprunRecruitmentInterview = ctx.title.includes("数君招聘");
 
   let maxFollowUps: number;
-  switch (ctx.followUpDepth) {
+  if (isOprunRecruitmentInterview) {
+    maxFollowUps = 1;
+  } else switch (ctx.followUpDepth) {
     case "LIGHT":    maxFollowUps = 1; break;
     case "MODERATE": maxFollowUps = 3; break;
     case "DEEP":     maxFollowUps = 5; break;
     default:         maxFollowUps = 2;
   }
+
+  const recruitmentVerificationRulesZh = isOprunRecruitmentInterview
+    ? `\n## 数君招聘核验追问规则（线路切换后仍须严格遵守）
+- 开场寒暄不编号，不宣读题目总数；第1题自我介绍是正式计分题，但不追问。
+- 第2至第7题每题最多追问1次，全场合计最多3次。只在本人边界、实施机制、选择依据、结果口径、失败验证或时间线存在关键缺口时追问；证据充分就直接切题。
+- 第8题最多追问1次，且只核验全场影响录用判断最大的一个未证实主张、技能缺口或前后矛盾。这是唯一允许引用前面题目证据的跨题核验。
+- 第9题如为候选人反问环节，不追问候选人。全场任何时候都不得超过“3次就地核验+1次最终核验”。
+- 技术岗位可以核验必要的代码、接口、数据流、配置、日志、指标、架构和验证细节，但不考冷门术语、不无限深挖。\n`
+    : "";
+  const recruitmentVerificationRulesEn = isOprunRecruitmentInterview
+    ? `\n## OpRun recruitment verification limits (preserve after relay failover)
+- Give an unnumbered natural greeting without announcing the total question count. Q1 is the scored self-introduction and gets no follow-up.
+- Q2-Q7 allow at most one follow-up each and at most three combined. Probe only one material gap in ownership, mechanism, rationale, metric definition, failure validation, or timeline; otherwise move on.
+- Q8 allows one final follow-up only, targeting the single most material unsupported claim, skill gap, or inconsistency across the interview.
+- Do not probe an optional Q9 candidate-question closing. Never exceed three in-place checks plus one final verification in the whole interview.
+- Technical roles may verify necessary code, interfaces, data flow, configuration, logs, metrics, architecture, and validation details without trivia or endless probing.\n`
+    : "";
 
   const questionList = sorted.map((q, i) => {
     let entry = `  ${i + 1}. [${q.type}] ${q.text}`;
@@ -327,12 +347,13 @@ ${ctx.objective ? `- 目标: ${ctx.objective}` : ""}
 - 问题数量: ${sorted.length}
 - 当前问题: 第${currentQ}个
 - 每题追问深度: 最多${maxFollowUps}次追问
+${recruitmentVerificationRulesZh}
 
 ## 问题列表
 ${questionList}
 
 ## 你的行为准则
-1. 从第${currentQ}个问题开始。先用温暖友好的方式自我介绍（提到你的名字、面试主题和问题数量）。然后说一句过渡语，比如"我们开始吧，这是第一个问题。"之后再提出问题。问候、过渡语和问题必须是三个独立的句子，不要合并。
+1. 从第${currentQ}个问题开始。先用温暖友好的方式自我介绍（提到你的名字和面试主题${isOprunRecruitmentInterview ? "，但不宣读问题数量" : "和问题数量"}）。然后说一句自然过渡语，之后再提出问题。问候、过渡语和问题必须是三个独立的句子，不要合并。
 2. 对每个问题，根据受访者的回答进行${maxFollowUps}次以内的追问。语气要像友好、耐心的真人面试官，而不是冷冰冰地连珠发问。
 3. 当一个问题讨论充分后，调用 signal_question_change 函数来进入下一个问题。"讨论充分"是指受访者给出了详细、具体的回答——不是模糊的表述如"我遇到过很多挑战"。如果回答模糊，应追问以获取更多细节。
 4. 切换后，自然地过渡到新问题。通常先用一句简短的认可或感谢来承接上一段回答，再进入下一题，而不是直接生硬地抛出问题。
@@ -379,12 +400,13 @@ ${ctx.objective ? `- Objective: ${ctx.objective}` : ""}
 - Total questions: ${sorted.length}
 - Starting at: Question ${currentQ}
 - Follow-up depth: Up to ${maxFollowUps} follow-ups per question
+${recruitmentVerificationRulesEn}
 
 ## Questions
 ${questionList}
 
 ## Your Behavior
-1. Start at question ${currentQ}. First, give a warm greeting — introduce yourself by name, mention the topic "${ctx.title}" and that there are ${sorted.length} questions. Then say a transition phrase like "Let's get started. Here is the first question." ONLY AFTER that, ask the question. The greeting, the transition phrase, and the question MUST be three separate sentences — NEVER combine them into one.
+1. Start at question ${currentQ}. First, give a warm greeting — introduce yourself by name and mention the topic "${ctx.title}"${isOprunRecruitmentInterview ? " without announcing the question count" : ` and that there are ${sorted.length} questions`}. Then give a natural transition. ONLY AFTER that, ask the question. The greeting, transition, and question MUST be separate sentences.
 2. For each question, follow up based on the participant's answers (up to ${maxFollowUps} follow-ups). Sound like a warm, patient human interviewer, not a rapid-fire questionnaire.
 3. When a question is sufficiently discussed, call the signal_question_change function to move forward. "Sufficiently discussed" means the participant has given a detailed, specific answer — NOT a vague statement like "I had many challenges" or "that's a good question." If their answer is vague, ask them to elaborate before moving on.
 4. After transitioning, naturally introduce the next question. Usually start with a short acknowledgement or appreciation of the participant's last answer before asking the next question.
