@@ -1,5 +1,7 @@
 const windowMs = 60_000;
-const maxRequests = 60;
+// 每调用方每分钟上限。HR 招聘(OpRun HR)同时间面 20~40 场时,
+// 准备阶段 + 语音进度同步的峰值约 200~250 次/分钟,留 2 倍余量。
+const maxRequests = 600;
 
 const hits = new Map<string, { count: number; resetAt: number }>();
 

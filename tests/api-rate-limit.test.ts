@@ -18,15 +18,15 @@ describe("checkRateLimit", () => {
 
   it("returns null for requests within the per-minute limit", async () => {
     const { checkRateLimit } = await importFreshRateLimiter();
-    for (let i = 0; i < 59; i++) {
+    for (let i = 0; i < 599; i++) {
       assert.equal(checkRateLimit("client-1"), null);
     }
     assert.equal(checkRateLimit("client-1"), null);
   });
 
-  it("returns a 429 Response when the limit (60/min) is exceeded", async () => {
+  it("returns a 429 Response when the limit (600/min) is exceeded", async () => {
     const { checkRateLimit } = await importFreshRateLimiter();
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 600; i++) {
       assert.equal(checkRateLimit("heavy-client"), null);
     }
     const blocked = checkRateLimit("heavy-client");
@@ -36,7 +36,7 @@ describe("checkRateLimit", () => {
 
   it("includes Retry-After and X-RateLimit-* headers on 429 responses", async () => {
     const { checkRateLimit } = await importFreshRateLimiter();
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 600; i++) {
       checkRateLimit("hdr-client");
     }
     const blocked = checkRateLimit("hdr-client");
@@ -46,7 +46,7 @@ describe("checkRateLimit", () => {
     const remaining = blocked.headers.get("X-RateLimit-Remaining");
     const reset = blocked.headers.get("X-RateLimit-Reset");
     assert.ok(retryAfter && Number(retryAfter) > 0);
-    assert.equal(limit, "60");
+    assert.equal(limit, "600");
     assert.equal(remaining, "0");
     assert.ok(reset && Number(reset) > 0);
     const body = (await blocked.json()) as {
@@ -58,7 +58,7 @@ describe("checkRateLimit", () => {
 
   it("tracks different identifiers independently", async () => {
     const { checkRateLimit } = await importFreshRateLimiter();
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 600; i++) {
       assert.equal(checkRateLimit("tenant-a"), null);
     }
     assert.ok(checkRateLimit("tenant-a") instanceof Response);
