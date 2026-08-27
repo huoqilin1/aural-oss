@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
     collapseInternalAsrRepetitions,
+    evaluateTranscriptManualAdvance,
     finalizeTurnBudgetResponse,
     isAsrRollingRevision,
     isUserEndRequest,
@@ -14,6 +15,31 @@ import {
     shouldSuppressAnsweredAsrFinal,
     trimCrossTurnOverlap,
 } from "../server/voice-relay-helpers";
+
+test("primary relay manual advance waits for the latest recruitment follow-up answer", () => {
+  const ready = {
+    isTransitioning: false,
+    assistantBusy: false,
+    isRecruitmentInterview: true,
+    hasCommittedUserTurn: true,
+    latestTranscriptRole: "user" as const,
+    latestAssistantLooksLikeQuestion: false,
+  };
+
+  assert.deepEqual(evaluateTranscriptManualAdvance(ready), { allowed: true });
+  assert.deepEqual(
+    evaluateTranscriptManualAdvance({ ...ready, assistantBusy: true }),
+    { allowed: false, reason: "assistant_busy" },
+  );
+  assert.deepEqual(
+    evaluateTranscriptManualAdvance({
+      ...ready,
+      latestTranscriptRole: "assistant",
+      latestAssistantLooksLikeQuestion: true,
+    }),
+    { allowed: false, reason: "answer_required" },
+  );
+});
 
 test("explicit interview end requests are not treated as skip-to-next requests", () => {
   const text = "No, I cannot. So we end the interview now.";

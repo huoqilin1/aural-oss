@@ -32,6 +32,7 @@ import {
 import { callRelayLLM, logRelayLlmStartup } from "./relay-llm";
 import {
     collapseInternalAsrRepetitions,
+    evaluateTranscriptManualAdvance,
     finalizeTurnBudgetResponse,
     isUserEndRequest,
     isUserSkipRequest,
@@ -3352,6 +3353,33 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         applyDynamicQuestionSet(msg.questions, "browser");
       } else if (msg.type === "next_question") {
         log.info("Browser requested next question");
+        const latestEntry = questionTranscript[questionTranscript.length - 1];
+        const decision = evaluateTranscriptManualAdvance({
+          isTransitioning,
+          assistantBusy: generatingResponse || ttsSpeaking || awaitingFinalResponse,
+          isRecruitmentInterview: ctx.title.includes("数君招聘"),
+          hasCommittedUserTurn: questionTranscript.some((entry) => entry.role === "user"),
+          latestTranscriptRole: latestEntry?.role,
+          latestAssistantLooksLikeQuestion:
+            latestEntry?.role === "assistant" && looksLikeQuestion(latestEntry.text),
+        });
+        if (!decision.allowed) {
+          const message = decision.reason === "assistant_busy"
+            ? "请等面试官说完并处理完当前回答后，再进入下一题。"
+            : decision.reason === "answer_required"
+              ? "请先回答面试官刚刚提出的问题；如需跳过，可以直接说“跳过这题”。"
+              : "正在切换题目，请稍候。";
+          browserWs.send(JSON.stringify({
+            type: "transition_rejected",
+            direction: "next",
+            reason: decision.reason,
+            message,
+            requestId: typeof msg.requestId === "string" ? msg.requestId : undefined,
+            questionIndex: currentQuestionIndex,
+            totalQuestions: sortedQuestions.length,
+          }));
+          return;
+        }
         handleTransition().catch(log.error);
       } else if (msg.type === "prev_question") {
         log.info("Browser requested previous question");

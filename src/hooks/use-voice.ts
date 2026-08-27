@@ -73,6 +73,7 @@ interface VoiceState {
   audioLevel: number;
   currentQuestionIndex: number;
   totalQuestions: number;
+  transitionRejectionCount: number;
 }
 
 interface TrackedMessage {
@@ -121,6 +122,7 @@ export function useVoice({
     audioLevel: 0,
     currentQuestionIndex: interviewContext.startQuestionIndex ?? 0,
     totalQuestions: interviewContext.questions.length,
+    transitionRejectionCount: 0,
   });
 
   const relayConnectorRef = useRef<RelayConnector<Record<string, unknown>> | null>(null);
@@ -843,6 +845,29 @@ export function useVoice({
           break;
         }
 
+        case "transition_cancelled":
+          setState((s) => ({
+            ...s,
+            isTransitioning: false,
+            transitionDirection: null,
+            transitionRejectionCount: s.transitionRejectionCount + 1,
+          }));
+          break;
+
+        case "transition_rejected": {
+          const message = typeof msg.message === "string"
+            ? msg.message
+            : "当前还不能进入下一题，请先完成本题。";
+          setState((s) => ({
+            ...s,
+            isTransitioning: false,
+            transitionDirection: null,
+            transitionRejectionCount: s.transitionRejectionCount + 1,
+          }));
+          onError?.(message);
+          break;
+        }
+
         case "interview_complete":
           log.info("Interview complete, wrapping up");
           setState((s) => ({ ...s, isInterviewComplete: true }));
@@ -987,7 +1012,10 @@ export function useVoice({
 
   /** Request transition to the next question */
   const nextQuestion = useCallback(() => {
-    relayConnectorRef.current?.sendJson({ type: "next_question" });
+    const connector = relayConnectorRef.current;
+    if (!connector?.isReady) return false;
+    connector.sendJson({ type: "next_question", requestId: crypto.randomUUID() });
+    return true;
   }, []);
 
   /** Request transition back to the previous question */

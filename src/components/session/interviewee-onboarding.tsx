@@ -1252,7 +1252,7 @@ export function IntervieweeOnboarding({
                   </li>
                   <li>
                     请在<span className="font-medium text-foreground">安静环境</span>下使用最新版
-                    Chrome 浏览器，允许麦克风（和摄像头）权限，确保声音清晰可辨。
+                    Chrome 浏览器，允许麦克风和摄像头权限，确保声音和画面清晰可辨。
                     <span className="font-medium text-foreground">建议佩戴耳机（带麦克风）</span>
                     ：耳麦离嘴更近，能明显减少周围人声和环境噪音的干扰。
                   </li>
@@ -1308,6 +1308,8 @@ export function IntervieweeOnboarding({
               />
               我已阅读并同意以上{isRecruitmentInterview ? "面试" : "测试"}须知
             </label>
+            {/* 招聘铁律:这是唯一一次站内点击。点击后直接完成须知页，
+                由 VoiceInterface 自动连接摄像头和麦克风，不进入设备测试步骤。 */}
             <Button
               disabled={!agreed}
               onClick={() => handleComplete()}

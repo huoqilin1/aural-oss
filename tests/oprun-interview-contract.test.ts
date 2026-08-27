@@ -162,8 +162,25 @@ test("session export preserves durable question identity for HR reconciliation",
 });
 
 test("all next-question controls share the same transition lock", () => {
-  assert.match(voiceInterface, /advancePending \|\| voice\.isTransitioning \|\| voice\.isProcessing/);
+  assert.match(voiceInterface, /advancePending/);
+  assert.match(voiceInterface, /voice\.isTransitioning/);
+  assert.match(voiceInterface, /voice\.isProcessing/);
+  assert.match(voiceInterface, /!canAdvanceCurrentQuestion/);
+  assert.match(voiceInterface, /latestAssistantRequiresAnswer/);
+  assert.match(voiceInterface, /voice\.isSpeaking/);
   assert.doesNotMatch(voiceInterface, /<span onClick=\{handleNextQuestion\}/);
+});
+
+test("manual next-question transitions are acknowledged or rejected by the relay", () => {
+  const voiceHook = readFileSync("src/hooks/use-voice.ts", "utf8");
+  assert.match(openAiRelay, /evaluateManualQuestionAdvance/);
+  assert.match(openAiRelay, /type: "transition_rejected"/);
+  assert.match(openAiRelay, /lastAssistantQuestionAt/);
+  assert.match(relay, /evaluateTranscriptManualAdvance/);
+  assert.match(relay, /type: "transition_rejected"/);
+  assert.match(voiceHook, /requestId: crypto\.randomUUID\(\)/);
+  assert.match(voiceHook, /case "transition_rejected"/);
+  assert.match(voiceHook, /transitionRejectionCount/);
 });
 
 test("candidate interface keeps the full question and hybrid timing visible", () => {
@@ -202,13 +219,23 @@ test("invited recruitment candidates see the interview notice before entering", 
     invitedCandidateSession,
     /autoStart=\{isOprunRecruitmentInterview\}/,
   );
+  assert.match(
+    invitedCandidateSession,
+    /videoMode=\{!!interview\.videoEnabled\}/,
+  );
   assert.match(voiceInterface, /void voice\.connect\(\)/);
   assert.match(voiceInterface, /OPRUN_PLANNED_MAIN_QUESTION_COUNT/);
   assert.match(voiceInterface, /isInternalQuestionDescription/);
-  assert.match(voiceInterface, /允许麦克风并开始面试/);
+  assert.match(
+    voiceInterface,
+    /!voice\.isConnected && !preview && !autoStart &&/,
+  );
+  assert.doesNotMatch(voiceInterface, /允许麦克风并开始面试/);
   assert.match(intervieweeOnboarding, /面试须知/);
   assert.match(intervieweeOnboarding, /如何进入下一题/);
   assert.match(intervieweeOnboarding, /isRecruitmentInterview/);
+  assert.match(intervieweeOnboarding, /允许麦克风和摄像头权限/);
+  assert.match(intervieweeOnboarding, /onClick=\{\(\) => handleComplete\(\)\}/);
 });
 
 test("answered questions surface a prominent next-question control", () => {

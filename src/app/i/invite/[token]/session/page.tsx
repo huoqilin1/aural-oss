@@ -178,6 +178,8 @@ export default function InviteSessionPage() {
     return (
       <>
         <AntiCheatingGuard enabled={!!interview.antiCheatingEnabled} sessionId={session.id} />
+        {/* 招聘进入铁律:阅读须知 -> 只点一次开始面试 -> 自动连接摄像头和麦克风。
+            摄像头必须保留;不得在这里插入任何设备测试或第二次开始按钮。 */}
         <VoiceInterface
           sessionId={session.id}
           interviewId={interview.id}

@@ -20,6 +20,7 @@ import {
 import {
     DEFAULT_TTS_BARGE_IN_MIN_AUDIO_BYTES,
     DEFAULT_TTS_BARGE_IN_MIN_AUDIO_MS,
+    evaluateManualQuestionAdvance,
     shouldAllowTtsBargeIn,
 } from "./openai-voice-relay-helpers";
 import {
@@ -763,6 +764,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   const isZh = isChineseInterview(ctx);
   let currentQuestionIndex = ctx.startQuestionIndex ?? 0;
   let questionEnteredAt = Date.now();
+  let lastAssistantQuestionAt = questionEnteredAt;
+  let lastCommittedUserAnswerAt = 0;
   const MIN_QUESTION_DWELL_MS = 15_000;
   const MIN_WORDS_BEFORE_TRANSITION = 20;
   let userCommittedWordsThisQuestion = 0;
@@ -932,6 +935,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   function pushHistory(role: "user" | "assistant", text: string) {
     if (!text.trim()) return;
     if (role === "user" && !text.startsWith("[")) {
+      lastCommittedUserAnswerAt = Date.now();
       userCommittedWordsThisQuestion += text.trim().split(/\s+/).length;
       if (finalVerificationAsked && currentQuestionIndex === 7) {
         finalVerificationAnswered = true;
@@ -1877,6 +1881,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               if (capturedModelText) {
                 log.info(`TTS done (${responseTtsBytes}B sent): ${JSON.stringify(capturedModelText)}`);
                 pushHistory("assistant", capturedModelText);
+                if (isQuestionLike(capturedModelText)) {
+                  lastAssistantQuestionAt = Date.now();
+                }
                 if (
                   finalVerificationRequested
                   && currentQuestionIndex === 7
@@ -2189,14 +2196,24 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     targetIdx: number,
     directionLabel: string,
     reason: "button" | "user_request" = "button",
+    requestId?: string,
   ) {
+    if (isTransitioning) {
+      if (requestId) {
+        rejectManualAdvance("transition_in_progress", requestId);
+      }
+      return false;
+    }
     if (needsFinalVerification(targetIdx)) {
       if (!finalVerificationRequested) {
         finalVerificationRequested = true;
         sendQuestionPrompt(finalVerificationPrompt());
         log.info("Blocked manual Q8 transition until final verification is answered");
       }
-      return;
+      if (requestId) {
+        rejectManualAdvance("verification_required", requestId);
+      }
+      return false;
     }
     pendingProgressiveTransition = null;
     clearPendingTransition();
@@ -2205,7 +2222,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
 
     isTransitioning = true;
     const direction = targetIdx > currentQuestionIndex ? "next" : "previous";
-    send({ type: "transitioning", direction });
+    send({ type: "transitioning", direction, requestId });
 
     setTimeout(() => {
       if (targetIdx === currentQuestionIndex) {
@@ -2233,6 +2250,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       const dir = targetIdx > currentQuestionIndex ? "→" : "←";
       currentQuestionIndex = targetIdx;
       questionEnteredAt = Date.now();
+      lastAssistantQuestionAt = questionEnteredAt;
+      lastCommittedUserAnswerAt = 0;
       userCommittedWordsThisQuestion = 0;
       disableTools();
       pushHistory("user", `[Moved to question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}"]`);
@@ -2240,6 +2259,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
         type: "question_change",
         questionIndex: currentQuestionIndex,
         totalQuestions: sortedQuestions.length,
+        requestId,
       });
       isTransitioning = false;
       log.info(`${dir} Q${currentQuestionIndex + 1}/${sortedQuestions.length}`);
@@ -2249,14 +2269,42 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
         : `[SYSTEM] The participant clicked "${directionLabel}". We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly introduce this question now.`;
       sendQuestionPrompt(prompt);
     }, 500);
+    return true;
+  }
+
+  function rejectManualAdvance(
+    reason:
+      | "transition_in_progress"
+      | "assistant_busy"
+      | "answer_required"
+      | "verification_required",
+    requestId?: string,
+  ) {
+    const message = reason === "assistant_busy"
+      ? "请等面试官说完并处理完当前回答后，再进入下一题。"
+      : reason === "answer_required"
+        ? "请先回答面试官刚刚提出的问题；如需跳过，可以直接说“跳过这题”。"
+        : reason === "verification_required"
+          ? "请先回答最后一道核验追问。"
+          : "正在切换题目，请稍候。";
+    send({
+      type: "transition_rejected",
+      direction: "next",
+      reason,
+      message,
+      requestId,
+      questionIndex: currentQuestionIndex,
+      totalQuestions: sortedQuestions.length,
+    });
   }
 
   async function transitionToNextWhenReady(
     reason: "button" | "user_request" = "button",
+    requestId?: string,
   ) {
     if (interviewDone || isTransitioning) return;
     if (!shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex)) {
-      requestTransition(currentQuestionIndex + 1, "Next Question", reason);
+      requestTransition(currentQuestionIndex + 1, "Next Question", reason, requestId);
       return;
     }
 
@@ -2277,6 +2325,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
         direction: "next",
         questionIndex: currentQuestionIndex,
         totalQuestions: sortedQuestions.length,
+        requestId,
       });
       sendQuestionPrompt(
         "[SYSTEM] The remaining structured questions are still being prepared. Do not end the interview. Ask the participant to add one concrete, verifiable result while preparation continues.",
@@ -2284,7 +2333,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       return;
     }
 
-    requestTransition(currentQuestionIndex + 1, "Next Question", reason);
+    requestTransition(currentQuestionIndex + 1, "Next Question", reason, requestId);
   }
 
   function tryHandleExplicitUserNavigation(text: string): boolean {
@@ -2331,13 +2380,29 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       }
       if (msg.type === "next_question") {
         log.info("Browser requested next question");
+        const requestId = typeof msg.requestId === "string" ? msg.requestId : undefined;
+        const decision = evaluateManualQuestionAdvance({
+          isTransitioning,
+          assistantResponseInFlight: responseInFlight,
+          modelIsSpeaking,
+          hasPendingQuestionPrompt: !!pendingQuestionPrompt,
+          isRecruitmentInterview: isOprunRecruitmentInterview,
+          questionEnteredAt,
+          lastAssistantQuestionAt,
+          lastCommittedUserAnswerAt,
+          committedWordsThisQuestion: userCommittedWordsThisQuestion,
+        });
+        if (!decision.allowed) {
+          rejectManualAdvance(decision.reason, requestId);
+          return;
+        }
         if (isProgressiveOpeningOnly(sortedQuestions)) {
-          void transitionToNextWhenReady("button");
+          void transitionToNextWhenReady("button", requestId);
           return;
         }
         const nextIdx = Math.min(currentQuestionIndex + 1, sortedQuestions.length);
         if (nextIdx !== currentQuestionIndex) {
-          requestTransition(nextIdx, "Next Question");
+          requestTransition(nextIdx, "Next Question", "button", requestId);
         }
         return;
       }

@@ -78,6 +78,10 @@ function normalizeTranscript(text: string): string {
   return text.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
+function looksLikeInterviewQuestion(text: string): boolean {
+  return /[?？]|请说明|请具体|能否|怎么|如何|为什么|什么|哪些|是否|有没有|could you|can you|how|why|what/i.test(text);
+}
+
 function hasRecentAssistantTranscript(messages: Message[], text: string): boolean {
   const normalized = normalizeTranscript(text);
   if (!normalized) return false;
@@ -697,6 +701,9 @@ export function VoiceInterface({
   const handleAIResponse = useCallback((text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
+    if (looksLikeInterviewQuestion(trimmed)) {
+      setAnsweredCurrentQuestion(false);
+    }
     setMessages((prev) => {
       if (hasRecentAssistantTranscript(prev, trimmed)) {
         return prev;
@@ -731,6 +738,10 @@ export function VoiceInterface({
     onTtsChunk: videoMode ? recording.addTtsChunk : undefined,
     onInterrupt: videoMode ? recording.cancelTts : undefined,
   });
+  const latestAssistantRequiresAnswer =
+    !!voice.aiTranscript.trim() && looksLikeInterviewQuestion(voice.aiTranscript);
+  const canAdvanceCurrentQuestion =
+    answeredCurrentQuestion && !latestAssistantRequiresAnswer;
 
   useEffect(() => {
     if (voice.isConnected) {
@@ -754,6 +765,8 @@ export function VoiceInterface({
 
   const autoStartAttemptedRef = useRef(false);
   useEffect(() => {
+    // 招聘铁律:须知页的「开始面试」是唯一站内点击。进入本组件后自动
+    // 连接麦克风，并由 videoMode 自动启动摄像头录制；不得再显示测试/开始按钮。
     if (
       !autoStart
       || preview
@@ -1209,25 +1222,38 @@ export function VoiceInterface({
   }, [saveCurrentContent, voice]);
 
   const handleNextQuestion = useCallback(async () => {
-    if (advancePending || voice.isTransitioning || voice.isProcessing) return;
+    if (
+      advancePending
+      || !canAdvanceCurrentQuestion
+      || voice.isTransitioning
+      || voice.isProcessing
+      || voice.isSpeaking
+    ) return;
     if (voice.totalQuestions > 0 && voice.currentQuestionIndex >= voice.totalQuestions - 1) return;
     setAdvancePending(true);
+    let awaitingRelay = false;
     try {
       await saveCurrentContent();
       if (voice.totalQuestions === 0) {
         // 即兴深挖(招聘):没预设题,「我答完了」= 告诉 AI 推进下一个问题
         voice.sendTextMessage("(我答完了,请继续下一个问题)");
       } else {
-        voice.nextQuestion();
+        awaitingRelay = voice.nextQuestion();
       }
     } finally {
-      window.setTimeout(() => setAdvancePending(false), 3_000);
+      if (!awaitingRelay) setAdvancePending(false);
     }
-  }, [advancePending, saveCurrentContent, voice]);
+  }, [advancePending, canAdvanceCurrentQuestion, saveCurrentContent, voice]);
 
   useEffect(() => {
     setAdvancePending(false);
-  }, [voice.currentQuestionIndex]);
+  }, [voice.currentQuestionIndex, voice.transitionRejectionCount]);
+
+  useEffect(() => {
+    if (!advancePending) return;
+    const timeout = window.setTimeout(() => setAdvancePending(false), 15_000);
+    return () => window.clearTimeout(timeout);
+  }, [advancePending]);
 
   // ── Editor toggle helpers (save before deactivate, restore on activate)
   const saveCodeEditorState = useCallback(() => {
@@ -2256,7 +2282,7 @@ export function VoiceInterface({
                 {voice.isConnected &&
                   !preview &&
                   !locallyCompleted &&
-                  answeredCurrentQuestion &&
+                  canAdvanceCurrentQuestion &&
                   !onFinalQuestion &&
                   !showVoiceTransitioning &&
                   !showVoiceProcessing &&
@@ -2265,7 +2291,13 @@ export function VoiceInterface({
                       <Button
                         size="lg"
                         onClick={handleNextQuestion}
-                        disabled={advancePending || voice.isTransitioning || voice.isProcessing}
+                        disabled={
+                          advancePending
+                          || !canAdvanceCurrentQuestion
+                          || voice.isTransitioning
+                          || voice.isProcessing
+                          || voice.isSpeaking
+                        }
                         className="gap-2 rounded-full px-10 text-base font-semibold shadow-lg"
                       >
                         <SkipForward className="h-5 w-5" />
@@ -2278,6 +2310,7 @@ export function VoiceInterface({
                   )}
               </div>
 
+              {/* autoStart 招聘流程禁止出现第二个“开始/测试”按钮。 */}
               {!voice.isConnected && !preview && !autoStart && (
                 <div className="mb-3 max-w-md rounded-xl border bg-card/60 px-4 py-3 text-left text-xs leading-relaxed text-muted-foreground">
                   <p className="mb-1.5 text-sm font-medium text-foreground">答题方式</p>
@@ -2288,7 +2321,7 @@ export function VoiceInterface({
                 </div>
               )}
 
-              {!voice.isConnected && !preview && (!autoStart || !isStartingInterview) && (
+              {!voice.isConnected && !preview && !autoStart && (
                 <Button
                   size="lg"
                   disabled={isStartingInterview}
@@ -2308,11 +2341,7 @@ export function VoiceInterface({
                   ) : (
                     <Mic className="h-5 w-5" />
                   )}
-                  {isStartingInterview
-                    ? "连接中…"
-                    : autoStart
-                      ? "允许麦克风并开始面试"
-                      : "开始语音测试"}
+                  {isStartingInterview ? "连接中…" : "开始语音测试"}
                 </Button>
               )}
 
@@ -2680,8 +2709,10 @@ export function VoiceInterface({
                 onClick={handleNextQuestion}
                 disabled={
                   advancePending ||
+                  !canAdvanceCurrentQuestion ||
                   voice.isTransitioning ||
                   voice.isProcessing ||
+                  voice.isSpeaking ||
                   (voice.totalQuestions > 0 && voice.currentQuestionIndex >= voice.totalQuestions - 1)
                 }
               >

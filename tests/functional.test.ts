@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -60,12 +61,21 @@ async function waitForHttp(url: string, timeoutMs = 60_000): Promise<void> {
 }
 
 function startAppServer(port: number): ChildProcess {
-  const child = spawn("npx", ["next", "dev", "--port", String(port)], {
+  const nextCli = resolve(APP_CWD, "node_modules", "next", "dist", "bin", "next");
+  const child = spawn(process.execPath, [nextCli, "dev", "--port", String(port)], {
     cwd: APP_CWD,
     env: {
       ...process.env,
       NODE_ENV: "development",
       ENABLE_FUNCTIONAL_TEST_PAGES: "1",
+      SUPABASE_URL: process.env.SUPABASE_URL || "https://functional-test.supabase.co",
+      SUPABASE_ANON_KEY: process.env.SUPABASE_ANON_KEY || "functional-test-key",
+      SUPABASE_SERVICE_ROLE_KEY:
+        process.env.SUPABASE_SERVICE_ROLE_KEY || "functional-test-service-key",
+      NEXT_PUBLIC_SUPABASE_URL:
+        process.env.NEXT_PUBLIC_SUPABASE_URL || "https://functional-test.supabase.co",
+      NEXT_PUBLIC_SUPABASE_ANON_KEY:
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "functional-test-key",
       NEXT_PUBLIC_VOICE_RELAY_URL: `ws://127.0.0.1:${port}/ws/voice`,
       NEXT_PUBLIC_OPENAI_VOICE_RELAY_URL: `ws://127.0.0.1:${port}/ws/openai-voice`,
     },
@@ -99,6 +109,20 @@ async function readRelayConnections(page: Page): Promise<RelayConnection[]> {
   return page.evaluate(() => {
     const raw = window.sessionStorage.getItem("__functionalRelayConnections");
     return raw ? (JSON.parse(raw) as RelayConnection[]) : [];
+  });
+}
+
+async function readRelaySentMessages(page: Page): Promise<Array<Record<string, unknown>>> {
+  return page.evaluate(() => {
+    const raw = window.sessionStorage.getItem("__functionalRelaySentMessages");
+    return raw ? (JSON.parse(raw) as Array<Record<string, unknown>>) : [];
+  });
+}
+
+async function readMediaRequests(page: Page): Promise<MediaStreamConstraints[]> {
+  return page.evaluate(() => {
+    const raw = window.sessionStorage.getItem("__functionalMediaRequests");
+    return raw ? (JSON.parse(raw) as MediaStreamConstraints[]) : [];
   });
 }
 
@@ -137,12 +161,26 @@ async function waitForCondition(
   throw new Error(message);
 }
 
+async function startVoiceInterview(page: Page): Promise<void> {
+  await page.getByRole("button", {
+    name: /开始语音测试|允许麦克风并开始面试/,
+  }).click();
+}
+
 before(async () => {
   const port = await getFreePort();
   baseUrl = `http://127.0.0.1:${port}`;
   serverProcess = startAppServer(port);
   await waitForHttp(`${baseUrl}/login`);
-  browser = await chromium.launch({ headless: true });
+  const systemChrome = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+    || (process.platform === "win32"
+      && existsSync("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe")
+      ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
+      : undefined);
+  browser = await chromium.launch({
+    headless: true,
+    ...(systemChrome ? { executablePath: systemChrome } : {}),
+  });
 });
 
 after(async () => {
@@ -192,7 +230,7 @@ test("English interviews try the voice relay first and fail over to OpenAI", asy
     5_000,
     "Expected functional voice harness mocks to be ready",
   );
-  await page.getByRole("button", { name: "Start Voice Interview" }).click();
+  await startVoiceInterview(page);
 
   await delay(3_500);
 
@@ -217,7 +255,7 @@ test("Chinese interviews also try the voice relay first and fail over to OpenAI"
     5_000,
     "Expected functional voice harness mocks to be ready",
   );
-  await page.getByRole("button", { name: "Start Voice Interview" }).click();
+  await startVoiceInterview(page);
 
   await delay(3_500);
 
@@ -243,7 +281,7 @@ test("voice interview shows Thinking after user speech finalizes", async () => {
     5_000,
     "Expected functional voice harness mocks to be ready",
   );
-  await page.getByRole("button", { name: "Start Voice Interview" }).click();
+  await startVoiceInterview(page);
 
   await waitForText(page, "Thinking...", 8_000);
   const bodyText = (await page.locator("body").textContent()) ?? "";
@@ -269,7 +307,7 @@ test("voice interview keeps Thinking visible until the agent response returns", 
     5_000,
     "Expected functional voice harness mocks to be ready",
   );
-  await page.getByRole("button", { name: "Start Voice Interview" }).click();
+  await startVoiceInterview(page);
 
   await waitForText(page, "Thinking...", 8_000);
   await delay(500);
@@ -296,6 +334,72 @@ test("voice interview keeps Thinking visible until the agent response returns", 
   );
   bodyText = (await page.locator("body").textContent()) ?? "";
   assert.equal(bodyText.includes("Thanks for explaining that project."), true);
+
+  await context.close();
+});
+
+test("next-question control sends one request and waits for relay acknowledgement", async () => {
+  const context = await browser.newContext({ locale: "en-US" });
+  const page = await context.newPage();
+
+  await page.goto(
+    `${baseUrl}/functional-tests/voice?language=en&scenario=advance-idempotency`,
+  );
+  await waitForCondition(
+    async () => (await page.getByTestId("harness-ready").textContent()) === "true",
+    5_000,
+  );
+  assert.equal(
+    await page.getByRole("button", {
+      name: /开启摄像头|摄像头测试|开始语音测试|允许麦克风并开始面试/,
+    }).count(),
+    0,
+  );
+  await waitForCondition(async () => {
+    const requests = await readMediaRequests(page);
+    return requests.some((request) => !!request.audio)
+      && requests.some((request) => !!request.video);
+  }, 5_000, "Expected camera and microphone to start automatically");
+  await waitForText(page, "Thanks, that evidence is clear.", 8_000);
+
+  const nextButton = page.getByRole("button", { name: "下一题" }).first();
+  await waitForCondition(async () => await nextButton.isEnabled(), 5_000);
+  await nextButton.dblclick();
+
+  await waitForText(page, "Explain a difficult decision you made in that project.", 5_000);
+  const sent = await readRelaySentMessages(page);
+  assert.equal(sent.filter((message) => message.type === "next_question").length, 1);
+  assert.equal(
+    typeof sent.find((message) => message.type === "next_question")?.requestId,
+    "string",
+  );
+
+  await context.close();
+});
+
+test("latest follow-up must be answered before next-question control unlocks", async () => {
+  const context = await browser.newContext({ locale: "en-US" });
+  const page = await context.newPage();
+
+  await page.goto(
+    `${baseUrl}/functional-tests/voice?language=en&scenario=advance-followup-guard`,
+  );
+  await waitForCondition(
+    async () => (await page.getByTestId("harness-ready").textContent()) === "true",
+    5_000,
+  );
+  assert.equal(
+    await page.getByRole("button", {
+      name: /开启摄像头|摄像头测试|开始语音测试|允许麦克风并开始面试/,
+    }).count(),
+    0,
+  );
+  await waitForText(page, "Could you explain the exact metric and verification method?", 8_000);
+
+  const nextButtons = page.getByRole("button", { name: "下一题" });
+  assert.equal(await nextButtons.first().isEnabled().catch(() => false), false);
+  const sent = await readRelaySentMessages(page);
+  assert.equal(sent.filter((message) => message.type === "next_question").length, 0);
 
   await context.close();
 });
@@ -327,7 +431,7 @@ test("voice completion shows the farewell, waits for final save, and only then n
     5_000,
     "Expected functional voice harness mocks to be ready",
   );
-  await page.getByRole("button", { name: "Start Voice Interview" }).click();
+  await startVoiceInterview(page);
 
   await delay(1_500);
   const earlyBodyText = (await page.locator("body").textContent()) ?? "";
@@ -361,10 +465,7 @@ test("voice completion shows the farewell, waits for final save, and only then n
 
   await delay(500);
   assert.equal(await page.getByTestId("parent-complete").textContent(), "true");
-  assert.equal(
-    ((await page.locator("body").textContent()) ?? "").includes("Thank you!"),
-    true,
-  );
+  await waitForText(page, "面试已顺利完成", 5_000);
 
   await context.close();
 });

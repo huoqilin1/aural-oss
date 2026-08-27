@@ -38,3 +38,51 @@ export function shouldAllowTtsBargeIn({
   if (consecutiveFrames < thresholdFrames) return false;
   return true;
 }
+
+export type ManualQuestionAdvanceRejectionReason =
+  | "transition_in_progress"
+  | "assistant_busy"
+  | "answer_required";
+
+export interface ManualQuestionAdvanceDecision {
+  isTransitioning: boolean;
+  assistantResponseInFlight: boolean;
+  modelIsSpeaking: boolean;
+  hasPendingQuestionPrompt: boolean;
+  isRecruitmentInterview: boolean;
+  questionEnteredAt: number;
+  lastAssistantQuestionAt: number;
+  lastCommittedUserAnswerAt: number;
+  committedWordsThisQuestion: number;
+}
+
+export function evaluateManualQuestionAdvance({
+  isTransitioning,
+  assistantResponseInFlight,
+  modelIsSpeaking,
+  hasPendingQuestionPrompt,
+  isRecruitmentInterview,
+  questionEnteredAt,
+  lastAssistantQuestionAt,
+  lastCommittedUserAnswerAt,
+  committedWordsThisQuestion,
+}: ManualQuestionAdvanceDecision):
+  | { allowed: true }
+  | { allowed: false; reason: ManualQuestionAdvanceRejectionReason } {
+  if (isTransitioning) {
+    return { allowed: false, reason: "transition_in_progress" };
+  }
+  if (assistantResponseInFlight || modelIsSpeaking || hasPendingQuestionPrompt) {
+    return { allowed: false, reason: "assistant_busy" };
+  }
+  if (
+    isRecruitmentInterview
+    && (
+      committedWordsThisQuestion <= 0
+      || lastCommittedUserAnswerAt <= Math.max(questionEnteredAt, lastAssistantQuestionAt)
+    )
+  ) {
+    return { allowed: false, reason: "answer_required" };
+  }
+  return { allowed: true };
+}

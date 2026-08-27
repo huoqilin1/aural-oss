@@ -16,11 +16,15 @@ type FunctionalScenarioId =
   | "chinese-failover"
   | "farewell-complete"
   | "thinking-after-asr"
-  | "thinking-until-response";
+  | "thinking-until-response"
+  | "advance-idempotency"
+  | "advance-followup-guard";
 
 declare global {
   interface Window {
     __functionalRelayConnections?: Array<{ url: string; path: string }>;
+    __functionalRelaySentMessages?: Array<Record<string, unknown>>;
+    __functionalMediaRequests?: MediaStreamConstraints[];
     __functionalRelayScenario?: FunctionalScenario;
     __functionalRelayMockInstalled?: boolean;
   }
@@ -142,6 +146,62 @@ const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
       events: [{ type: "close", delay: 30 }],
     },
   },
+  "advance-idempotency": {
+    "/ws/voice": {
+      events: [
+        { type: "ready", delay: 20 },
+        {
+          type: "json",
+          delay: 100,
+          message: {
+            type: "asr_ended",
+            text: "I owned the delivery and verified the result with production data.",
+          },
+        },
+        { type: "json", delay: 130, message: { type: "response_started" } },
+        {
+          type: "json",
+          delay: 200,
+          message: {
+            type: "tts_text",
+            data: { text: "Thanks, that evidence is clear." },
+          },
+        },
+        { type: "json", delay: 240, message: { type: "tts_ended" } },
+      ],
+    },
+    "/ws/openai-voice": {
+      events: [{ type: "close", delay: 30 }],
+    },
+  },
+  "advance-followup-guard": {
+    "/ws/voice": {
+      events: [
+        { type: "ready", delay: 20 },
+        {
+          type: "json",
+          delay: 100,
+          message: {
+            type: "asr_ended",
+            text: "I owned the delivery and verified the result with production data.",
+          },
+        },
+        { type: "json", delay: 130, message: { type: "response_started" } },
+        {
+          type: "json",
+          delay: 200,
+          message: {
+            type: "tts_text",
+            data: { text: "Could you explain the exact metric and verification method?" },
+          },
+        },
+        { type: "json", delay: 240, message: { type: "tts_ended" } },
+      ],
+    },
+    "/ws/openai-voice": {
+      events: [{ type: "close", delay: 30 }],
+    },
+  },
 };
 
 function installFunctionalRelayMocks(scenario: FunctionalScenario) {
@@ -149,8 +209,12 @@ function installFunctionalRelayMocks(scenario: FunctionalScenario) {
   const relayPaths = new Set(["/ws/voice", "/ws/openai-voice"]);
 
   window.__functionalRelayConnections = [];
+  window.__functionalRelaySentMessages = [];
+  window.__functionalMediaRequests = [];
   window.__functionalRelayScenario = scenario;
   window.sessionStorage.setItem("__functionalRelayConnections", "[]");
+  window.sessionStorage.setItem("__functionalRelaySentMessages", "[]");
+  window.sessionStorage.setItem("__functionalMediaRequests", "[]");
 
   if (!navigator.mediaDevices) {
     Object.defineProperty(navigator, "mediaDevices", {
@@ -158,8 +222,15 @@ function installFunctionalRelayMocks(scenario: FunctionalScenario) {
       value: {},
     });
   }
-  navigator.mediaDevices.getUserMedia = async () =>
-    ({ getTracks: () => [] }) as unknown as MediaStream;
+  navigator.mediaDevices.getUserMedia = async (constraints) => {
+    const requests = [...(window.__functionalMediaRequests ?? []), constraints];
+    window.__functionalMediaRequests = requests;
+    window.sessionStorage.setItem(
+      "__functionalMediaRequests",
+      JSON.stringify(requests),
+    );
+    return new MediaStream();
+  };
 
   if (window.__functionalRelayMockInstalled) {
     return;
@@ -207,6 +278,36 @@ function installFunctionalRelayMocks(scenario: FunctionalScenario) {
         parsed = JSON.parse(data) as Record<string, unknown>;
       } catch {
         parsed = null;
+      }
+
+      if (parsed) {
+        const sentMessages = [
+          ...(window.__functionalRelaySentMessages ?? []),
+          parsed,
+        ];
+        window.__functionalRelaySentMessages = sentMessages;
+        window.sessionStorage.setItem(
+          "__functionalRelaySentMessages",
+          JSON.stringify(sentMessages),
+        );
+      }
+
+      if (parsed?.type === "next_question") {
+        setTimeout(() => {
+          this.onmessage?.({
+            data: JSON.stringify({ type: "transitioning", direction: "next" }),
+          });
+        }, 20);
+        setTimeout(() => {
+          this.onmessage?.({
+            data: JSON.stringify({
+              type: "question_change",
+              questionIndex: 1,
+              totalQuestions: 2,
+              requestId: parsed?.requestId,
+            }),
+          });
+        }, 120);
       }
 
       if (parsed?.type === "init" && !this.scheduled) {
@@ -272,6 +373,30 @@ export function VoiceFunctionalHarness({
 }) {
   const [parentCompleted, setParentCompleted] = useState(false);
   const [mocksReady, setMocksReady] = useState(false);
+  const isAdvanceScenario = scenario.startsWith("advance-");
+  const functionalQuestions = isAdvanceScenario
+    ? [
+        {
+          text: "Tell me about a project you are proud of.",
+          type: "OPEN_ENDED",
+          description: "Functional test prompt",
+          order: 0,
+        },
+        {
+          text: "Explain a difficult decision you made in that project.",
+          type: "OPEN_ENDED",
+          description: "Functional test prompt",
+          order: 1,
+        },
+      ]
+    : [
+        {
+          text: "Tell me about a project you are proud of.",
+          type: "OPEN_ENDED",
+          description: "Functional test prompt",
+          order: 0,
+        },
+      ];
 
   useEffect(() => {
     const activeScenario =
@@ -296,32 +421,29 @@ export function VoiceFunctionalHarness({
       <div data-testid="harness-ready" className="sr-only">
         {mocksReady ? "true" : "false"}
       </div>
-      <VoiceInterface
-        sessionId="functional-session"
-        interviewId="functional-interview"
-        interviewTitle="Functional Voice Interview"
-        aiName="TestInterviewer"
-        questionCount={1}
-        durationMinutes={15}
-        interviewContext={{
-          title: "Functional Voice Interview",
-          objective: "Exercise the core voice interview flow in browser tests.",
-          aiName: "TestInterviewer",
-          aiTone: "Professional",
-          language,
-          followUpDepth: "Moderate",
-          questions: [
-            {
-              text: "Tell me about a project you are proud of.",
-              type: "OPEN_ENDED",
-              description: "Functional test prompt",
-              order: 0,
-            },
-          ],
-        }}
-        chatEnabled={false}
-        onComplete={() => setParentCompleted(true)}
-      />
+      {mocksReady && (
+        <VoiceInterface
+          sessionId="functional-session"
+          interviewId="functional-interview"
+          interviewTitle={isAdvanceScenario ? "数君招聘 · Functional Voice Interview" : "Functional Voice Interview"}
+          aiName="TestInterviewer"
+          questionCount={functionalQuestions.length}
+          durationMinutes={15}
+          interviewContext={{
+            title: isAdvanceScenario ? "数君招聘 · Functional Voice Interview" : "Functional Voice Interview",
+            objective: "Exercise the core voice interview flow in browser tests.",
+            aiName: "TestInterviewer",
+            aiTone: "Professional",
+            language,
+            followUpDepth: "Moderate",
+            questions: functionalQuestions,
+          }}
+          chatEnabled={false}
+          videoMode={isAdvanceScenario}
+          autoStart={isAdvanceScenario}
+          onComplete={() => setParentCompleted(true)}
+        />
+      )}
     </div>
   );
 }

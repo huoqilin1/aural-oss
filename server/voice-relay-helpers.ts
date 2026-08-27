@@ -49,6 +49,43 @@ const REPLY_INVITES_MORE_PATTERNS_ZH = [
   /准备好了?.{0,4}(?:继续|分享|说)/,
 ];
 
+export interface TranscriptManualAdvanceDecision {
+  isTransitioning: boolean;
+  assistantBusy: boolean;
+  isRecruitmentInterview: boolean;
+  hasCommittedUserTurn: boolean;
+  latestTranscriptRole?: "user" | "assistant";
+  latestAssistantLooksLikeQuestion: boolean;
+}
+
+export function evaluateTranscriptManualAdvance({
+  isTransitioning,
+  assistantBusy,
+  isRecruitmentInterview,
+  hasCommittedUserTurn,
+  latestTranscriptRole,
+  latestAssistantLooksLikeQuestion,
+}: TranscriptManualAdvanceDecision):
+  | { allowed: true }
+  | { allowed: false; reason: "transition_in_progress" | "assistant_busy" | "answer_required" } {
+  if (isTransitioning) {
+    return { allowed: false, reason: "transition_in_progress" };
+  }
+  if (assistantBusy) {
+    return { allowed: false, reason: "assistant_busy" };
+  }
+  if (
+    isRecruitmentInterview
+    && (
+      !hasCommittedUserTurn
+      || (latestTranscriptRole === "assistant" && latestAssistantLooksLikeQuestion)
+    )
+  ) {
+    return { allowed: false, reason: "answer_required" };
+  }
+  return { allowed: true };
+}
+
 export function isUserEndRequest(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;

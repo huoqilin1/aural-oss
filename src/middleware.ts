@@ -6,6 +6,10 @@ import { NextResponse, type NextRequest } from "next/server";
  * This is the official Supabase pattern for Next.js App Router.
  */
 export async function middleware(request: NextRequest) {
+  if (process.env.ENABLE_FUNCTIONAL_TEST_PAGES === "1") {
+    return NextResponse.next({ request });
+  }
+
   // Skip cookie refresh for mobile requests using Bearer token auth
   if (request.headers.get("authorization")?.startsWith("Bearer ")) {
     return NextResponse.next({ request });
