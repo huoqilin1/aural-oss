@@ -474,6 +474,7 @@ export function VoiceInterface({
   const [error, setError] = useState<string>("");
   const [isSaving, setIsSaving] = useState(false);
   const [locallyCompleted, setLocallyCompleted] = useState(false);
+  const [advancePending, setAdvancePending] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [isStartingInterview, setIsStartingInterview] = useState(autoStart);
   const [desktopTranscriptCollapsed, setDesktopTranscriptCollapsed] = useState(false);
@@ -1208,16 +1209,25 @@ export function VoiceInterface({
   }, [saveCurrentContent, voice]);
 
   const handleNextQuestion = useCallback(async () => {
-    // 不再因 isTransitioning 拦截:小君说题时也允许点下一题,服务端会打断 TTS 并排队切(王总:修手动下一题卡死)
+    if (advancePending || voice.isTransitioning || voice.isProcessing) return;
     if (voice.totalQuestions > 0 && voice.currentQuestionIndex >= voice.totalQuestions - 1) return;
-    await saveCurrentContent();
-    if (voice.totalQuestions === 0) {
-      // 即兴深挖(招聘):没预设题,「我答完了」= 告诉 AI 推进下一个问题
-      voice.sendTextMessage("(我答完了,请继续下一个问题)");
-    } else {
-      voice.nextQuestion();
+    setAdvancePending(true);
+    try {
+      await saveCurrentContent();
+      if (voice.totalQuestions === 0) {
+        // 即兴深挖(招聘):没预设题,「我答完了」= 告诉 AI 推进下一个问题
+        voice.sendTextMessage("(我答完了,请继续下一个问题)");
+      } else {
+        voice.nextQuestion();
+      }
+    } finally {
+      window.setTimeout(() => setAdvancePending(false), 3_000);
     }
-  }, [saveCurrentContent, voice]);
+  }, [advancePending, saveCurrentContent, voice]);
+
+  useEffect(() => {
+    setAdvancePending(false);
+  }, [voice.currentQuestionIndex]);
 
   // ── Editor toggle helpers (save before deactivate, restore on activate)
   const saveCodeEditorState = useCallback(() => {
@@ -1296,7 +1306,6 @@ export function VoiceInterface({
   const handleEndInterview = useCallback(async () => {
     if (endingRef.current) return;
     endingRef.current = true;
-    setLocallyCompleted(true);
     setIsSaving(true);
 
     voice.stopListening();
@@ -1332,11 +1341,16 @@ export function VoiceInterface({
         console.error("[voice] Failed to save recording:", err);
       }
 
-      await withTimeout(voice.disconnect(), 8000, "voice disconnect");
+      const completed = await withTimeout(voice.disconnect(), 8000, "voice disconnect");
+      if (!completed) throw new Error("面试记录尚未完整保存，请稍后重试结束面试");
+      setLocallyCompleted(true);
+      onComplete?.();
     } catch (err) {
       console.error("[voice] Failed to end interview cleanly:", err);
+      endingRef.current = false;
+      setError(err instanceof Error ? err.message : "面试记录保存失败，请重试");
     } finally {
-      onComplete?.();
+      setIsSaving(false);
     }
   }, [saveAllDrawings, saveAllCodeSnippets, videoMode, recording, sessionId, voice, onComplete]);
 
@@ -1374,12 +1388,16 @@ export function VoiceInterface({
   }, [voice]);
 
   // ── Derived state ───────────────────────────────────────────────
-  const displayedTotalQuestions = /^数君招聘\s*·\s*/.test(interviewTitle)
-    ? Math.max(OPRUN_PLANNED_MAIN_QUESTION_COUNT, voice.totalQuestions)
+  const isRecruitmentQuestionSet = /^数君招聘\s*·\s*/.test(interviewTitle);
+  const isCandidateClosing =
+    isRecruitmentQuestionSet &&
+    voice.currentQuestionIndex >= OPRUN_PLANNED_MAIN_QUESTION_COUNT;
+  const displayedTotalQuestions = isRecruitmentQuestionSet
+    ? OPRUN_PLANNED_MAIN_QUESTION_COUNT
     : voice.totalQuestions;
   const progress =
     displayedTotalQuestions > 0
-      ? ((voice.currentQuestionIndex + 1) / displayedTotalQuestions) * 100
+      ? (Math.min(voice.currentQuestionIndex + 1, displayedTotalQuestions) / displayedTotalQuestions) * 100
       : 0;
   const lastAssistantMessage = useMemo(
     () => [...messages].reverse().find((message) => message.role === "assistant") ?? null,
@@ -1755,7 +1773,7 @@ export function VoiceInterface({
                   <Progress value={progress} className="h-2.5" />
                   <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground md:text-sm">
                     <span>已进行 {Math.round(progress)}%</span>
-                    <span>第 {voice.currentQuestionIndex + 1} / {displayedTotalQuestions} 题</span>
+                    <span>{isCandidateClosing ? "交流环节" : `第 ${voice.currentQuestionIndex + 1} / ${displayedTotalQuestions} 题`}</span>
                   </div>
                 </div>
               )}
@@ -1783,7 +1801,7 @@ export function VoiceInterface({
           {currentQuestionText && (
             <div className="rounded-2xl border border-primary/20 bg-card px-4 py-3 md:px-5 md:py-4">
               <div className="mb-2 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-muted-foreground md:text-sm">
-                <span className="text-primary">第 {voice.currentQuestionIndex + 1} 题 / 共 {displayedTotalQuestions} 题</span>
+                <span className="text-primary">{isCandidateClosing ? "交流环节（不计分）" : `第 ${voice.currentQuestionIndex + 1} 题 / 共 ${displayedTotalQuestions} 题`}</span>
                 <span className="rounded-lg bg-muted px-3 py-1.5 tabular-nums">
                   本题建议用时 {currentQVoice?.timeLimitSeconds
                     ? formatTime(currentQVoice.timeLimitSeconds)
@@ -2247,6 +2265,7 @@ export function VoiceInterface({
                       <Button
                         size="lg"
                         onClick={handleNextQuestion}
+                        disabled={advancePending || voice.isTransitioning || voice.isProcessing}
                         className="gap-2 rounded-full px-10 text-base font-semibold shadow-lg"
                       >
                         <SkipForward className="h-5 w-5" />
@@ -2660,7 +2679,10 @@ export function VoiceInterface({
                 className="h-9 w-9 rounded-full"
                 onClick={handleNextQuestion}
                 disabled={
-                  voice.totalQuestions > 0 && voice.currentQuestionIndex >= voice.totalQuestions - 1
+                  advancePending ||
+                  voice.isTransitioning ||
+                  voice.isProcessing ||
+                  (voice.totalQuestions > 0 && voice.currentQuestionIndex >= voice.totalQuestions - 1)
                 }
               >
                 {voice.isTransitioning && voice.transitionDirection !== "previous" ? (
@@ -2669,7 +2691,7 @@ export function VoiceInterface({
                   <SkipForward className="h-4 w-4" />
                 )}
               </Button>
-              <span onClick={handleNextQuestion} className="text-[10px] text-muted-foreground cursor-pointer hover:text-foreground">{voice.totalQuestions === 0 ? "我答完了" : "下一题"}</span>
+              <span className="text-[10px] text-muted-foreground">{voice.totalQuestions === 0 ? "我答完了" : "下一题"}</span>
             </div>
 
             <div className="flex flex-col items-center gap-0.5">

@@ -24,7 +24,7 @@ export async function GET(
   const { data: session, error } = await supabaseAdmin
     .from("sessions")
     .select(
-      "id, status, participantName, participantEmail, summary, insights, themes, sentiment, totalDurationSeconds, createdAt, interview:interviews!inner(id, title, objective, projectId), messages(id, role, content, timestamp)",
+      "id, status, participantName, participantEmail, summary, insights, themes, sentiment, totalDurationSeconds, createdAt, currentQuestionId, interview:interviews!inner(id, title, objective, projectId), messages(id, role, content, timestamp, questionId, transcription)",
     )
     .eq("id", sessionId)
     .order("timestamp", { ascending: true, foreignTable: "messages" })
@@ -56,6 +56,8 @@ export async function GET(
     role: string;
     content: string;
     timestamp: string;
+    questionId: string | null;
+    transcription: string | null;
   }[];
 
   return Response.json({
@@ -70,11 +72,14 @@ export async function GET(
       sentiment: session.sentiment,
       totalDurationSeconds: session.totalDurationSeconds,
       createdAt: session.createdAt,
+      currentQuestionId: session.currentQuestionId,
       messages: messages.map((m) => ({
         id: m.id,
         role: m.role,
         content: m.content,
         timestamp: m.timestamp,
+        questionId: m.questionId,
+        source: m.transcription === "chat" ? "chat" : "voice",
       })),
       interview: {
         id: interview.id,

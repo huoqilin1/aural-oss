@@ -225,6 +225,7 @@ export default function SlugSessionPage() {
       followUpDepth: interview.data.followUpDepth,
       startQuestionIndex: isResuming ? resumeQuestionIndex : undefined,
       questions: interview.data.questions.map((q: any) => ({
+        id: q.id,
         text: q.text,
         type: q.type,
         description: q.description,

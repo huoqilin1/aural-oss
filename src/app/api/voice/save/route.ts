@@ -33,7 +33,7 @@ const voiceSaveOps: VoiceSaveOps = {
     const { data } = await supabaseAdmin
       .from("sessions")
       .select(
-        `*, interview:interviews!inner(title, objective, language, userId, projectId, assessmentCriteria, questions(text, order, type))`,
+        `*, interview:interviews!inner(title, objective, language, userId, projectId, assessmentCriteria, questions(id, text, order, type, description))`,
       )
       .eq("id", sessionId)
       .order("order", {
@@ -76,6 +76,18 @@ const voiceSaveOps: VoiceSaveOps = {
       .order("timestamp", { ascending: true });
 
     return (data ?? []).map((r) => r.timestamp as string);
+  },
+  async loadAnsweredQuestionIds(sessionId) {
+    const { data } = await supabaseAdmin
+      .from("messages")
+      .select("questionId")
+      .eq("sessionId", sessionId)
+      .eq("role", "USER")
+      .not("questionId", "is", null);
+
+    return (data ?? [])
+      .map((row) => row.questionId as string | null)
+      .filter((questionId): questionId is string => Boolean(questionId));
   },
   async loadSessionForProgress(sessionId) {
     const { data } = await supabaseAdmin

@@ -221,6 +221,7 @@ interface InterviewContext {
   followUpDepth: string;
   startQuestionIndex?: number;
   questions: Array<{
+    id?: string;
     text: string;
     type: string;
     description?: string | null;
@@ -775,12 +776,17 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   let browserClosed = false;
   let questionRefreshInFlight = false;
   let pendingProgressiveTransition: "button" | "user_request" | null = null;
+  const isOprunRecruitmentInterview = ctx.title.includes("数君招聘");
+  let finalVerificationRequested = false;
+  let finalVerificationAsked = false;
+  let finalVerificationAnswered = false;
 
   function normalizeDynamicQuestions(rows: unknown): typeof sortedQuestions {
     if (!Array.isArray(rows)) return [];
     return rows.map((row) => {
       const item = row as Record<string, unknown>;
       return {
+        id: typeof item.id === "string" ? item.id : undefined,
         text: String(item.text || ""),
         type: String(item.type || "OPEN_ENDED"),
         description: typeof item.description === "string" ? item.description : null,
@@ -837,7 +843,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     try {
       const { data, error } = await dynamicQuestionClient
         .from("questions")
-        .select("text,type,description,options,starterCode,order")
+        .select("id,text,type,description,options,starterCode,order")
         .eq("interviewId", ctx.interviewId)
         .order("order", { ascending: true });
       if (error) {
@@ -927,6 +933,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     if (!text.trim()) return;
     if (role === "user" && !text.startsWith("[")) {
       userCommittedWordsThisQuestion += text.trim().split(/\s+/).length;
+      if (finalVerificationAsked && currentQuestionIndex === 7) {
+        finalVerificationAnswered = true;
+      }
       if (!toolsEnabled && userCommittedWordsThisQuestion >= MIN_WORDS_BEFORE_TRANSITION) {
         enableTools();
       }
@@ -935,6 +944,30 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     while (conversationHistory.length > MAX_HISTORY_ENTRIES) {
       conversationHistory.shift();
     }
+  }
+
+  function isQuestionLike(text: string): boolean {
+    return /[?？]|请说明|请具体|能否|怎么|如何|为什么|什么|哪些|是否|有没有/.test(
+      text,
+    );
+  }
+
+  function needsFinalVerification(targetIdx: number): boolean {
+    return Boolean(
+      isOprunRecruitmentInterview
+      && currentQuestionIndex === 7
+      && targetIdx > 7
+      && !finalVerificationAnswered,
+    );
+  }
+
+  function finalVerificationPrompt(): string {
+    const evidence = conversationHistory
+      .filter((entry) => entry.role === "user" && !entry.text.startsWith("["))
+      .slice(-12)
+      .map((entry, index) => `${index + 1}. ${entry.text}`)
+      .join("\n");
+    return `[SYSTEM] Before leaving scored question 8, ask exactly ONE final verification question. Use the participant evidence below to choose the single highest-impact unsupported core claim, skill gap, metric inconsistency, ownership ambiguity, or timeline conflict. If two stated values conflict, quote both values and ask for the shared definition. Do not accuse the participant of lying. Do not ask multiple questions, do not move to the candidate closing yet, and do not call signal_question_change in this response.\nParticipant evidence:\n${evidence || "No durable evidence summary is available; verify the most important role-critical claim from the current answer."}`;
   }
 
   function enableTools() {
@@ -1686,6 +1719,17 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               const userRequested = args.userRequested === true;
               log.info(`OpenAI called signal_question_change → Q${newIdx + 1}${userRequested ? " (user requested)" : ""}`);
 
+              if (needsFinalVerification(newIdx)) {
+                finalVerificationRequested = true;
+                pendingFunctionCalls.push({
+                  callId: msg.call_id,
+                  name: msg.name,
+                  args: finalVerificationPrompt(),
+                });
+                log.info("Blocked transition after Q8 until final verification is answered");
+                break;
+              }
+
               if (
                 newIdx >= sortedQuestions.length
                 && ctx.interviewId
@@ -1833,6 +1877,14 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               if (capturedModelText) {
                 log.info(`TTS done (${responseTtsBytes}B sent): ${JSON.stringify(capturedModelText)}`);
                 pushHistory("assistant", capturedModelText);
+                if (
+                  finalVerificationRequested
+                  && currentQuestionIndex === 7
+                  && isQuestionLike(capturedModelText)
+                ) {
+                  finalVerificationAsked = true;
+                  log.info("Final recruitment verification question asked");
+                }
               }
               send({ type: "tts_ended" });
             } else if (hadTts) {
@@ -2138,6 +2190,14 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     directionLabel: string,
     reason: "button" | "user_request" = "button",
   ) {
+    if (needsFinalVerification(targetIdx)) {
+      if (!finalVerificationRequested) {
+        finalVerificationRequested = true;
+        sendQuestionPrompt(finalVerificationPrompt());
+        log.info("Blocked manual Q8 transition until final verification is answered");
+      }
+      return;
+    }
     pendingProgressiveTransition = null;
     clearPendingTransition();
     clearQuestionPrompt();

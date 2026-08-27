@@ -1217,9 +1217,9 @@ export function IntervieweeOnboarding({
               </div>
 
               <div className="mt-2 text-sm text-muted-foreground">
-                {isRecruitmentInterview ? "9~10 道题" : questionCount > 0 ? `${questionCount} 道题` : "AI 对话式测试"} &middot;{" "}
+                {isRecruitmentInterview ? "8 道正式计分题" : questionCount > 0 ? `${questionCount} 道题` : "AI 对话式测试"} &middot;{" "}
                 {timeLimitMinutes
-                  ? `${isRecruitmentInterview ? 25 : timeLimitMinutes} 分钟`
+                  ? `${isRecruitmentInterview ? "约 18~22 分钟，最长 25 分钟" : `${timeLimitMinutes} 分钟`}`
                   : "不限时"}
               </div>
 
@@ -1234,7 +1234,7 @@ export function IntervieweeOnboarding({
                   <li>
                     本次为 <span className="font-medium text-foreground">AI 语音面试</span>
                     ，面试官为 AI 助手「{aiName || "小君"}」。第 1 题是自我介绍，之后会围绕你的简历和应聘岗位提问
-                    {isRecruitmentInterview ? "，共 9~10 道题" : questionCount > 0 ? `，共 ${questionCount} 道题` : ""}。
+                    {isRecruitmentInterview ? "，共 8 道正式计分题；自我介绍的完整回答也会计入评估" : questionCount > 0 ? `，共 ${questionCount} 道题` : ""}。
                   </li>
                   <li>
                     <span className="font-medium text-foreground">如何进入下一题：</span>{" "}
@@ -1243,9 +1243,12 @@ export function IntervieweeOnboarding({
                     也可以直接说「我答完了」；如果停顿较久，小君会先问你是否答完，确认后再进入下一题。
                   </li>
                   <li>
-                    全程约 {timeLimitMinutes ? `${isRecruitmentInterview ? 25 : timeLimitMinutes} 分钟` : "25 分钟"}
+                    全程通常约 {timeLimitMinutes ? `${isRecruitmentInterview ? "18~22" : timeLimitMinutes} 分钟` : "18~22 分钟"}，最长不超过 25 分钟
                     ，<span className="font-medium text-foreground">不用赶时间</span>，按你的节奏回答；
                     临近结束时我们会轻声提醒，不会打断你。
+                  </li>
+                  <li>
+                    AI 会根据回答最多进行 3 次简短证据追问，并在八道题后最多做 1 次最终核验；随后进入可选提问交流环节，交流环节不计分。
                   </li>
                   <li>
                     请在<span className="font-medium text-foreground">安静环境</span>下使用最新版

@@ -2082,8 +2082,8 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         : `This is an in-place evidence check for Q2-Q7. Ask one concise follow-up only when the answer lacks one material item: personal ownership, implementation mechanism or tools, decision rationale, metric definition, failure and validation, or timeline. Ask only the single most important gap. If evidence is sufficient, acknowledge and append ${NEXT_TOKEN}.`;
     } else if (!forceSkip && turnsLeft > 0 && isRecruitmentFinalVerification) {
       followUpInstruction = isZh
-        ? `这是全场唯一一次最终动态核验机会。结合之前各题摘要和当前回答，只选择对录用判断影响最大的一个未证实核心主张、技能缺口或前后矛盾，问一个简短确认问题；这是“只能围绕当前题”的唯一例外。若全场关键证据已经充分，不追问，简短确认并加 ${NEXT_TOKEN} 收尾。`
-        : `This is the single final cross-question verification. Using prior summaries and the current answer, choose only the most material unsupported core claim, skill gap, or inconsistency and ask one concise verification question. This is the only exception to staying within the current question. If core evidence is sufficient, do not probe; acknowledge and append ${NEXT_TOKEN}.`;
+        ? `这是全场唯一一次、必须执行的最终动态核验。结合之前各题摘要和当前回答，只选择对录用判断影响最大的一个未证实核心主张、技能缺口或前后矛盾，问一个简短确认问题；这是“只能围绕当前题”的唯一例外。不得跳过，不得同时问两件事，本轮不得加 ${NEXT_TOKEN}。`
+        : `This is the single mandatory final cross-question verification. Using prior summaries and the current answer, choose only the most material unsupported core claim, skill gap, or inconsistency and ask exactly one concise verification question. This is the only exception to staying within the current question. Do not skip it, do not ask two things, and do not append ${NEXT_TOKEN} on this turn.`;
     }
     const mustAdvanceForFollowUpLimit =
       !forceSkip &&

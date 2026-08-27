@@ -146,6 +146,10 @@ function createOps() {
         void sessionId;
         return [] as string[];
       },
+      async loadAnsweredQuestionIds(sessionId: string) {
+        void sessionId;
+        return [] as string[];
+      },
       async loadSessionForProgress(sessionId: string) {
         void sessionId;
         return {
@@ -236,6 +240,90 @@ test("handleVoiceSave skips already-completed sessions", async () => {
   assert.equal(result.status, 200);
   assert.equal(updatedSessions.length, 0);
   assert.equal(summaryCalls.length, 0);
+});
+
+test("recruitment completion fails closed until all eight scored answers are stored", async () => {
+  const { ops, updatedSessions, summaryCalls } = createOps();
+  const questions = Array.from({ length: 8 }, (_, index) => ({
+    id: `q-${index + 1}`,
+    text: `Question ${index + 1}`,
+    order: index,
+    type: "OPEN_ENDED",
+    description: `oprun_dimension:dimension_${index + 1}`,
+  }));
+  const recruitmentOps = {
+    ...ops,
+    async loadSessionForCompletion() {
+      return {
+        status: "IN_PROGRESS",
+        startedAt: "2026-03-11T10:00:00.000Z",
+        activitySegments: [],
+        interview: {
+          title: "数君招聘 · 测试岗位",
+          objective: null,
+          language: "zh",
+          userId: "u1",
+          projectId: "p1",
+          assessmentCriteria: null,
+          questions,
+        },
+      };
+    },
+    async loadAnsweredQuestionIds() {
+      return questions.slice(0, 7).map((question) => question.id);
+    },
+  };
+
+  const result = await handleVoiceSave(
+    { sessionId: "recruitment-incomplete", complete: true },
+    recruitmentOps,
+  );
+
+  assert.equal(result.status, 409);
+  assert.match(result.body.error || "", /还有 1 道正式题/);
+  assert.equal(updatedSessions.length, 0);
+  assert.equal(summaryCalls.length, 0);
+});
+
+test("recruitment completion accepts eight question-bound answers", async () => {
+  const { ops, updatedSessions } = createOps();
+  const questions = Array.from({ length: 8 }, (_, index) => ({
+    id: `q-${index + 1}`,
+    text: `Question ${index + 1}`,
+    order: index,
+    type: "OPEN_ENDED",
+    description: `oprun_dimension:dimension_${index + 1}`,
+  }));
+  const recruitmentOps = {
+    ...ops,
+    async loadSessionForCompletion() {
+      return {
+        status: "IN_PROGRESS",
+        startedAt: "2026-03-11T10:00:00.000Z",
+        activitySegments: [],
+        interview: {
+          title: "数君招聘 · 测试岗位",
+          objective: null,
+          language: "zh",
+          userId: "u1",
+          projectId: "p1",
+          assessmentCriteria: null,
+          questions,
+        },
+      };
+    },
+    async loadAnsweredQuestionIds() {
+      return questions.map((question) => question.id);
+    },
+  };
+
+  const result = await handleVoiceSave(
+    { sessionId: "recruitment-complete", complete: true },
+    recruitmentOps,
+  );
+
+  assert.equal(result.status, 200);
+  assert.equal(updatedSessions[0].payload.status, "COMPLETED");
 });
 
 test("handleVoiceSave computes duration excluding gap between segments", async () => {

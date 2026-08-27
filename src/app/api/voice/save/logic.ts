@@ -76,7 +76,13 @@ export type CompletionSession = {
     userId: string;
     projectId: string;
     assessmentCriteria: { name: string; description: string }[] | null;
-    questions: { text: string; order: number; type?: string }[];
+    questions: {
+      id?: string;
+      text: string;
+      order: number;
+      type?: string;
+      description?: string | null;
+    }[];
   };
 };
 
@@ -100,6 +106,7 @@ export type VoiceSaveOps = {
     now: string,
   ) => Promise<ActivitySegment[]>;
   loadMessageTimestamps: (sessionId: string) => Promise<string[]>;
+  loadAnsweredQuestionIds: (sessionId: string) => Promise<string[]>;
   loadSessionForProgress: (sessionId: string) => Promise<ProgressSession | null>;
   updateSession: (
     sessionId: string,
@@ -141,6 +148,32 @@ export async function handleVoiceSave(
       const session = await ops.loadSessionForCompletion(sessionId);
 
       if (session && session.status !== "COMPLETED") {
+        const isRecruitment = /^数君招聘\s*·\s*/.test(session.interview.title);
+        if (isRecruitment) {
+          const requiredQuestionIds = session.interview.questions
+            .filter((question) =>
+              /^oprun_dimension:(?!candidate_closing)/.test(
+                String(question.description || ""),
+              ),
+            )
+            .slice(0, 8)
+            .map((question) => question.id)
+            .filter((questionId): questionId is string => Boolean(questionId));
+          if (requiredQuestionIds.length === 8) {
+            const answered = new Set(await ops.loadAnsweredQuestionIds(sessionId));
+            const missingCount = requiredQuestionIds.filter(
+              (questionId) => !answered.has(questionId),
+            ).length;
+            if (missingCount > 0) {
+              return {
+                status: 409,
+                body: {
+                  error: `还有 ${missingCount} 道正式题的回答未完成同步，请稍后重试`,
+                },
+              };
+            }
+          }
+        }
         const now = ops.now();
         const cappedNowMs = effectiveNowForSession(session.lastActivityAt, now.getTime());
         const cappedNow = new Date(cappedNowMs).toISOString();

@@ -144,6 +144,26 @@ test("OpRun recruitment relay caps follow-ups across the entire interview", () =
   assert.match(openAiRelay, /Q2-Q7 allow at most one follow-up each and at most three combined/);
   assert.match(openAiRelay, /Q8 allows one final follow-up only/);
   assert.match(openAiRelay, /3次就地核验\+1次最终核验/);
+  assert.match(openAiRelay, /needsFinalVerification/);
+  assert.match(openAiRelay, /Blocked transition after Q8 until final verification is answered/);
+  assert.match(openAiRelay, /ask exactly ONE final verification question/);
+});
+
+test("session export preserves durable question identity for HR reconciliation", () => {
+  const sessionRoute = readFileSync(
+    "src/app/api/v1/sessions/[id]/route.ts",
+    "utf8",
+  );
+  const voiceHook = readFileSync("src/hooks/use-voice.ts", "utf8");
+  assert.match(sessionRoute, /messages\(id, role, content, timestamp, questionId, transcription\)/);
+  assert.match(sessionRoute, /currentQuestionId/);
+  assert.match(voiceHook, /questionId: questionIdAt\(currentQuestionIndexRef\.current\)/);
+  assert.match(voiceHook, /Voice completion failed with HTTP/);
+});
+
+test("all next-question controls share the same transition lock", () => {
+  assert.match(voiceInterface, /advancePending \|\| voice\.isTransitioning \|\| voice\.isProcessing/);
+  assert.doesNotMatch(voiceInterface, /<span onClick=\{handleNextQuestion\}/);
 });
 
 test("candidate interface keeps the full question and hybrid timing visible", () => {

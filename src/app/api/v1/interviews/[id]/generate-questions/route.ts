@@ -231,6 +231,15 @@ ${expertBlock}
   ];
 }
 
+function isCandidateFacingQuestionText(value: string): boolean {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text || text.length > 420) return false;
+  if (/(?:^|[（(\s])(?:第\s*[一二三四五六七八九十\d]+\s*题|Q\s*\d+)|dimension|题目契约|完整题目蓝图|本轮出题规则|系统固定|计分规则|AI评价权重|出题官|严禁|不得为了凑比例/i.test(text)) {
+    return false;
+  }
+  return /[？?]|请|说说|谈谈|说明|还原|分析|推演|介绍/.test(text);
+}
+
 export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
@@ -396,7 +405,13 @@ export async function POST(
     dimension,
     {
       resume: selectRecruitAnchor(resumeText, keywords.resume),
-      job: selectRecruitAnchor(jobDescription || jobTitle, keywords.job) || jobTitle,
+      job: selectRecruitAnchor(
+        jobDescription
+          .split("【本轮出题规则】", 1)[0]
+          .replace("【岗位职责】", "")
+          .trim() || jobTitle,
+        keywords.job,
+      ) || jobTitle,
     },
   ]));
   const anchorLead = (dimension: string): string => {
@@ -498,7 +513,7 @@ export async function POST(
     rawQs.flatMap((question) => {
       const key = typeof question.dimension === "string" ? question.dimension.trim() : "";
       const text = typeof question.text === "string" ? question.text.trim() : "";
-      return key && text ? [[key, text] as const] : [];
+      return key && isCandidateFacingQuestionText(text) ? [[key, text] as const] : [];
     }),
   );
   const usedQuestionTexts = new Set<string>();

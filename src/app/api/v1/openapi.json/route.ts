@@ -445,7 +445,7 @@ To run an interview: 1. Create interview (\`POST /interviews\`), 2. Add question
         tags: ["Sessions"],
         summary: "Get session with transcript and results",
         description:
-          "Returns messages (transcript), summary fields, and nested interview metadata (`id`, `title`, `objective`).",
+          "Returns question-bound messages (transcript), current question identity, summary fields, and nested interview metadata (`id`, `title`, `objective`).",
         operationId: "getSession",
         parameters: [{ $ref: "#/components/parameters/SessionId" }],
         responses: {
@@ -701,6 +701,7 @@ To run an interview: 1. Create interview (\`POST /interviews\`), 2. Add question
           isActive: { type: "boolean", example: true },
           createdAt: { type: "string", format: "date-time" },
           updatedAt: { type: "string", format: "date-time" },
+          currentQuestionId: { type: ["string", "null"] },
         },
         additionalProperties: true,
       },
@@ -898,6 +899,8 @@ To run an interview: 1. Create interview (\`POST /interviews\`), 2. Add question
           role: { type: "string", example: "assistant" },
           content: { type: "string", example: "Thanks for sharing. Can you elaborate on the metrics?" },
           timestamp: { type: "string", format: "date-time" },
+          questionId: { type: ["string", "null"], description: "Durable question identity active when this message was recorded." },
+          source: { type: "string", enum: ["voice", "chat"] },
         },
       },
       SessionWithResults: {
