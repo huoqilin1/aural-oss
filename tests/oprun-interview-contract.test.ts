@@ -61,6 +61,8 @@ test("evidence v11 generator uses the scored self-intro and seven evidence dimen
   }
   assert.match(generationRoute, /scored8-inline3-dynamic1-work-sample/);
   assert.match(generationRoute, /questionSetVersion/);
+  assert.match(generationRoute, /questionSpecVersion/);
+  assert.match(generationRoute, /const contractVersion = questionSpecVersion \|\| questionSetVersion/);
   assert.match(generationRoute, /第2至第8题每题都必须明确引用简历/);
   assert.match(generationRoute, /第5题必须是工作样例/);
   assert.match(generationRoute, /技术岗位允许并要求核验必要的代码、接口、数据流/);
@@ -81,6 +83,7 @@ test("progressive generation preserves Q1 and optional fallback Q2 safely", () =
   assert.match(generationRoute, /withGenerationBudget\(/);
   assert.match(generationRoute, /generated = \{ questions: \[\] \}/);
   assert.match(generationRoute, /missingPreservedDimensions/);
+  assert.match(generationRoute, /finally \{\s*generationInFlight\.delete\(interviewId\)/);
 });
 
 test("both voice relays refresh questions during an active candidate session", () => {

@@ -130,7 +130,7 @@ function buildRecruitPrompt(opts: {
   expertExamples?: Array<{ question?: string; answer?: string }>;
   preserveOpening?: boolean;
   preserveDimensions?: string[];
-  questionSetVersion?: string;
+  questionSpecVersion?: string;
   roleType?: string;
 }) {
   const {
@@ -143,11 +143,11 @@ function buildRecruitPrompt(opts: {
     expertExamples,
     preserveOpening,
     preserveDimensions = [],
-    questionSetVersion = "",
+    questionSpecVersion = "",
     roleType = "nontechnical_core",
   } = opts;
-  const dimensions = recruitDimensions(questionSetVersion);
-  const evidenceV11 = isEvidenceV11(questionSetVersion);
+  const dimensions = recruitDimensions(questionSpecVersion);
+  const evidenceV11 = isEvidenceV11(questionSpecVersion);
   const preserved = new Set(preserveDimensions);
   if (preserveOpening) preserved.add(dimensions[0]);
   const remaining = dimensions.filter((dimension) => !preserved.has(dimension));
@@ -193,7 +193,7 @@ function buildRecruitPrompt(opts: {
       content: `你是一位资深的招聘一面出题官。请为一位候选人设计 AI 一面（结构化岗位面试）的题目。全部用中文。
 
 要求:
-1. 题目契约版本为 ${questionSetVersion || "legacy"}。系统已固定写入的维度为 ${Array.from(preserved).join(", ") || "无"}；只生成剩余 ${remaining.length} 道主问题，严禁重复固定题。
+1. 题目契约版本为 ${questionSpecVersion || "legacy"}。系统已固定写入的维度为 ${Array.from(preserved).join(", ") || "无"}；只生成剩余 ${remaining.length} 道主问题，严禁重复固定题。
 2. ${blueprintInstruction}
 3. 每题都要结合岗位或简历中的具体证据；简历没有的信息不得臆造。岗位题与简历题的目标配比为 ${jobQuestions}:${resumeQuestions}，但必须服从当前题目契约的固定八维结构。
 4. 题目整体难度为中等：能区分真做过的人和背概念的人，但不刻意刁难。
@@ -274,10 +274,17 @@ export async function POST(
   const questionSetVersion = typeof body.questionSetVersion === "string"
     ? body.questionSetVersion.trim()
     : "";
+  const questionSpecVersion = typeof body.questionSpecVersion === "string"
+    ? body.questionSpecVersion.trim()
+    : "";
+  // New clients send an explicit human-readable contract version while the
+  // opaque question-set hash remains dedicated to idempotency. Fall back to
+  // the legacy field so older integrations keep working.
+  const contractVersion = questionSpecVersion || questionSetVersion;
   const roleType = typeof body.roleType === "string"
     ? body.roleType.trim().toLocaleLowerCase()
     : "nontechnical_core";
-  const selectedDimensions = recruitDimensions(questionSetVersion);
+  const selectedDimensions = recruitDimensions(contractVersion);
   const selectedDimensionSet = new Set(selectedDimensions);
   const preserveOpening = body.preserveOpening === true;
   const preserveDimensions = Array.isArray(body.preserveDimensions)
@@ -302,6 +309,7 @@ export async function POST(
   }
   generationInFlight.set(interviewId, lockNow);
 
+  try {
   let generated: { questions?: Array<{ text?: unknown; dimension?: unknown }> };
   try {
     const provider = getProvider(RECRUIT_GENERATOR_MODEL);
@@ -315,7 +323,7 @@ export async function POST(
       expertExamples,
       preserveOpening,
       preserveDimensions,
-      questionSetVersion,
+      questionSpecVersion: contractVersion,
       roleType,
     });
     const resp = await withGenerationBudget(
@@ -347,7 +355,7 @@ export async function POST(
   }
 
   const rawQs = Array.isArray(generated?.questions) ? generated.questions : [];
-  const evidenceV11 = isEvidenceV11(questionSetVersion);
+  const evidenceV11 = isEvidenceV11(contractVersion);
   const isTechnicalRole = roleType === "technical" || /(?:技术|开发|研发|运维|算法|数据|工程师|架构|程序)/i.test(
     `${jobTitle}\n${jobDescription}`,
   );
@@ -587,7 +595,6 @@ export async function POST(
   });
 
   if (rows.length === 0) {
-    generationInFlight.delete(interviewId);
     return Response.json({ data: { count: 0 } });
   }
 
@@ -600,6 +607,8 @@ export async function POST(
     return apiError("INTERNAL_ERROR", error.message, 500);
   }
 
-  generationInFlight.delete(interviewId);
   return Response.json({ data: { count: created?.length ?? 0 } });
+  } finally {
+    generationInFlight.delete(interviewId);
+  }
 }
