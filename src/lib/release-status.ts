@@ -10,6 +10,14 @@ export function releaseRevision(): string {
   }
 }
 
+export function isOpenAiFallbackConfigured(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return Boolean(
+    env.AZURE_OPENAI_ENDPOINT?.trim() && env.AZURE_OPENAI_API_KEY?.trim(),
+  );
+}
+
 export function probeTcpPort(port: number, timeoutMs = 1_000): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false;

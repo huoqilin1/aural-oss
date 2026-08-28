@@ -562,6 +562,13 @@ npm run dev:openai-voice   # starts on port 8767
 
 > **Tip:** You can run both relays simultaneously. The frontend uses `NEXT_PUBLIC_VOICE_RELAY_PRIMARY` to choose the first relay and automatically falls back to the alternate relay if the primary cannot connect.
 
+Production readiness always requires the primary relay. The backup service is
+started and required only when both `AZURE_OPENAI_ENDPOINT` and
+`AZURE_OPENAI_API_KEY` are configured. `/api/ready` reports
+`voice_mode: "primary_only"` and `fallback_voice_relay_configured: false` when
+those credentials are absent; it never reports an unconfigured backup as
+healthy.
+
 ---
 
 ## Developer API

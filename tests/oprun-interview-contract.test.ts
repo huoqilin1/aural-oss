@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { isOpenAiFallbackConfigured } from "../src/lib/release-status";
+
 const generationRoute = readFileSync(
   "src/app/api/v1/interviews/[id]/generate-questions/route.ts",
   "utf8",
@@ -316,12 +318,37 @@ test("immutable release gate covers functional flow and exact public readiness",
   assert.match(releaseRunner, /voice_websocket_handshake/);
   assert.match(releaseRunner, /aural\.service aural-voice\.service && echo "services=ok"/);
   assert.match(releaseRunner, /fallback_service=missing_or_down/);
+  assert.match(releaseRunner, /fallback_configured=yes/);
+  assert.match(releaseRunner, /PASS\(primary\);fallback=not_configured/);
   assert.match(releaseRunner, /\/root\/aural\/env\/\.env\.local 2>\/dev\/null \|\|/);
   assert.match(releaseRunner, /Remove-Item -LiteralPath \$buildEnvFile -Force/);
   assert.match(releaseApply, /aural-openai-voice\.service/);
+  assert.match(releaseApply, /FALLBACK_CONFIGURED=false/);
+  assert.match(releaseApply, /REQUIRED_SERVICES=\(aural\.service aural-voice\.service\)/);
+  assert.match(releaseApply, /SNAPSHOT\/dropins\/aural\.service\.d/);
+  assert.match(releaseApply, /EnvironmentFile=-\$ENV_DIR\/\.env\.local/);
+  assert.doesNotMatch(releaseApply, /local readiness endpoint failed" >&2; exit 1/);
   assert.match(releaseApply, /http:\/\/127\.0\.0\.1:3000\/api\/ready/);
   assert.match(versionRoute, /releaseRevision/);
   assert.match(healthRoute, /status: "ok"/);
   assert.match(readyRoute, /primary_voice_relay/);
   assert.match(readyRoute, /fallback_voice_relay/);
+  assert.match(readyRoute, /fallback_voice_relay_configured/);
+});
+
+test("OpenAI fallback readiness is required only when credentials are configured", () => {
+  assert.equal(isOpenAiFallbackConfigured({}), false);
+  assert.equal(
+    isOpenAiFallbackConfigured({
+      AZURE_OPENAI_ENDPOINT: "https://example.openai.azure.com",
+    }),
+    false,
+  );
+  assert.equal(
+    isOpenAiFallbackConfigured({
+      AZURE_OPENAI_ENDPOINT: "https://example.openai.azure.com",
+      AZURE_OPENAI_API_KEY: "configured",
+    }),
+    true,
+  );
 });

@@ -39,6 +39,7 @@ LOCK=/run/lock/aural-deploy.lock
 BACKUP_ROOT="$AURAL_HOME/deploy-backups"
 KEEP_RELEASES=${OPRUN_AURAL_KEEP_RELEASES:-3}
 OPENAI_VOICE_UNIT=/etc/systemd/system/aural-openai-voice.service
+FALLBACK_CONFIGURED=false
 
 [ ! -e "$RELEASE_FINAL" ] || { echo "immutable release exists: $RELEASE_FINAL" >&2; exit 1; }
 [ "$(sha256sum "$ARTIFACT" | awk '{print $1}')" = "$EXPECTED_DIGEST" ] || {
@@ -56,6 +57,10 @@ if [ ! -f "$ENV_DIR/.env.local" ]; then
   [ -f "$LEGACY_DIR/.env.local" ] || { echo "runtime env missing: $LEGACY_DIR/.env.local" >&2; exit 1; }
   install -m 0600 "$LEGACY_DIR/.env.local" "$ENV_DIR/.env.local"
 fi
+if grep -Eq '^AZURE_OPENAI_ENDPOINT=.+' "$ENV_DIR/.env.local" && \
+   grep -Eq '^AZURE_OPENAI_API_KEY=.+' "$ENV_DIR/.env.local"; then
+  FALLBACK_CONFIGURED=true
+fi
 
 STAMP=$(date +%Y%m%d-%H%M%S)-$$
 STAGING=$(mktemp -d "$RELEASES/.${REVISION}.next.XXXXXX")
@@ -68,6 +73,8 @@ DROPINS_INSTALLED=false
 CURRENT_SWITCHED=false
 mkdir -p "$SNAPSHOT"
 systemctl cat aural.service aural-voice.service aural-openai-voice.service >"$SNAPSHOT/units.before" 2>&1 || true
+[ -d /etc/systemd/system/aural.service.d ] && mkdir -p "$SNAPSHOT/dropins" && cp -a /etc/systemd/system/aural.service.d "$SNAPSHOT/dropins/"
+[ -d /etc/systemd/system/aural-voice.service.d ] && mkdir -p "$SNAPSHOT/dropins" && cp -a /etc/systemd/system/aural-voice.service.d "$SNAPSHOT/dropins/"
 [ -f "$OPENAI_VOICE_UNIT" ] && cp -a "$OPENAI_VOICE_UNIT" "$SNAPSHOT/aural-openai-voice.service.before" || touch "$SNAPSHOT/openai-unit-was-absent"
 systemctl is-enabled --quiet aural-openai-voice.service && touch "$SNAPSHOT/openai-unit-was-enabled" || true
 [ -n "$PREVIOUS_TARGET" ] && printf '%s\n' "$PREVIOUS_TARGET" >"$SNAPSHOT/current.before"
@@ -87,8 +94,10 @@ rollback() {
       rm -f -- "$CURRENT"
     fi
   fi
-  if [ "$DROPINS_INSTALLED" = true ] && [ ! -s "$SNAPSHOT/dropins-preexisting" ]; then
+  if [ "$DROPINS_INSTALLED" = true ]; then
     rm -rf /etc/systemd/system/aural.service.d /etc/systemd/system/aural-voice.service.d
+    [ -d "$SNAPSHOT/dropins/aural.service.d" ] && cp -a "$SNAPSHOT/dropins/aural.service.d" /etc/systemd/system/
+    [ -d "$SNAPSHOT/dropins/aural-voice.service.d" ] && cp -a "$SNAPSHOT/dropins/aural-voice.service.d" /etc/systemd/system/
   fi
   if [ -f "$SNAPSHOT/aural-openai-voice.service.before" ]; then
     cp -a "$SNAPSHOT/aural-openai-voice.service.before" "$OPENAI_VOICE_UNIT"
@@ -146,20 +155,24 @@ rmdir "$STAGING"
 chmod -R go-w "$RELEASE_FINAL"
 ln -sfn "$ENV_DIR/.env.local" "$RELEASE_FINAL/.env.local"
 
+DROPINS_INSTALLED=true
 mkdir -p /etc/systemd/system/aural.service.d /etc/systemd/system/aural-voice.service.d
 cat > /etc/systemd/system/aural.service.d/override.conf <<UNIT
 [Service]
 WorkingDirectory=$CURRENT
+EnvironmentFile=-$ENV_DIR/.env.local
 ExecStart=
 ExecStart=/bin/bash -lc 'npm run start -- -H 0.0.0.0 -p 3000'
 UNIT
 cat > /etc/systemd/system/aural-voice.service.d/override.conf <<UNIT
 [Service]
 WorkingDirectory=$CURRENT
+EnvironmentFile=-$ENV_DIR/.env.local
 ExecStart=
 ExecStart=/bin/bash -lc 'cd $CURRENT && npm run dev:voice'
 UNIT
-cat > "$OPENAI_VOICE_UNIT" <<UNIT
+if [ "$FALLBACK_CONFIGURED" = true ]; then
+  cat > "$OPENAI_VOICE_UNIT" <<UNIT
 [Unit]
 Description=Aural backup OpenAI voice relay
 After=network-online.target aural.service
@@ -176,9 +189,14 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 UNIT
-DROPINS_INSTALLED=true
+else
+  systemctl disable aural-openai-voice.service >/dev/null 2>&1 || true
+  rm -f -- "$OPENAI_VOICE_UNIT"
+fi
 systemctl daemon-reload
-systemctl enable aural-openai-voice.service
+if [ "$FALLBACK_CONFIGURED" = true ]; then
+  systemctl enable aural-openai-voice.service
+fi
 
 # Keep the stale-session sweeper current on every deploy (idempotent).
 APPLY_DIR=$(dirname "$(readlink -f "$0")")
@@ -189,14 +207,27 @@ ln -s "$RELEASE_FINAL" "${CURRENT}.next-$$"
 mv -Tf "${CURRENT}.next-$$" "$CURRENT"
 CURRENT_SWITCHED=true
 
-systemctl restart aural.service aural-voice.service aural-openai-voice.service
+REQUIRED_SERVICES=(aural.service aural-voice.service)
+if [ "$FALLBACK_CONFIGURED" = true ]; then
+  REQUIRED_SERVICES+=(aural-openai-voice.service)
+fi
+systemctl restart "${REQUIRED_SERVICES[@]}"
 for _ in $(seq 1 20); do
-  systemctl is-active --quiet aural.service aural-voice.service aural-openai-voice.service && curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:3000/api/ready && break
+  systemctl is-active --quiet "${REQUIRED_SERVICES[@]}" && curl -fsS -o /dev/null --max-time 5 http://127.0.0.1:3000/api/ready && break
   sleep 3
 done
-systemctl is-active --quiet aural.service aural-voice.service aural-openai-voice.service || { echo "services not active after switch" >&2; exit 1; }
-curl -fsS -o /dev/null --max-time 10 http://127.0.0.1:3000/api/health || { echo "local health endpoint failed" >&2; exit 1; }
-curl -fsS -o /dev/null --max-time 10 http://127.0.0.1:3000/api/ready || { echo "local readiness endpoint failed" >&2; exit 1; }
+if ! systemctl is-active --quiet "${REQUIRED_SERVICES[@]}"; then
+  echo "services not active after switch" >&2
+  false
+fi
+if ! curl -fsS -o /dev/null --max-time 10 http://127.0.0.1:3000/api/health; then
+  echo "local health endpoint failed" >&2
+  false
+fi
+if ! curl -fsS -o /dev/null --max-time 10 http://127.0.0.1:3000/api/ready; then
+  echo "local readiness endpoint failed" >&2
+  false
+fi
 [ "$(readlink -f "$CURRENT")" = "$RELEASE_FINAL" ]
 [ "$(cat "$RELEASE_FINAL/REVISION")" = "$REVISION" ]
 
@@ -219,4 +250,5 @@ printf 'release=%s\n' "$RELEASE_FINAL"
 printf 'previous=%s\n' "${PREVIOUS_TARGET:-none}"
 printf 'rollback_switch_back=%s\n' "${PREVIOUS_TARGET:-$LEGACY_DIR}"
 printf 'services=active\n'
+printf 'fallback_voice_configured=%s\n' "$FALLBACK_CONFIGURED"
 printf 'snapshot=%s\n' "$SNAPSHOT"

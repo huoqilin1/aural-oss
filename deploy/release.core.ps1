@@ -106,6 +106,7 @@ df -P /root | awk 'NR==2{print "disk_avail_kb=" $4}'
 free -m | awk 'NR==2{print "mem_avail_mb=" $7}'
 systemctl is-active --quiet aural.service aural-voice.service && echo "services=ok" || echo "services=down"
 systemctl is-active --quiet aural-openai-voice.service && echo "fallback_service=ok" || echo "fallback_service=missing_or_down"
+if grep -Eq '^AZURE_OPENAI_ENDPOINT=.+' /root/aural/env/.env.local 2>/dev/null && grep -Eq '^AZURE_OPENAI_API_KEY=.+' /root/aural/env/.env.local 2>/dev/null; then echo "fallback_configured=yes"; else echo "fallback_configured=no"; fi
 systemctl is-active --quiet docker && echo "docker=ok" || echo "docker=down"
 if [ -f /root/aural/current/REVISION ]; then echo "revision=$(cat /root/aural/current/REVISION)"; elif [ -f /root/aural-oss/REVISION ]; then echo "revision=$(cat /root/aural-oss/REVISION)"; else echo "revision=unknown"; fi
 A=$(docker exec supabase_db_aural psql -U postgres -d postgres -t -A -c "select count(*) from sessions where status='IN_PROGRESS' AND \"lastActivityAt\" > now() - interval '5 minutes'" 2>/dev/null | tr -d '[:space:]')
@@ -122,7 +123,9 @@ if ($diskAvailGb -lt 5) { throw "磁盘预检失败：/root 仅剩 ${diskAvailGb
 if ($probeOutput -notmatch 'services=ok') { throw "SSH 预检失败：aural 双服务当前未运行（先恢复再发布）" }
 $onlineRevision = "unknown"
 if ($probeOutput -match 'revision=([0-9a-f]{40}|unknown)') { $onlineRevision = $Matches[1] }
+$fallbackConfigured = $probeOutput -match 'fallback_configured=yes'
 if ($probeOutput -match 'docker=down') { Write-Host "警告=docker 未运行（Supabase 依赖需人工确认）" }
+if (-not $fallbackConfigured) { Write-Host "提示=备用 OpenAI 语音未配置；本次仅要求主语音线路就绪" }
 Write-Host "预检=SSH PASS（磁盘剩余 ${diskAvailGb}GB、线上版本=$($onlineRevision.Substring(0, [Math]::Min(7, $onlineRevision.Length)))）"
 if ($onlineRevision -eq $sha) {
   Write-Host "结论=该 SHA 已在线上运行，无需发布"
@@ -253,9 +256,13 @@ if ($LASTEXITCODE -ne 0 -or $versionPayload.revision -ne $sha) {
 if ($LASTEXITCODE -ne 0) { throw "公网健康检查失败" }
 & curl.exe -fsSL --max-redirs 5 --max-time 20 -o NUL "$publicRoot/api/ready"
 if ($LASTEXITCODE -ne 0) { throw "公网就绪检查失败" }
-$wsProbe = 'const {WebSocket}=require("ws");const ports=[8766,8767];Promise.all(ports.map(p=>new Promise((ok,fail)=>{const w=new WebSocket(`ws://127.0.0.1:${p}`);const t=setTimeout(()=>fail(new Error(`timeout:${p}`)),5000);w.once("open",()=>{clearTimeout(t);w.close();ok(p)});w.once("error",fail)}))).then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1)})'
+$voicePorts = if ($fallbackConfigured) { "8766,8767" } else { "8766" }
+$wsProbe = 'const {WebSocket}=require("ws");const ports=[' + $voicePorts + '];Promise.all(ports.map(p=>new Promise((ok,fail)=>{const w=new WebSocket(`ws://127.0.0.1:${p}`);const t=setTimeout(()=>fail(new Error(`timeout:${p}`)),5000);w.once("open",()=>{clearTimeout(t);w.close();ok(p)});w.once("error",fail)}))).then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1)})'
 & $sshExe @sshCommonArgs $TargetHost "cd /root/aural/current && node -e '$wsProbe'"
-if ($LASTEXITCODE -ne 0) { throw "主/备用语音 WebSocket 握手失败" }
+if ($LASTEXITCODE -ne 0) {
+  $expectedVoiceLabel = if ($fallbackConfigured) { "主/备用语音" } else { "主语音" }
+  throw "$expectedVoiceLabel WebSocket 握手失败"
+}
 $deployedRevision = (& $sshExe @sshCommonArgs $TargetHost "cat /root/aural/current/REVISION") -join ""
 if ($deployedRevision.Trim() -ne $sha) { throw "版本验收失败：current/REVISION=$deployedRevision" }
 
@@ -271,7 +278,7 @@ $summary = [ordered]@{
   switch = "PASS"
   public_site = "PASS"
   health_ready = "PASS"
-  voice_websocket_handshake = "PASS(primary,fallback)"
+  voice_websocket_handshake = if ($fallbackConfigured) { "PASS(primary,fallback)" } else { "PASS(primary);fallback=not_configured" }
   revision_marker = "PASS"
   rollback = "previous 链接与 /root/aural-oss 原目录均已保留"
 }
