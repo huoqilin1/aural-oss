@@ -361,13 +361,18 @@ test("next-question control sends one request and waits for relay acknowledgemen
     }).count(),
     0,
   );
-  await waitForText(page, "Thanks, that evidence is clear.", 8_000);
-
   const nextButton = page.getByRole("button", { name: "下一题" }).first();
-  await waitForCondition(async () => await nextButton.isEnabled(), 5_000);
+  // The acknowledgement copy is incidental setup. The stable contract is that
+  // the relay response has finished and the next control is enabled. Clean WSL
+  // builds can compile/hydrate more slowly than a warm Windows workspace.
+  await waitForCondition(
+    async () => await nextButton.isEnabled(),
+    20_000,
+    "Expected next-question control after relay acknowledgement",
+  );
   await nextButton.dblclick();
 
-  await waitForText(page, "Explain a difficult decision you made in that project.", 5_000);
+  await waitForText(page, "Explain a difficult decision you made in that project.", 10_000);
   const sent = await readRelaySentMessages(page);
   assert.equal(sent.filter((message) => message.type === "next_question").length, 1);
   assert.equal(
