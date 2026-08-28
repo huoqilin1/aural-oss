@@ -34,6 +34,7 @@ import {
     collapseInternalAsrRepetitions,
     evaluateTranscriptManualAdvance,
     finalizeTurnBudgetResponse,
+    isRecruitmentConversationControl,
     isUserEndRequest,
     isUserSkipRequest,
     mergeAsrSegments,
@@ -838,6 +839,7 @@ function registerLiveSession(ctx: InterviewContext): void {
       typeof ctx.timeLimitMinutes === "number" && ctx.timeLimitMinutes > 0
         ? ctx.timeLimitMinutes
         : null,
+    isRecruitmentInterview: ctx.title.includes("数君招聘"),
     status: "live",
   });
   if (dynamicQuestionClient) {
@@ -853,19 +855,18 @@ function registerLiveSession(ctx: InterviewContext): void {
         if (startedMs > 0 && startedMs < record.startedAtMs) {
           record.startedAtMs = startedMs;
         }
-      })
-      .catch(() => undefined);
+      }, () => undefined);
   }
 }
 
 setInterval(() => {
   const nowMs = Date.now();
-  for (const [sessionId, record] of liveSessions) {
+  liveSessions.forEach((record, sessionId) => {
     const plan = planSessionFinalization(record, nowMs, SESSION_DISCONNECT_GRACE_MS);
-    if (!plan) continue;
+    if (!plan) return;
     record.status = "ended";
     void persistSessionStatus(sessionId, plan.status, plan.reason);
-  }
+  });
 }, 60_000).unref();
 
 // ── Mic test handler (ASR-only, no LLM/TTS) ────────────────────────
@@ -1188,18 +1189,18 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   let generatingResponse = false;
   let userTurnsOnCurrentQ = 0;
   const isOprunRecruitmentInterview = ctx.title.includes("数君招聘");
-  // Recruitment interviews may use up to four concise verification follow-ups:
-  // Q2-Q7 share three in-place evidence checks and Q8 reserves one final
-  // cross-question verification. Q1 and an optional candidate-closing Q9 do
-  // not consume or expose a verification turn.
+  // Recruitment interviews may use up to three concise verification follow-ups:
+  // Q2-Q7 share up to two in-place checks and Q8 may use one optional final
+  // cross-question verification. No individual scored question may receive
+  // more than one follow-up; Q1 and candidate closing do not expose one.
   let totalFollowUpsUsed = 0;
   let recruitmentInlineFollowUpsUsed = 0;
   let recruitmentFinalFollowUpsUsed = 0;
   // Preserve the upstream 15-turn allowance for non-recruitment interviews;
   // OpRun recruitment uses the stricter evidence-verification budget below.
   const GLOBAL_FOLLOW_UP_LIMIT = 15;
-  const OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT = 4;
-  const RECRUITMENT_INLINE_FOLLOW_UP_LIMIT = 3;
+  const OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT = 3;
+  const RECRUITMENT_INLINE_FOLLOW_UP_LIMIT = 2;
   const RECRUITMENT_FINAL_FOLLOW_UP_LIMIT = 1;
   // 候选人静默处理(王总 2026-08-21):不再"静默即切题"——
   // 静默 45s 先问"答完了吗?",开口即留在本题;确认后再切题;
@@ -1294,6 +1295,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
   let sortedQuestions = [...ctx.questions].sort((a, b) => a.order - b.order);
   let questionRefreshInFlight = false;
+  let pendingProgressiveTransition = false;
 
   function normalizeDynamicQuestions(rows: unknown): typeof sortedQuestions {
     if (!Array.isArray(rows)) return [];
@@ -1332,6 +1334,18 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       }));
     }
     log.info(`Dynamic questions refreshed from ${source}: total=${sortedQuestions.length}`);
+    if (
+      pendingProgressiveTransition
+      && !isProgressiveOpeningOnly(sortedQuestions)
+      && currentQuestionIndex < sortedQuestions.length - 1
+    ) {
+      pendingProgressiveTransition = false;
+      setTimeout(() => {
+        if (!isTransitioning && !interviewDone) {
+          handleTransition(true).catch(log.error);
+        }
+      }, 0);
+    }
     return true;
   }
 
@@ -2001,6 +2015,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     const history = PROMPTS.formatHistory(questionTranscript, isZh);
     const agentCtx = await buildAgentContext();
     const latestAnsweredExchange = getLatestAnsweredExchange();
+    const isRecruitmentControlTurn = Boolean(
+      isOprunRecruitmentInterview
+      && latestAnsweredExchange?.participant
+      && isRecruitmentConversationControl(latestAnsweredExchange.participant),
+    );
 
     const qOpts = currentQ.options as { options: string[]; allowMultiple?: boolean } | null | undefined;
     let choiceInstruction = "";
@@ -2018,9 +2037,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       choiceInstruction = bt(isZh, PROMPTS.choiceInstruction.research(NEXT_TOKEN, PREV_TOKEN));
     }
 
-    const effectiveMaxFollowUps = currentQ.type === "RESEARCH"
-      ? Math.max(maxFollowUps, 7)
-      : maxFollowUps;
+    const effectiveMaxFollowUps = isOprunRecruitmentInterview
+      ? 1
+      : currentQ.type === "RESEARCH"
+        ? Math.max(maxFollowUps, 7)
+        : maxFollowUps;
     const followUpsDone = Math.max(0, userTurnsOnCurrentQ - 1);
     const isRecruitmentInlineQuestion = (
       isOprunRecruitmentInterview
@@ -2056,7 +2077,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       isLastQuestion: currentQuestionIndex >= sortedQuestions.length - 1,
     };
 
-    if (forceSkip) {
+    if (!forceSkip && isRecruitmentControlTurn) {
+      followUpInstruction = isZh
+        ? `候选人刚才只是寒暄、确认声音或请求重述，并没有回答当前计分题。请像真人面试官一样简短回应，然后自然、原意不变地重述当前题目。不要追问证据，不要加 ${NEXT_TOKEN}，这次不计入追问预算。`
+        : `The participant only greeted you, checked audio, or asked for repetition; they did not answer the scored question. Respond briefly and naturally, then restate the current question without changing its meaning. Do not probe evidence, do not append ${NEXT_TOKEN}, and do not consume a follow-up.`;
+    } else if (forceSkip) {
       const skipOverride = isZh
         ? `⚠️ 受访者已明确要求跳过/进入下一题。你必须简短回应（如"好的，没问题"），然后在回复末尾加上 ${NEXT_TOKEN}。不要试图继续提问或鼓励。`
         : `⚠️ The participant has EXPLICITLY asked to skip / move on to the next question. You MUST briefly acknowledge (e.g. "Sure, no problem") and append ${NEXT_TOKEN} at the end. Do NOT try to help further or ask more questions.`;
@@ -2077,19 +2102,30 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     } else {
       followUpInstruction = bt(isZh, PROMPTS.followUp.remaining(turnsLeft, NEXT_TOKEN));
     }
-    if (!forceSkip && turnsLeft > 0 && isRecruitmentInlineQuestion) {
+    if (
+      !forceSkip
+      && !isRecruitmentControlTurn
+      && turnsLeft > 0
+      && isRecruitmentInlineQuestion
+    ) {
       followUpInstruction = isZh
         ? `这是Q2至Q7的就地证据核验机会。只有回答缺少以下一项关键证据时才追问一次：本人职责边界、实施机制或工具、选择依据、结果数据口径、失败与验证、时间线。每次只问一个最关键缺口，语气专业自然；回答已经充分就简短确认并加 ${NEXT_TOKEN} 进入下一题。`
         : `This is an in-place evidence check for Q2-Q7. Ask one concise follow-up only when the answer lacks one material item: personal ownership, implementation mechanism or tools, decision rationale, metric definition, failure and validation, or timeline. Ask only the single most important gap. If evidence is sufficient, acknowledge and append ${NEXT_TOKEN}.`;
-    } else if (!forceSkip && turnsLeft > 0 && isRecruitmentFinalVerification) {
+    } else if (
+      !forceSkip
+      && !isRecruitmentControlTurn
+      && turnsLeft > 0
+      && isRecruitmentFinalVerification
+    ) {
       followUpInstruction = isZh
-        ? `这是全场唯一一次、必须执行的最终动态核验。结合之前各题摘要和当前回答，只选择对录用判断影响最大的一个未证实核心主张、技能缺口或前后矛盾，问一个简短确认问题；这是“只能围绕当前题”的唯一例外。不得跳过，不得同时问两件事，本轮不得加 ${NEXT_TOKEN}。`
-        : `This is the single mandatory final cross-question verification. Using prior summaries and the current answer, choose only the most material unsupported core claim, skill gap, or inconsistency and ask exactly one concise verification question. This is the only exception to staying within the current question. Do not skip it, do not ask two things, and do not append ${NEXT_TOKEN} on this turn.`;
+        ? `这是全场最多一次、但不是必问的最终动态核验机会。先判断前面证据是否已经足够：若足够，简短确认并加 ${NEXT_TOKEN} 收尾；只有仍存在会实质影响录用判断的未证实核心主张、技能缺口或前后矛盾时，才选择其中最重要的一处问一个简短确认问题。这是“只能围绕当前题”的唯一例外，不得同时问两件事。`
+        : `This is one optional final cross-question verification opportunity, not a mandatory question. If prior evidence is sufficient, acknowledge briefly and append ${NEXT_TOKEN}. Only when one unresolved claim, skill gap, or inconsistency could materially change the hiring decision may you ask one concise verification question about that single issue.`;
     }
     const mustAdvanceForFollowUpLimit =
       !forceSkip &&
       !lastResponseWasCorrection &&
       !isCodingOrWhiteboard &&
+      !isRecruitmentControlTurn &&
       turnsLeft <= 0;
 
     const promptParams = {
@@ -2183,6 +2219,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       !response.includes(NEXT_TOKEN) &&
       !response.includes(PREV_TOKEN) &&
       userTurnsOnCurrentQ > 0 &&
+      !isRecruitmentControlTurn &&
       replyKeepsConversationOpen(spokenResponse, isZh)
     ) {
       totalFollowUpsUsed = Math.min(
@@ -2307,6 +2344,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     }
     const transitionId = ++transitionGeneration;
     isTransitioning = true;
+    pendingProgressiveTransition = false;
 
     // Only wait when the candidate reaches the final currently available
     // progressive question. If a conditional transition Q2 already exists,
@@ -2320,10 +2358,18 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       }
       if (isProgressiveOpeningOnly(sortedQuestions)) {
         isTransitioning = false;
+        pendingProgressiveTransition = true;
+        if (browserWs.readyState === WebSocket.OPEN) {
+          browserWs.send(JSON.stringify({
+            type: "next_question_not_ready",
+            questionIndex: currentQuestionIndex,
+            totalQuestions: sortedQuestions.length,
+          }));
+        }
         await speakAndHandle(
           isZh
-            ? "后续题目正在整理中，请再补充一个最能体现你能力的具体结果，我会继续准备下一题。"
-            : "The remaining questions are still being prepared. Please add one concrete result that best demonstrates your ability while I prepare the next question.",
+            ? "抱歉，下一道个性化题暂未准备好，这是系统异常，我会继续自动重试。本次等待不会作为额外面试题。"
+            : "Sorry, the next personalized question is not ready yet. This is a system issue and I will keep retrying automatically. This wait is not an additional interview question.",
           { trackInTranscript: false },
         );
         return;
@@ -2645,7 +2691,12 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       } else {
         rememberAcceptedUserFinal(userText);
         questionTranscript.push({ role: "user", text: userText });
-        userTurnsOnCurrentQ++;
+        if (
+          !isOprunRecruitmentInterview
+          || !isRecruitmentConversationControl(userText)
+        ) {
+          userTurnsOnCurrentQ++;
+        }
       }
       lastResponseWasCorrection = false;
 

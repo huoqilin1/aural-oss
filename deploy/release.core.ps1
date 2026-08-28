@@ -105,6 +105,7 @@ echo "conn=ok"
 df -P /root | awk 'NR==2{print "disk_avail_kb=" $4}'
 free -m | awk 'NR==2{print "mem_avail_mb=" $7}'
 systemctl is-active --quiet aural.service aural-voice.service && echo "services=ok" || echo "services=down"
+systemctl is-active --quiet aural-openai-voice.service && echo "fallback_service=ok" || echo "fallback_service=missing_or_down"
 systemctl is-active --quiet docker && echo "docker=ok" || echo "docker=down"
 if [ -f /root/aural/current/REVISION ]; then echo "revision=$(cat /root/aural/current/REVISION)"; elif [ -f /root/aural-oss/REVISION ]; then echo "revision=$(cat /root/aural-oss/REVISION)"; else echo "revision=unknown"; fi
 A=$(docker exec supabase_db_aural psql -U postgres -d postgres -t -A -c "select count(*) from sessions where status='IN_PROGRESS' AND \"lastActivityAt\" > now() - interval '5 minutes'" 2>/dev/null | tr -d '[:space:]')
@@ -172,23 +173,29 @@ if ($reuse) {
   Write-Host "制品=复用（同 SHA、摘要一致；-ForceRebuild 可强制重建）"
 } else {
   $buildEnvFile = Join-Path $tempDir "aural-build-$sha.env"
-  $envContent = (& $sshExe @sshCommonArgs $TargetHost "grep -E '^[A-Za-z_][A-Za-z0-9_]*=' /root/aural-oss/.env.local 2>/dev/null || grep -E '^[A-Za-z_][A-Za-z0-9_]*=' /root/aural/env/.env.local") -join "`n"
+  $envContent = (& $sshExe @sshCommonArgs $TargetHost "grep -E '^[A-Za-z_][A-Za-z0-9_]*=' /root/aural/env/.env.local 2>/dev/null || grep -E '^[A-Za-z_][A-Za-z0-9_]*=' /root/aural-oss/.env.local") -join "`n"
   if (-not $envContent) { throw "未能取得构建期环境变量" }
-  [System.IO.File]::WriteAllText($buildEnvFile, $envContent + "`n", $utf8NoBom)
-
-  $sourceTar = Join-Path $tempDir "aural-source-$sha.tar"
-  git archive --format=tar --output=$sourceTar $sha
-  if ($LASTEXITCODE -ne 0) { throw "生成已提交源码归档失败" }
-  $builderSource = Join-Path $repoRoot "deploy\build-release-wsl.sh"
-  $builderTemp = Join-Path $tempDir "build-release-$sha.lf.sh"
-  $builderContent = [System.IO.File]::ReadAllText($builderSource).Replace("`r`n", "`n")
-  [System.IO.File]::WriteAllText($builderTemp, $builderContent, $utf8NoBom)
-  $builderCommand = "exec bash $(Convert-ToBashLiteral (Convert-ToWslPath $builderTemp)) " +
-    "$(Convert-ToBashLiteral (Convert-ToWslPath $sourceTar)) $(Convert-ToBashLiteral (Convert-ToWslPath $artifactDir)) " +
-    "$(Convert-ToBashLiteral $sha) $(Convert-ToBashLiteral (Convert-ToWslPath $buildEnvFile))"
-  Write-Host "构建=开始（测试+构建约 5-10 分钟）"
-  & wsl.exe -d $WslDistribution -- bash -lc $builderCommand
-  if ($LASTEXITCODE -ne 0) { throw "WSL 制品构建失败" }
+  try {
+    [System.IO.File]::WriteAllText($buildEnvFile, $envContent + "`n", $utf8NoBom)
+    $sourceTar = Join-Path $tempDir "aural-source-$sha.tar"
+    git archive --format=tar --output=$sourceTar $sha
+    if ($LASTEXITCODE -ne 0) { throw "生成已提交源码归档失败" }
+    $builderSource = Join-Path $repoRoot "deploy\build-release-wsl.sh"
+    $builderTemp = Join-Path $tempDir "build-release-$sha.lf.sh"
+    $builderContent = [System.IO.File]::ReadAllText($builderSource).Replace("`r`n", "`n")
+    [System.IO.File]::WriteAllText($builderTemp, $builderContent, $utf8NoBom)
+    $builderCommand = "exec bash $(Convert-ToBashLiteral (Convert-ToWslPath $builderTemp)) " +
+      "$(Convert-ToBashLiteral (Convert-ToWslPath $sourceTar)) $(Convert-ToBashLiteral (Convert-ToWslPath $artifactDir)) " +
+      "$(Convert-ToBashLiteral $sha) $(Convert-ToBashLiteral (Convert-ToWslPath $buildEnvFile))"
+    Write-Host "构建=开始（测试+构建约 5-10 分钟）"
+    & wsl.exe -d $WslDistribution -- bash -lc $builderCommand
+    if ($LASTEXITCODE -ne 0) { throw "WSL 制品构建失败" }
+  }
+  finally {
+    if (Test-Path -LiteralPath $buildEnvFile) {
+      Remove-Item -LiteralPath $buildEnvFile -Force
+    }
+  }
   if (-not (Test-Path $artifact)) { throw "构建完成但未找到制品：$artifact" }
   $checksum = ((Get-FileHash -Algorithm SHA256 $artifact).Hash).ToLowerInvariant()
 
@@ -198,7 +205,7 @@ if ($reuse) {
     node_version = "20.20.2"
     wsl_distribution = $WslDistribution
     built_at = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
-    checks = "test:web,next-build"
+    checks = "test:web,test:functional,next-build"
   }
   [System.IO.File]::WriteAllText($buildInfoFile, ($buildInfo | ConvertTo-Json -Compress), $utf8NoBom)
   Write-Host "构建=PASS（制品 sha256=$($checksum.Substring(0,16))…）"
@@ -232,9 +239,23 @@ if ($LASTEXITCODE -ne 0) { throw "正式制品应用失败" }
 & $sshExe @sshCommonArgs $TargetHost "rm -rf -- $remoteBootstrap"
 if ($LASTEXITCODE -ne 0) { Write-Warning "发布成功，但临时目录清理失败" }
 
-# ---- 6. 公网与版本验收 -----------------------------------------------------
-& curl.exe -fsS --max-time 20 -o NUL "$PublicBaseUrl"
-if ($LASTEXITCODE -ne 0) { throw "公网验收失败：$PublicBaseUrl 不可达" }
+# ---- 6. 公网、版本、健康与语音线路验收 -------------------------------------
+$publicRoot = $PublicBaseUrl.TrimEnd('/')
+$finalStatus = (& curl.exe -fsSL --max-redirs 5 --max-time 20 -o NUL -w "%{http_code}" "$publicRoot/") -join ""
+if ($LASTEXITCODE -ne 0 -or $finalStatus.Trim() -ne "200") {
+  throw "公网验收失败：重定向后状态=$finalStatus"
+}
+$versionPayload = ((& curl.exe -fsSL --max-redirs 5 --max-time 20 "$publicRoot/api/version") -join "") | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $versionPayload.revision -ne $sha) {
+  throw "公网版本验收失败：revision=$($versionPayload.revision)"
+}
+& curl.exe -fsSL --max-redirs 5 --max-time 20 -o NUL "$publicRoot/api/health"
+if ($LASTEXITCODE -ne 0) { throw "公网健康检查失败" }
+& curl.exe -fsSL --max-redirs 5 --max-time 20 -o NUL "$publicRoot/api/ready"
+if ($LASTEXITCODE -ne 0) { throw "公网就绪检查失败" }
+$wsProbe = 'const {WebSocket}=require("ws");const ports=[8766,8767];Promise.all(ports.map(p=>new Promise((ok,fail)=>{const w=new WebSocket(`ws://127.0.0.1:${p}`);const t=setTimeout(()=>fail(new Error(`timeout:${p}`)),5000);w.once("open",()=>{clearTimeout(t);w.close();ok(p)});w.once("error",fail)}))).then(()=>process.exit(0)).catch(e=>{console.error(e.message);process.exit(1)})'
+& $sshExe @sshCommonArgs $TargetHost "cd /root/aural/current && node -e '$wsProbe'"
+if ($LASTEXITCODE -ne 0) { throw "主/备用语音 WebSocket 握手失败" }
 $deployedRevision = (& $sshExe @sshCommonArgs $TargetHost "cat /root/aural/current/REVISION") -join ""
 if ($deployedRevision.Trim() -ne $sha) { throw "版本验收失败：current/REVISION=$deployedRevision" }
 
@@ -244,11 +265,13 @@ $summary = [ordered]@{
   system = "aural-interview-production"
   sha = $sha
   mode = if ($reuse) { "artifact-reuse" } else { "full-build" }
-  tests = if ($reuse) { "reused" } else { "PASS(test:web)" }
+  tests = if ($reuse) { "reused" } else { "PASS(test:web,test:functional)" }
   artifact_sha256 = $checksum
   upload = "PASS"
   switch = "PASS"
   public_site = "PASS"
+  health_ready = "PASS"
+  voice_websocket_handshake = "PASS(primary,fallback)"
   revision_marker = "PASS"
   rollback = "previous 链接与 /root/aural-oss 原目录均已保留"
 }

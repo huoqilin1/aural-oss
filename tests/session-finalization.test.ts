@@ -13,6 +13,7 @@ function record(overrides: Partial<LiveSessionRecord> = {}): LiveSessionRecord {
     startedAtMs: 0,
     lastActiveAtMs: 0,
     timeLimitMinutes: 32,
+    isRecruitmentInterview: false,
     status: "live",
     ...overrides,
   };
@@ -46,6 +47,19 @@ test("planSessionFinalization force-completes at hard limit even while active", 
     GRACE,
   );
   assert.deepEqual(plan, { status: "COMPLETED", reason: "server_time_limit" });
+});
+
+test("active recruitment sessions are never force-completed by a time limit", () => {
+  const now = 95 * 60_000;
+  const plan = planSessionFinalization(
+    record({
+      isRecruitmentInterview: true,
+      lastActiveAtMs: now - 1_000,
+    }),
+    now,
+    GRACE,
+  );
+  assert.equal(plan, null);
 });
 
 test("planSessionFinalization ignores already-ended records", () => {

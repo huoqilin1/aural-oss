@@ -4,7 +4,7 @@ export interface DynamicQuestionLike {
   description?: string | null;
 }
 
-const OPRUN_MAIN_DIMENSIONS = new Set([
+const LEGACY_OPRUN_MAIN_DIMENSIONS = new Set([
   "communication",
   "job_duty_primary",
   "job_duty_secondary",
@@ -15,12 +15,28 @@ const OPRUN_MAIN_DIMENSIONS = new Set([
   "motivation_stability",
 ]);
 
-export const OPRUN_PLANNED_MAIN_QUESTION_COUNT = OPRUN_MAIN_DIMENSIONS.size;
+const EVIDENCE_OPRUN_MAIN_DIMENSIONS = new Set([
+  "core_experience",
+  "project_ownership",
+  "core_skill_evidence",
+  "result_authenticity",
+  "job_work_sample",
+  "problem_solving",
+  "ai_learning_boundary",
+  "collaboration_motivation_stability",
+]);
+
+const OPRUN_DIMENSION_CONTRACTS = [
+  LEGACY_OPRUN_MAIN_DIMENSIONS,
+  EVIDENCE_OPRUN_MAIN_DIMENSIONS,
+];
+
+export const OPRUN_PLANNED_MAIN_QUESTION_COUNT = 8;
 
 export function isProgressiveQuestionSet(
   questions: readonly DynamicQuestionLike[],
 ): boolean {
-  if (questions.length < 1 || questions.length >= OPRUN_MAIN_DIMENSIONS.size) {
+  if (questions.length < 1 || questions.length >= OPRUN_PLANNED_MAIN_QUESTION_COUNT) {
     return false;
   }
   const dimensions = questions.map((question) => {
@@ -28,9 +44,11 @@ export function isProgressiveQuestionSet(
     const marker = "oprun_dimension:";
     return description.startsWith(marker) ? description.slice(marker.length) : "";
   });
-  return dimensions[0] === "communication"
-    && dimensions.every((dimension) => OPRUN_MAIN_DIMENSIONS.has(dimension))
-    && new Set(dimensions).size === dimensions.length;
+  return OPRUN_DIMENSION_CONTRACTS.some((contract) => (
+    contract.has(dimensions[0])
+    && dimensions.every((dimension) => contract.has(dimension))
+    && new Set(dimensions).size === dimensions.length
+  ));
 }
 
 export function isProgressiveOpeningOnly(

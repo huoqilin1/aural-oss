@@ -23,6 +23,7 @@ import {
     evaluateManualQuestionAdvance,
     shouldAllowTtsBargeIn,
 } from "./openai-voice-relay-helpers";
+import { isRecruitmentConversationControl } from "./voice-relay-helpers";
 import {
     type BigModelAsrConfig,
     BIGMODEL_ASR_URL,
@@ -281,17 +282,17 @@ function buildSystemPrompt(ctx: InterviewContext, startIdx: number): string {
   const recruitmentVerificationRulesZh = isOprunRecruitmentInterview
     ? `\n## 数君招聘核验追问规则（线路切换后仍须严格遵守）
 - 开场寒暄不编号，不宣读题目总数；第1题自我介绍是正式计分题，但不追问。
-- 第2至第7题每题最多追问1次，全场合计最多3次。只在本人边界、实施机制、选择依据、结果口径、失败验证或时间线存在关键缺口时追问；证据充分就直接切题。
+- 第2至第7题每题最多追问1次，全场合计最多2次。只在本人边界、实施机制、选择依据、结果口径、失败验证或时间线存在关键缺口时追问；证据充分就直接切题。
 - 第8题最多追问1次，且只核验全场影响录用判断最大的一个未证实主张、技能缺口或前后矛盾。这是唯一允许引用前面题目证据的跨题核验。
-- 第9题如为候选人反问环节，不追问候选人。全场任何时候都不得超过“3次就地核验+1次最终核验”。
+- 八道计分题之后如进入候选人提问交流环节，不把它编号成第9题，也不追问候选人。全场任何时候都不得超过“2次就地核验+1次最终核验”，且最终核验不是必问。
 - 技术岗位可以核验必要的代码、接口、数据流、配置、日志、指标、架构和验证细节，但不考冷门术语、不无限深挖。\n`
     : "";
   const recruitmentVerificationRulesEn = isOprunRecruitmentInterview
     ? `\n## OpRun recruitment verification limits (preserve after relay failover)
 - Give an unnumbered natural greeting without announcing the total question count. Q1 is the scored self-introduction and gets no follow-up.
-- Q2-Q7 allow at most one follow-up each and at most three combined. Probe only one material gap in ownership, mechanism, rationale, metric definition, failure validation, or timeline; otherwise move on.
+- Q2-Q7 allow at most one follow-up each and at most two combined. Probe only one material gap in ownership, mechanism, rationale, metric definition, failure validation, or timeline; otherwise move on.
 - Q8 allows one final follow-up only, targeting the single most material unsupported claim, skill gap, or inconsistency across the interview.
-- Do not probe an optional Q9 candidate-question closing. Never exceed three in-place checks plus one final verification in the whole interview.
+- Do not number the optional candidate-question closing after the eight scored questions as Q9, and do not probe the candidate there. Never exceed two in-place checks plus one optional final verification in the whole interview.
 - Technical roles may verify necessary code, interfaces, data flow, configuration, logs, metrics, architecture, and validation details without trivia or endless probing.\n`
     : "";
 
@@ -778,11 +779,13 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   let reconnecting = false;
   let browserClosed = false;
   let questionRefreshInFlight = false;
-  let pendingProgressiveTransition: "button" | "user_request" | null = null;
+  let pendingProgressiveTransition: "button" | "user_request" | "answer_complete" | null = null;
   const isOprunRecruitmentInterview = ctx.title.includes("数君招聘");
-  let finalVerificationRequested = false;
-  let finalVerificationAsked = false;
-  let finalVerificationAnswered = false;
+  const recruitmentAnswersByQuestion = new Map<number, number>();
+  const recruitmentFollowUpsByQuestion = new Map<number, number>();
+  let recruitmentInlineFollowUpsUsed = 0;
+  let recruitmentFinalFollowUpsUsed = 0;
+  let activeResponseQuestionIndex = currentQuestionIndex;
 
   function normalizeDynamicQuestions(rows: unknown): typeof sortedQuestions {
     if (!Array.isArray(rows)) return [];
@@ -937,8 +940,13 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     if (role === "user" && !text.startsWith("[")) {
       lastCommittedUserAnswerAt = Date.now();
       userCommittedWordsThisQuestion += text.trim().split(/\s+/).length;
-      if (finalVerificationAsked && currentQuestionIndex === 7) {
-        finalVerificationAnswered = true;
+      if (isOprunRecruitmentInterview) {
+        if (!isRecruitmentConversationControl(text)) {
+          recruitmentAnswersByQuestion.set(
+            currentQuestionIndex,
+            (recruitmentAnswersByQuestion.get(currentQuestionIndex) || 0) + 1,
+          );
+        }
       }
       if (!toolsEnabled && userCommittedWordsThisQuestion >= MIN_WORDS_BEFORE_TRANSITION) {
         enableTools();
@@ -954,24 +962,6 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     return /[?？]|请说明|请具体|能否|怎么|如何|为什么|什么|哪些|是否|有没有/.test(
       text,
     );
-  }
-
-  function needsFinalVerification(targetIdx: number): boolean {
-    return Boolean(
-      isOprunRecruitmentInterview
-      && currentQuestionIndex === 7
-      && targetIdx > 7
-      && !finalVerificationAnswered,
-    );
-  }
-
-  function finalVerificationPrompt(): string {
-    const evidence = conversationHistory
-      .filter((entry) => entry.role === "user" && !entry.text.startsWith("["))
-      .slice(-12)
-      .map((entry, index) => `${index + 1}. ${entry.text}`)
-      .join("\n");
-    return `[SYSTEM] Before leaving scored question 8, ask exactly ONE final verification question. Use the participant evidence below to choose the single highest-impact unsupported core claim, skill gap, metric inconsistency, ownership ambiguity, or timeline conflict. If two stated values conflict, quote both values and ask for the shared definition. Do not accuse the participant of lying. Do not ask multiple questions, do not move to the candidate closing yet, and do not call signal_question_change in this response.\nParticipant evidence:\n${evidence || "No durable evidence summary is available; verify the most important role-critical claim from the current answer."}`;
   }
 
   function enableTools() {
@@ -1084,6 +1074,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     const payload = response
       ? { type: "response.create", response }
       : { type: "response.create" };
+    activeResponseQuestionIndex = currentQuestionIndex;
     responseInFlight = true;
     oaiWs.send(JSON.stringify(payload));
     log.info(`Requested assistant response (${reason})`);
@@ -1153,8 +1144,84 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
         },
       }));
     }
-    requestAssistantResponse(reason);
-    return false;
+    return requestRecruitmentResponseOrAdvance(reason, committedText);
+  }
+
+  function recruitmentMustAdvanceAfterAnswer(committedText: string): boolean {
+    if (!isOprunRecruitmentInterview) return false;
+    if (isRecruitmentConversationControl(committedText)) return false;
+    const questionFollowUps = recruitmentFollowUpsByQuestion.get(currentQuestionIndex) || 0;
+    if (currentQuestionIndex === 0) return true;
+    if (currentQuestionIndex >= 1 && currentQuestionIndex <= 6) {
+      return questionFollowUps >= 1 || recruitmentInlineFollowUpsUsed >= 2;
+    }
+    if (currentQuestionIndex === 7) {
+      return questionFollowUps >= 1 || recruitmentFinalFollowUpsUsed >= 1;
+    }
+    return currentQuestionIndex >= 8;
+  }
+
+  function requestRecruitmentResponseOrAdvance(
+    reason: string,
+    committedText: string,
+  ): boolean {
+    if (isOprunRecruitmentInterview && isRecruitmentConversationControl(committedText)) {
+      if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
+        oaiWs.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: "system",
+            content: [{
+              type: "input_text",
+              text: "[SYSTEM] This was only a greeting, audio check, or request to repeat—not an answer to the scored question. Reply briefly and naturally, then restate the current question. Do not advance and do not treat the restatement as a follow-up.",
+            }],
+          },
+        }));
+      }
+      requestAssistantResponse(`${reason}: recruitment conversation control`);
+      return false;
+    }
+    if (!recruitmentMustAdvanceAfterAnswer(committedText)) {
+      requestAssistantResponse(reason);
+      return false;
+    }
+    log.info(
+      `Recruitment follow-up budget exhausted on Q${currentQuestionIndex + 1}; forcing transition`,
+    );
+    void transitionToNextWhenReady("answer_complete");
+    return true;
+  }
+
+  function recordRecruitmentFollowUp(
+    responseQuestionIndex: number,
+    text: string,
+    hadFunctionCall: boolean,
+  ) {
+    if (
+      !isOprunRecruitmentInterview
+      || hadFunctionCall
+      || !isQuestionLike(text)
+      || responseQuestionIndex < 1
+      || responseQuestionIndex > 7
+      || (recruitmentAnswersByQuestion.get(responseQuestionIndex) || 0) <= 0
+    ) {
+      return;
+    }
+    const usedOnQuestion = recruitmentFollowUpsByQuestion.get(responseQuestionIndex) || 0;
+    if (usedOnQuestion >= 1) return;
+    if (responseQuestionIndex <= 6) {
+      if (recruitmentInlineFollowUpsUsed >= 2) return;
+      recruitmentInlineFollowUpsUsed += 1;
+    } else {
+      if (recruitmentFinalFollowUpsUsed >= 1) return;
+      recruitmentFinalFollowUpsUsed += 1;
+    }
+    recruitmentFollowUpsByQuestion.set(responseQuestionIndex, 1);
+    log.info(
+      `Recruitment verification budget: inline=${recruitmentInlineFollowUpsUsed}/2 `
+      + `final=${recruitmentFinalFollowUpsUsed}/1`,
+    );
   }
 
   function clearSpeechFinalizeTimer() {
@@ -1723,27 +1790,22 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               const userRequested = args.userRequested === true;
               log.info(`OpenAI called signal_question_change → Q${newIdx + 1}${userRequested ? " (user requested)" : ""}`);
 
-              if (needsFinalVerification(newIdx)) {
-                finalVerificationRequested = true;
-                pendingFunctionCalls.push({
-                  callId: msg.call_id,
-                  name: msg.name,
-                  args: finalVerificationPrompt(),
-                });
-                log.info("Blocked transition after Q8 until final verification is answered");
-                break;
-              }
-
               if (
                 newIdx >= sortedQuestions.length
                 && ctx.interviewId
                 && isProgressiveOpeningOnly(sortedQuestions)
               ) {
                 refreshDynamicQuestions().catch(log.error);
+                pendingProgressiveTransition = "answer_complete";
+                send({
+                  type: "next_question_not_ready",
+                  questionIndex: currentQuestionIndex,
+                  totalQuestions: sortedQuestions.length,
+                });
                 pendingFunctionCalls.push({
                   callId: msg.call_id,
                   name: msg.name,
-                  args: "The remaining structured questions are still loading. Continue the current question briefly and try the transition again shortly; do not end the interview.",
+                  args: "The next personalized question is not ready because of a system issue. Say a brief apology, clearly state that the system will retry automatically and that the wait is not another interview question. Do not ask the participant anything.",
                 });
                 break;
               }
@@ -1841,6 +1903,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
           case "response.done": {
             const respStatus = msg.response?.status || "unknown";
             const respOutputCount = msg.response?.output?.length ?? 0;
+            const responseQuestionIndex = activeResponseQuestionIndex;
+            const responseHadFunctionCall = pendingFunctionCalls.length > 0;
             responseInFlight = false;
             const queuedResponse = takeQueuedAssistantResponse();
 
@@ -1881,16 +1945,13 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               if (capturedModelText) {
                 log.info(`TTS done (${responseTtsBytes}B sent): ${JSON.stringify(capturedModelText)}`);
                 pushHistory("assistant", capturedModelText);
+                recordRecruitmentFollowUp(
+                  responseQuestionIndex,
+                  capturedModelText,
+                  responseHadFunctionCall,
+                );
                 if (isQuestionLike(capturedModelText)) {
                   lastAssistantQuestionAt = Date.now();
-                }
-                if (
-                  finalVerificationRequested
-                  && currentQuestionIndex === 7
-                  && isQuestionLike(capturedModelText)
-                ) {
-                  finalVerificationAsked = true;
-                  log.info("Final recruitment verification question asked");
                 }
               }
               send({ type: "tts_ended" });
@@ -2195,23 +2256,12 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   function requestTransition(
     targetIdx: number,
     directionLabel: string,
-    reason: "button" | "user_request" = "button",
+    reason: "button" | "user_request" | "answer_complete" = "button",
     requestId?: string,
   ) {
     if (isTransitioning) {
       if (requestId) {
         rejectManualAdvance("transition_in_progress", requestId);
-      }
-      return false;
-    }
-    if (needsFinalVerification(targetIdx)) {
-      if (!finalVerificationRequested) {
-        finalVerificationRequested = true;
-        sendQuestionPrompt(finalVerificationPrompt());
-        log.info("Blocked manual Q8 transition until final verification is answered");
-      }
-      if (requestId) {
-        rejectManualAdvance("verification_required", requestId);
       }
       return false;
     }
@@ -2238,12 +2288,15 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
         if (!interviewDone) {
           interviewDone = true;
           pendingInterviewComplete = true;
-          log.info("Interview ending (button) — waiting for farewell");
+          log.info(`Interview ending (${reason}) — waiting for farewell`);
           interviewCompleteTimer = setTimeout(() => {
             if (pendingInterviewComplete) {
               markInterviewComplete("timeout fallback");
             }
           }, 15_000);
+          sendQuestionPrompt(
+            "[SYSTEM] All scored questions are complete. Give one brief, warm farewell now. Do not ask another question.",
+          );
         }
         return;
       }
@@ -2266,7 +2319,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
 
       const prompt = reason === "user_request"
         ? `[SYSTEM] The participant explicitly asked to go ${directionLabel.toLowerCase()}. We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly acknowledge the transition and introduce this question now.`
-        : `[SYSTEM] The participant clicked "${directionLabel}". We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly introduce this question now.`;
+        : reason === "answer_complete"
+          ? `[SYSTEM] The answer is complete and the server-side verification budget requires a transition. We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly acknowledge the previous answer, then ask this question. Do not add another follow-up.`
+          : `[SYSTEM] The participant clicked "${directionLabel}". We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly introduce this question now.`;
       sendQuestionPrompt(prompt);
     }, 500);
     return true;
@@ -2299,7 +2354,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   }
 
   async function transitionToNextWhenReady(
-    reason: "button" | "user_request" = "button",
+    reason: "button" | "user_request" | "answer_complete" = "button",
     requestId?: string,
   ) {
     if (interviewDone || isTransitioning) return;
@@ -2321,6 +2376,11 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     if (isProgressiveOpeningOnly(sortedQuestions)) {
       pendingProgressiveTransition = reason;
       send({
+        type: "next_question_not_ready",
+        questionIndex: currentQuestionIndex,
+        totalQuestions: sortedQuestions.length,
+      });
+      send({
         type: "transition_cancelled",
         direction: "next",
         questionIndex: currentQuestionIndex,
@@ -2328,7 +2388,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
         requestId,
       });
       sendQuestionPrompt(
-        "[SYSTEM] The remaining structured questions are still being prepared. Do not end the interview. Ask the participant to add one concrete, verifiable result while preparation continues.",
+        "[SYSTEM] Say exactly this meaning, without asking any question: Sorry, the next personalized question is not ready yet. This is a system issue and I will keep retrying automatically. This wait is not an additional interview question.",
       );
       return;
     }
@@ -2509,7 +2569,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               content: [{ type: "input_text", text }],
             },
           }));
-          requestAssistantResponse("text input");
+          requestRecruitmentResponseOrAdvance("text input", text);
         }
       } else if (msg.type === "code_update") {
         const content = (msg.content as string) || "";

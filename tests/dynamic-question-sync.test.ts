@@ -20,9 +20,26 @@ const openingWithFallback = [
   { text: "条件式岗位过渡题", order: 1, description: "oprun_dimension:job_duty_primary" },
 ];
 
+const evidenceOpening = {
+  text: "计分自我介绍",
+  order: 0,
+  description: "oprun_dimension:core_experience",
+};
+
+const evidenceOpeningWithFallback = [
+  evidenceOpening,
+  {
+    text: "候选人专属项目所有权题",
+    order: 1,
+    description: "oprun_dimension:project_ownership",
+  },
+];
+
 test("recognizes Q1 plus the optional fallback Q2 as incomplete", () => {
   assert.equal(isProgressiveOpeningOnly([opening]), true);
   assert.equal(isProgressiveOpeningOnly(openingWithFallback), true);
+  assert.equal(isProgressiveOpeningOnly([evidenceOpening]), true);
+  assert.equal(isProgressiveOpeningOnly(evidenceOpeningWithFallback), true);
   assert.equal(
     isProgressiveOpeningOnly([{ text: "独立单题", order: 0, description: null }]),
     false,
@@ -45,11 +62,14 @@ test("advances from Q1 to an available fallback Q2 without waiting", () => {
   assert.equal(shouldWaitForQuestionExpansion([opening], 0), true);
   assert.equal(shouldWaitForQuestionExpansion(openingWithFallback, 0), false);
   assert.equal(shouldWaitForQuestionExpansion(openingWithFallback, 1), true);
+  assert.equal(shouldWaitForQuestionExpansion(evidenceOpeningWithFallback, 0), false);
+  assert.equal(shouldWaitForQuestionExpansion(evidenceOpeningWithFallback, 1), true);
 });
 
 test("never exposes a progressive seed as the candidate-facing total", () => {
   assert.equal(candidateFacingQuestionCount([opening]), 8);
   assert.equal(candidateFacingQuestionCount(openingWithFallback), 8);
+  assert.equal(candidateFacingQuestionCount(evidenceOpeningWithFallback), 8);
   assert.equal(
     candidateFacingQuestionCount([
       { text: "普通题一", order: 0, description: null },

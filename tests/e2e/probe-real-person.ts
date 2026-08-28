@@ -171,7 +171,7 @@ async function lastAiText(page: Page): Promise<string> {
   await page.locator('[role="checkbox"]').click();
   await page.locator('button:has-text("开始面试")').click();
   await page.waitForFunction(
-    () => document.body.innerText.includes("第 1 / 9 题"),
+    () => document.body.innerText.includes("第 1 / 8 题"),
     undefined,
     { timeout: 120_000 },
   );
@@ -180,8 +180,10 @@ async function lastAiText(page: Page): Promise<string> {
   for (let q = 0; q < 9; q++) {
     // 等本题出现(切题后)
     await page.waitForFunction(
-      (n) => document.body.innerText.includes(`第 ${n} / 9 题`),
-      q + 1,
+      ({ n, closing }) => closing
+        ? document.body.innerText.includes("交流环节（不计分）")
+        : document.body.innerText.includes(`第 ${n} / 8 题`),
+      { n: q + 1, closing: q === 8 },
       { timeout: 120_000 },
     );
     await page.waitForTimeout(2500);
@@ -237,7 +239,7 @@ async function lastAiText(page: Page): Promise<string> {
       await page.screenshot({ path: `screenshots/sim-q${q + 1}.png` });
     } else {
       // 最后一题:CTA 按设计不出现,等静默确认→告别→完成页(约 45s+20s+收尾)
-      log("第 9 题答完,等待自然收尾(静默确认→告别→完成页)…");
+      log("交流环节答完,等待自然收尾(静默确认→告别→完成页)…");
       await page.waitForFunction(
         () => document.body.innerText.includes("测试已完成"),
         undefined,
@@ -251,7 +253,7 @@ async function lastAiText(page: Page): Promise<string> {
     }
   }
 
-  log("\n第 9 题作答完毕,等待收尾…");
+  log("\n交流环节作答完毕,等待收尾…");
   try {
     await page.waitForFunction(
       () => document.body.innerText.includes("测试已完成"),

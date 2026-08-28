@@ -466,6 +466,7 @@ export function VoiceInterface({
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
   const isMobile = useIsMobile();
+  const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(interviewTitle);
 
   const [messages, setMessages] = useState<Message[]>(
     () =>
@@ -799,10 +800,15 @@ export function VoiceInterface({
 
   // ── Countdown timer (starts when voice connects) ────────────────
   useEffect(() => {
+    if (isOprunRecruitmentInterview) {
+      setRemainingSeconds(null);
+      timerStartedRef.current = false;
+      return;
+    }
     if (!voice.isConnected || timerStartedRef.current || !durationMinutes) return;
     timerStartedRef.current = true;
     setRemainingSeconds(durationMinutes * 60);
-  }, [voice.isConnected, durationMinutes]);
+  }, [voice.isConnected, durationMinutes, isOprunRecruitmentInterview]);
 
   useEffect(() => {
     if (remainingSeconds === null || remainingSeconds <= 0) return;
@@ -1386,10 +1392,10 @@ export function VoiceInterface({
 
   // ── Auto-end when timer expires ──────────────────────────────────
   useEffect(() => {
-    if (remainingSeconds !== 0 || timerExpiredRef.current) return;
+    if (isOprunRecruitmentInterview || remainingSeconds !== 0 || timerExpiredRef.current) return;
     timerExpiredRef.current = true;
     handleEndInterviewRef.current();
-  }, [remainingSeconds]);
+  }, [remainingSeconds, isOprunRecruitmentInterview]);
 
   // ── Scroll transcript to bottom ─────────────────────────────────
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -1414,7 +1420,7 @@ export function VoiceInterface({
   }, [voice]);
 
   // ── Derived state ───────────────────────────────────────────────
-  const isRecruitmentQuestionSet = /^数君招聘\s*·\s*/.test(interviewTitle);
+  const isRecruitmentQuestionSet = isOprunRecruitmentInterview;
   const isCandidateClosing =
     isRecruitmentQuestionSet &&
     voice.currentQuestionIndex >= OPRUN_PLANNED_MAIN_QUESTION_COUNT;
@@ -1450,13 +1456,10 @@ export function VoiceInterface({
     const s = totalSec % 60;
     return `${m}:${s.toString().padStart(2, "0")}`;
   };
-  // 王总 2026-08-21:对候选人显示 25 分钟减轻压力,真实预算(32 分钟硬限)不变,
-  // 倒计时/已用时按 25 分钟口径展示,多出的时间是隐性缓冲,绝口不提。
-  const targetDurationMinutes = durationMinutes === 32 ? 25 : durationMinutes;
-  const hiddenBufferSeconds = Math.max(
-    0,
-    Math.round(((durationMinutes || 0) - targetDurationMinutes) * 60),
-  );
+  // Recruitment receives no hard duration. Other interview types may still
+  // display the configured provider limit without a hidden alternate cutoff.
+  const targetDurationMinutes = isOprunRecruitmentInterview ? undefined : durationMinutes;
+  const hiddenBufferSeconds = 0;
   const displayedRemainingSeconds =
     remainingSeconds === null
       ? null
@@ -1467,10 +1470,9 @@ export function VoiceInterface({
   const isTimeWarning =
     displayedRemainingSeconds !== null && displayedRemainingSeconds <= 5 * 60 && !isTimeCritical;
   const elapsedSeconds =
-    displayedRemainingSeconds !== null && durationMinutes
+    displayedRemainingSeconds !== null && targetDurationMinutes !== undefined
       ? Math.max(0, targetDurationMinutes * 60 - displayedRemainingSeconds)
       : 0;
-  const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(interviewTitle);
   const conciseInterviewTitle = interviewTitle.replace(/^数君招聘\s*·\s*/, "");
   // 占位符标题(分岗等待超时的兜底)不当作岗位名展示
   const placeholderInterviewTitle =
@@ -1480,7 +1482,7 @@ export function VoiceInterface({
       ? "OpRun AI 面试"
       : `OpRun AI 面试 · ${conciseInterviewTitle}`
     : conciseInterviewTitle;
-  const durationDescription = durationMinutes
+  const durationDescription = targetDurationMinutes
     ? `全程约 ${targetDurationMinutes} 分钟`
     : null;
   const interviewActivityLabel = preview
@@ -1776,7 +1778,7 @@ export function VoiceInterface({
 
         <div className="space-y-3 px-3 py-3 md:px-6 md:py-4">
           <div className="grid gap-4 xl:grid-cols-[minmax(220px,0.58fr)_minmax(0,1.42fr)] xl:items-stretch">
-            {remainingSeconds !== null && (
+            {displayedRemainingSeconds !== null && (
               <div className={`rounded-2xl border bg-card px-4 py-3 md:px-5 md:py-4 ${isTimeCritical ? "border-destructive/40" : isTimeWarning ? "border-amber-500/40" : "border-border"}`}>
                 <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground md:text-sm">
                   <Clock className="h-4 w-4" />

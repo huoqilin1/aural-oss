@@ -116,7 +116,12 @@ const voiceSaveOps: VoiceSaveOps = {
  * and fire-and-forget an AI summary/analysis so the interviewee isn't blocked.
  */
 export async function POST(req: Request) {
-  const payload = (await req.json()) as VoiceSavePayload;
+  let payload: VoiceSavePayload;
+  try {
+    payload = (await req.json()) as VoiceSavePayload;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
   const result = await handleVoiceSave(payload, voiceSaveOps);
   return NextResponse.json(result.body, { status: result.status });
 }

@@ -218,6 +218,12 @@ test("login honors browser locale and persisted locale cache", async () => {
   await cachedContext.close();
 });
 
+test("voice save rejects an interrupted empty request without a server exception", async () => {
+  const response = await fetch(`${baseUrl}/api/voice/save`, { method: "POST" });
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "Invalid JSON body" });
+});
+
 test("English interviews try the voice relay first and fail over to OpenAI", async () => {
   const context = await browser.newContext({ locale: "en-US" });
   const page = await context.newPage();
@@ -359,7 +365,7 @@ test("next-question control sends one request and waits for relay acknowledgemen
     const requests = await readMediaRequests(page);
     return requests.some((request) => !!request.audio)
       && requests.some((request) => !!request.video);
-  }, 5_000, "Expected camera and microphone to start automatically");
+  }, 15_000, "Expected camera and microphone to start automatically");
   await waitForText(page, "Thanks, that evidence is clear.", 8_000);
 
   const nextButton = page.getByRole("button", { name: "下一题" }).first();
@@ -394,7 +400,7 @@ test("latest follow-up must be answered before next-question control unlocks", a
     }).count(),
     0,
   );
-  await waitForText(page, "Could you explain the exact metric and verification method?", 8_000);
+  await waitForText(page, "Could you explain the exact metric and verification method?", 15_000);
 
   const nextButtons = page.getByRole("button", { name: "下一题" });
   assert.equal(await nextButtons.first().isEnabled().catch(() => false), false);

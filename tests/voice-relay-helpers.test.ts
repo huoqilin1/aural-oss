@@ -6,6 +6,7 @@ import {
     evaluateTranscriptManualAdvance,
     finalizeTurnBudgetResponse,
     isAsrRollingRevision,
+    isRecruitmentConversationControl,
     isUserEndRequest,
     isUserSkipRequest,
     mergeAsrSegments,
@@ -15,6 +16,27 @@ import {
     shouldSuppressAnsweredAsrFinal,
     trimCrossTurnOverlap,
 } from "../server/voice-relay-helpers";
+
+test("recruitment greetings and audio checks do not count as scored answers", () => {
+  for (const text of [
+    "你好",
+    "能听到我说话吗？",
+    "刚才没听清，请再说一遍",
+    "Hello",
+    "Can you hear me?",
+    "Please repeat that.",
+  ]) {
+    assert.equal(isRecruitmentConversationControl(text), true, text);
+  }
+
+  for (const text of [
+    "你好，我叫小王，有五年后端开发经验，负责过支付系统。",
+    "我负责知识库项目的接口设计和上线交付。",
+    "My name is Alex and I have five years of experience building data platforms.",
+  ]) {
+    assert.equal(isRecruitmentConversationControl(text), false, text);
+  }
+});
 
 test("primary relay manual advance waits for the latest recruitment follow-up answer", () => {
   const ready = {

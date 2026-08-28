@@ -47,6 +47,7 @@ npm --prefix "$SOURCE" ci --no-audit --no-fund --registry=https://registry.npmmi
 # present, three tests take provider-specific paths and fail. The suite
 # passing clean here is the release gate.
 (cd "$SOURCE" && npm run test:web)
+(cd "$SOURCE" && npm run test:functional)
 
 # Build-time env is fetched from the server: NEXT_PUBLIC_* values are inlined
 # into client bundles by design; the remaining server-only values are needed

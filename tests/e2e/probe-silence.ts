@@ -18,7 +18,7 @@ import { applyAndWaitForInvite } from "./helpers/apply";
   await page.locator('[role="checkbox"]').click();
   await page.locator('button:has-text("开始面试")').click();
   await page.waitForFunction(
-    () => document.body.innerText.includes("第 1 / 9 题"),
+    () => document.body.innerText.includes("第 1 / 8 题"),
     undefined,
     { timeout: 120_000 },
   );
@@ -30,7 +30,7 @@ import { applyAndWaitForInvite } from "./helpers/apply";
   );
   console.log("T+" + Math.round((Date.now() - t0) / 1000) + "s ✅ 小君开口询问是否答完");
   await page.waitForFunction(
-    () => document.body.innerText.includes("第 2 / 9 题"),
+    () => document.body.innerText.includes("第 2 / 8 题"),
     undefined,
     { timeout: 60_000 },
   );

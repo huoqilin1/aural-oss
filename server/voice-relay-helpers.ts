@@ -126,6 +126,30 @@ export function isUserSkipRequest(text: string): boolean {
   return USER_SKIP_PATTERNS.some((pattern) => pattern.test(text));
 }
 
+/**
+ * Short greetings, audio checks, and requests to repeat are conversation
+ * controls, not answers to the scored recruitment question. Keep this pure so
+ * both voice relays enforce the same human-like behavior.
+ */
+export function isRecruitmentConversationControl(text: string): boolean {
+  const normalized = text.trim().replace(/\s+/g, " ");
+  if (!normalized || normalized.length > 80) return false;
+
+  const answerSignals = [
+    /(?:我叫|我是).{1,12}(?:，|,|。|\s).*(?:经验|负责|从事|项目|岗位|工作|毕业)/,
+    /(?:经验|负责|从事|项目|交付|开发|运营|销售|实施|设计|优化|搭建|管理|成果|结果)/,
+    /\b(?:my name is|years? of experience|worked|responsible for|built|led|project|delivered)\b/i,
+  ];
+  if (answerSignals.some((pattern) => pattern.test(normalized))) return false;
+
+  const controlSignals = [
+    /^(?:你好|您好|喂|哈[喽啰罗]|hello|hi|hey)[！!。,.，\s]*$/i,
+    /(?:听得到|能听到|听得见|能听见|声音正常|声音清楚|麦克风正常|can you hear me|do you hear me|is my (?:audio|microphone|mic) working)/i,
+    /(?:请|麻烦)?(?:再说|重复)(?:一遍|一下)?|(?:没|没有|未)(?:听清|听到)|听不清|刚才.{0,8}(?:没听清|没听到)|(?:please )?(?:repeat|say that again)|(?:didn't|did not|couldn't|could not) hear/i,
+  ];
+  return controlSignals.some((pattern) => pattern.test(normalized));
+}
+
 export function responseInvitesUserReply(text: string, isZh: boolean): boolean {
   const normalized = text.trim();
   if (!normalized) return false;

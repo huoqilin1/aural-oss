@@ -26,6 +26,26 @@ const intervieweeOnboarding = readFileSync(
   "src/components/session/interviewee-onboarding.tsx",
   "utf8",
 );
+const recruitmentContract = readFileSync(
+  "docs/OPRUN_RECRUITMENT_INTERVIEW_CONTRACT.md",
+  "utf8",
+);
+const agentsContract = readFileSync("AGENTS.md", "utf8");
+const releaseBuilder = readFileSync("deploy/build-release-wsl.sh", "utf8");
+const releaseRunner = readFileSync("deploy/release.core.ps1", "utf8");
+const releaseApply = readFileSync("deploy/production/apply-release.sh", "utf8");
+const versionRoute = readFileSync("src/app/api/version/route.ts", "utf8");
+const healthRoute = readFileSync("src/app/api/health/route.ts", "utf8");
+const readyRoute = readFileSync("src/app/api/ready/route.ts", "utf8");
+
+test("frozen recruitment contract requires item-specific manual approval", () => {
+  assert.match(agentsContract, /Q1 计分自我介绍、确定性的简历与岗位双锚定 Q2 和有效邀请就绪后必须立即开放面试/);
+  assert.match(agentsContract, /单独手动批准/);
+  assert.match(recruitmentContract, /不等待 Q3-Q8/);
+  assert.match(recruitmentContract, /全场最多 3 次/);
+  assert.match(recruitmentContract, /不设置候选人活跃回答时的/);
+  assert.match(recruitmentContract, /5 -> 10 -> 20/);
+});
 
 test("OpRun recruitment generator preserves eight distinct dimensions", () => {
   for (const dimension of [
@@ -46,7 +66,7 @@ test("OpRun recruitment generator preserves eight distinct dimensions", () => {
   assert.match(generationRoute, /AI 一面（结构化岗位面试）/);
 });
 
-test("evidence v11 generator uses the scored self-intro and seven evidence dimensions", () => {
+test("evidence v12 generator uses the scored self-intro and seven evidence dimensions", () => {
   for (const dimension of [
     "core_experience",
     "project_ownership",
@@ -59,7 +79,7 @@ test("evidence v11 generator uses the scored self-intro and seven evidence dimen
   ]) {
     assert.match(generationRoute, new RegExp(`key: "${dimension}"`));
   }
-  assert.match(generationRoute, /scored8-inline3-dynamic1-work-sample/);
+  assert.match(generationRoute, /scored8-inline2-dynamic1-work-sample/);
   assert.match(generationRoute, /questionSetVersion/);
   assert.match(generationRoute, /questionSpecVersion/);
   assert.match(generationRoute, /const contractVersion = questionSpecVersion \|\| questionSetVersion/);
@@ -103,7 +123,8 @@ test("both voice relays refresh questions during an active candidate session", (
   assert.match(relay, /const waitUntil = Date\.now\(\) \+ 10_000/);
   assert.match(relay, /shouldWaitForQuestionExpansion\(sortedQuestions, currentQuestionIndex\)/);
   assert.match(relay, /while \(isProgressiveOpeningOnly\(sortedQuestions\)/);
-  assert.match(openAiRelay, /do not end the interview/);
+  assert.match(openAiRelay, /next_question_not_ready/);
+  assert.match(openAiRelay, /This wait is not an additional interview question/);
   assert.match(openAiRelay, /pendingProgressiveTransition/);
   assert.match(
     openAiRelay,
@@ -133,20 +154,36 @@ test("invited candidates resume the persisted question and transcript", () => {
 
 test("OpRun recruitment relay caps follow-ups across the entire interview", () => {
   assert.match(relay, /GLOBAL_FOLLOW_UP_LIMIT = 15/);
-  assert.match(relay, /OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT = 4/);
-  assert.match(relay, /RECRUITMENT_INLINE_FOLLOW_UP_LIMIT = 3/);
+  assert.match(relay, /OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT = 3/);
+  assert.match(relay, /RECRUITMENT_INLINE_FOLLOW_UP_LIMIT = 2/);
   assert.match(relay, /RECRUITMENT_FINAL_FOLLOW_UP_LIMIT = 1/);
   assert.match(relay, /currentQuestionIndex >= 1/);
   assert.match(relay, /currentQuestionIndex <= 6/);
   assert.match(relay, /currentQuestionIndex === 7/);
   assert.match(relay, /objective: ctx\.objective/);
   assert.match(openAiRelay, /ctx\.title\.includes\("数君招聘"\)/);
-  assert.match(openAiRelay, /Q2-Q7 allow at most one follow-up each and at most three combined/);
+  assert.match(openAiRelay, /Q2-Q7 allow at most one follow-up each and at most two combined/);
   assert.match(openAiRelay, /Q8 allows one final follow-up only/);
-  assert.match(openAiRelay, /3次就地核验\+1次最终核验/);
-  assert.match(openAiRelay, /needsFinalVerification/);
-  assert.match(openAiRelay, /Blocked transition after Q8 until final verification is answered/);
-  assert.match(openAiRelay, /ask exactly ONE final verification question/);
+  assert.match(openAiRelay, /2次就地核验\+1次最终核验/);
+  assert.match(openAiRelay, /recruitmentInlineFollowUpsUsed/);
+  assert.match(openAiRelay, /recruitmentFinalFollowUpsUsed/);
+  assert.match(openAiRelay, /recruitmentFollowUpsByQuestion/);
+  assert.match(openAiRelay, /recruitmentMustAdvanceAfterAnswer/);
+  assert.match(openAiRelay, /answer_complete/);
+  assert.match(relay, /不是必问的最终动态核验机会/);
+  assert.doesNotMatch(relay, /必须执行的最终动态核验/);
+  assert.doesNotMatch(relay, /请再补充一个最能体现你能力的具体结果/);
+  assert.doesNotMatch(openAiRelay, /needsFinalVerification/);
+  assert.doesNotMatch(openAiRelay, /Blocked transition after Q8/);
+});
+
+test("greetings and audio clarifications never skip a scored question", () => {
+  for (const source of [relay, openAiRelay]) {
+    assert.match(source, /isRecruitmentConversationControl/);
+    assert.match(source, /recruitment conversation control|不计入追问预算/);
+  }
+  assert.match(relay, /!isRecruitmentConversationControl\(userText\)/);
+  assert.match(openAiRelay, /!isRecruitmentConversationControl\(text\)/);
 });
 
 test("session export preserves durable question identity for HR reconciliation", () => {
@@ -183,13 +220,26 @@ test("manual next-question transitions are acknowledged or rejected by the relay
   assert.match(voiceHook, /transitionRejectionCount/);
 });
 
-test("candidate interface keeps the full question and hybrid timing visible", () => {
+test("candidate interface keeps the full question and honest human pacing visible", () => {
   assert.match(voiceInterface, /本题已用/);
   assert.match(voiceInterface, /剩余时间/);
-  // 展示口径 25 分钟(真实 32 硬限隐藏),倒计时按展示口径走(王总 2026-08-21)
   assert.match(voiceInterface, /formatTime\(displayedRemainingSeconds\)/);
-  assert.match(voiceInterface, /displayShowsWrapUp \? "请收尾"/);
-  assert.match(voiceInterface, /targetDurationMinutes = durationMinutes === 32 \? 25/);
+  assert.doesNotMatch(voiceInterface, /durationMinutes === 32/);
+  assert.match(
+    voiceInterface,
+    /if \(isOprunRecruitmentInterview\) \{\s*setRemainingSeconds\(null\)/,
+  );
+  assert.match(
+    voiceInterface,
+    /isOprunRecruitmentInterview \|\| remainingSeconds !== 0/,
+  );
+  assert.match(
+    voiceInterface,
+    /isOprunRecruitmentInterview \? undefined : durationMinutes/,
+  );
+  assert.match(intervieweeOnboarding, /通常约 30 分钟，共 8 道正式计分题/);
+  assert.match(intervieweeOnboarding, /不会因达到目标时间而截断/);
+  assert.doesNotMatch(intervieweeOnboarding, /18~22|最长 25 分钟/);
   assert.match(voiceInterface, /全程约 \$\{targetDurationMinutes\} 分钟/);
   assert.match(voiceInterface, /按你的节奏来/);
   assert.match(voiceInterface, /当前题目 · 始终显示/);
@@ -254,4 +304,24 @@ test("questions stay tactful about employment status", () => {
     /直接问职业选择、岗位理解和未来规划本身/,
   );
   assert.match(relayPrompts, /绝不提候选人的离职状态/);
+});
+
+test("immutable release gate covers functional flow and exact public readiness", () => {
+  assert.match(releaseBuilder, /npm run test:web/);
+  assert.match(releaseBuilder, /npm run test:functional/);
+  assert.match(releaseRunner, /--max-redirs 5/);
+  assert.match(releaseRunner, /api\/version/);
+  assert.match(releaseRunner, /api\/health/);
+  assert.match(releaseRunner, /api\/ready/);
+  assert.match(releaseRunner, /voice_websocket_handshake/);
+  assert.match(releaseRunner, /aural\.service aural-voice\.service && echo "services=ok"/);
+  assert.match(releaseRunner, /fallback_service=missing_or_down/);
+  assert.match(releaseRunner, /\/root\/aural\/env\/\.env\.local 2>\/dev\/null \|\|/);
+  assert.match(releaseRunner, /Remove-Item -LiteralPath \$buildEnvFile -Force/);
+  assert.match(releaseApply, /aural-openai-voice\.service/);
+  assert.match(releaseApply, /http:\/\/127\.0\.0\.1:3000\/api\/ready/);
+  assert.match(versionRoute, /releaseRevision/);
+  assert.match(healthRoute, /status: "ok"/);
+  assert.match(readyRoute, /primary_voice_relay/);
+  assert.match(readyRoute, /fallback_voice_relay/);
 });

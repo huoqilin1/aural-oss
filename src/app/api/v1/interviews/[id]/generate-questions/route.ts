@@ -58,7 +58,9 @@ const EVIDENCE_V11_RECRUIT_DIMENSIONS = [
 ] as const;
 function isEvidenceV11(questionSetVersion: string): boolean {
   return questionSetVersion.includes("v11")
-    || questionSetVersion.includes("scored8-inline3-dynamic1-work-sample");
+    || questionSetVersion.includes("v12")
+    || questionSetVersion.includes("scored8-inline3-dynamic1-work-sample")
+    || questionSetVersion.includes("scored8-inline2-dynamic1-work-sample");
 }
 
 function recruitDimensions(questionSetVersion: string): readonly string[] {
@@ -175,7 +177,7 @@ function buildRecruitPrompt(opts: {
 3. 第2至第8题每题都必须明确引用简历的一个具体锚点和岗位的一个具体要求；简历没有直接证据时，明确说“简历尚未体现该项”，询问迁移准备和现实差距，禁止臆造。
 4. 技术岗位允许并要求核验必要的代码、接口、数据流、配置、日志、指标、架构或验证细节，但不考冷门术语；非技术岗位核验工具、流程、文档、数据口径、交付物和验收方式。
 5. 第5题必须是工作样例，不能只问“做过没有”；题面只保留一个核心任务，运行时再根据证据缺口有限追问。
-6. 八道主问题之外，全场最多3次就地证据核验和1次最终动态核验，因此主问题应清晰、可在2至3分钟内回答。`
+6. 八道主问题之外，全场最多2次就地证据核验和1次可选最终动态核验，因此主问题应清晰、可在2至3分钟内回答。`
     : `完整顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:
    1) communication: 用大约 3 分钟自我介绍，观察信息组织与表达；
    2) job_duty_primary: 核验岗位最核心职责；

@@ -64,7 +64,7 @@ test("normal response prompt defaults to moving on after a direct answer", () =>
 });
 
 test("normal response prompt carries the interview-specific verification objective", () => {
-  const objective = "Q2至Q7最多3次就地核验，Q8最多1次最终动态核验。";
+  const objective = "Q2至Q7最多2次就地核验，Q8最多1次可选最终动态核验。";
   const prompt = PROMPTS.response.normal(basePromptParams({ objective })).zh;
 
   assert.match(prompt, /本场访谈目标与控制规则/);

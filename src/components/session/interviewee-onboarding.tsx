@@ -1218,8 +1218,10 @@ export function IntervieweeOnboarding({
 
               <div className="mt-2 text-sm text-muted-foreground">
                 {isRecruitmentInterview ? "8 道正式计分题" : questionCount > 0 ? `${questionCount} 道题` : "AI 对话式测试"} &middot;{" "}
-                {timeLimitMinutes
-                  ? `${isRecruitmentInterview ? "约 18~22 分钟，最长 25 分钟" : `${timeLimitMinutes} 分钟`}`
+                {isRecruitmentInterview
+                  ? "通常约 30 分钟，共 8 道正式计分题"
+                  : timeLimitMinutes
+                  ? `${timeLimitMinutes} 分钟`
                   : "不限时"}
               </div>
 
@@ -1243,12 +1245,11 @@ export function IntervieweeOnboarding({
                     也可以直接说「我答完了」；如果停顿较久，小君会先问你是否答完，确认后再进入下一题。
                   </li>
                   <li>
-                    全程通常约 {timeLimitMinutes ? `${isRecruitmentInterview ? "18~22" : timeLimitMinutes} 分钟` : "18~22 分钟"}，最长不超过 25 分钟
-                    ，<span className="font-medium text-foreground">不用赶时间</span>，按你的节奏回答；
-                    临近结束时我们会轻声提醒，不会打断你。
+                    全程通常约 30 分钟，<span className="font-medium text-foreground">不用赶时间</span>，按你的节奏回答；
+                    如果回答内容相关，可以自然说完，系统不会因达到目标时间而截断。
                   </li>
                   <li>
-                    AI 会根据回答最多进行 3 次简短证据追问，并在八道题后最多做 1 次最终核验；随后进入可选提问交流环节，交流环节不计分。
+                    AI 会根据回答最多进行 2 次简短证据追问，并在八道题后按需要最多做 1 次最终核验；随后进入可选提问交流环节，交流环节不计分。
                   </li>
                   <li>
                     请在<span className="font-medium text-foreground">安静环境</span>下使用最新版

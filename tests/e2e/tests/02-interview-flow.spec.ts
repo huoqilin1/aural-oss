@@ -37,6 +37,8 @@ test.describe("候选人面试全流程", () => {
     await expect(page.getByText("我已阅读并同意以上面试须知")).toBeVisible();
 
     const startButton = page.getByRole("button", { name: "开始面试" });
+    await expect(startButton).toHaveCount(1);
+    await expect(page.getByText(/摄像头测试|麦克风测试|语音测试|设备检测/)).toHaveCount(0);
     await expect(startButton).toBeDisabled();
     await evidence(page, "01-notice.png");
 
@@ -55,7 +57,7 @@ test.describe("候选人面试全流程", () => {
     await expect(heading).toContainText(`OpRun AI 面试 · ${positionName}`, {
       timeout: 60_000,
     });
-    await expect(page.getByText("第 1 / 9 题").first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText("第 1 / 8 题").first()).toBeVisible({ timeout: 60_000 });
     // 问候语必须说出真实岗位名
     await expect
       .poll(
@@ -103,7 +105,7 @@ test.describe("候选人面试全流程", () => {
     await evidence(page, "04-next-cta.png");
 
     await cta.click();
-    await expect(page.getByText("第 2 / 9 题").first()).toBeVisible({ timeout: 60_000 });
+    await expect(page.getByText("第 2 / 8 题").first()).toBeVisible({ timeout: 60_000 });
     await evidence(page, "05-question-2.png");
   });
 
