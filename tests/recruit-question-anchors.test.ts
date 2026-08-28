@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   questionReferencesRecruitAnchor,
+  recruitAnchorTerms,
+  recruitQuestionFitsRoleType,
   safeRecruitAnchorLines,
   selectRecruitAnchor,
 } from "../src/lib/recruit-question-anchors";
@@ -23,6 +25,29 @@ test("recruit anchors select concrete evidence while excluding contact fields", 
   assert.equal(
     selectRecruitAnchor(resume, ["项目", "负责", "系统", "交付"]),
     "负责订单系统重构，使用 TypeScript 和 PostgreSQL 将接口错误率降低 40%",
+  );
+});
+
+test("anchor cleanup preserves leading experience years and rejects broken fragments", () => {
+  assert.deepEqual(
+    safeRecruitAnchorLines("3年以上招聘经验\n1、负责候选人全流程沟通\n年以上相关经验"),
+    ["3年以上招聘经验", "负责候选人全流程沟通"],
+  );
+});
+
+test("anchor pairing exposes shared concrete terms and protects nontechnical roles", () => {
+  assert.ok(recruitAnchorTerms("负责招聘流程与候选人沟通").includes("招聘"));
+  assert.equal(
+    recruitQuestionFitsRoleType("请给出一页招聘交付方案和验收方式", false),
+    true,
+  );
+  assert.equal(
+    recruitQuestionFitsRoleType("请现场写 SQL 查询并给出数据库表结构", false),
+    false,
+  );
+  assert.equal(
+    recruitQuestionFitsRoleType("请现场写 SQL 查询并给出数据库表结构", true),
+    true,
   );
 });
 

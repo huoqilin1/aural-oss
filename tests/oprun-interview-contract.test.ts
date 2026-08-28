@@ -33,9 +33,18 @@ const recruitmentContract = readFileSync(
   "utf8",
 );
 const agentsContract = readFileSync("AGENTS.md", "utf8");
+const deploymentPolicy = readFileSync("DEPLOYMENT_POLICY.md", "utf8");
 const releaseBuilder = readFileSync("deploy/build-release-wsl.sh", "utf8");
 const releaseRunner = readFileSync("deploy/release.core.ps1", "utf8");
 const releaseApply = readFileSync("deploy/production/apply-release.sh", "utf8");
+const ciWorkflow = readFileSync(".github/workflows/ci.yml", "utf8");
+const productionE2ePackage = readFileSync("tests/e2e/package.json", "utf8");
+const productionE2eGuard = readFileSync("tests/e2e/guard-production-e2e.mjs", "utf8");
+const productionE2eReadme = readFileSync("tests/e2e/README.md", "utf8");
+const productionE2ePipeline = readFileSync("tests/e2e/tests/01-pipeline.spec.ts", "utf8");
+const productionE2eFlow = readFileSync("tests/e2e/tests/02-interview-flow.spec.ts", "utf8");
+const productionE2eHelper = readFileSync("tests/e2e/helpers/apply.ts", "utf8");
+const productionE2eSimulation = readFileSync("tests/e2e/probe-real-person.ts", "utf8");
 const versionRoute = readFileSync("src/app/api/version/route.ts", "utf8");
 const healthRoute = readFileSync("src/app/api/health/route.ts", "utf8");
 const readyRoute = readFileSync("src/app/api/ready/route.ts", "utf8");
@@ -47,6 +56,45 @@ test("frozen recruitment contract requires item-specific manual approval", () =>
   assert.match(recruitmentContract, /全场最多 3 次/);
   assert.match(recruitmentContract, /不设置候选人活跃回答时的/);
   assert.match(recruitmentContract, /5 -> 10 -> 20/);
+});
+
+test("release truth distinguishes local, deployed, and production acceptance", () => {
+  assert.match(agentsContract, /重复做三遍静态或正则检查不算三层验收/);
+  assert.match(agentsContract, /任何线上失败都必须\s*重新打开任务/);
+  assert.match(deploymentPolicy, /同一种检查重复多次不得冒充不同层级/);
+  assert.match(deploymentPolicy, /已部署，尚未完成生产验收/);
+  assert.match(deploymentPolicy, /代码、配置、制品或部署 SHA 变化后/);
+  assert.match(recruitmentContract, /重复三遍源码\/正则检查不能替代行为和生产证据/);
+  assert.match(recruitmentContract, /已部署，生产真人验收未完成/);
+  assert.match(recruitmentContract, /任何生产\s*失败都必须重新打开任务/);
+});
+
+test("release gates execute browser behavior and production E2E fails closed", () => {
+  assert.match(releaseBuilder, /npx playwright install chromium/);
+  assert.match(releaseBuilder, /npm run test:functional/);
+  assert.match(ciWorkflow, /npm run test:functional/);
+  assert.match(ciWorkflow, /npm run lint:ratchet/);
+  assert.match(ciWorkflow, /npm run typecheck:ratchet/);
+  assert.match(ciWorkflow, /npm run build/);
+  assert.match(releaseBuilder, /npm run typecheck:ratchet/);
+  assert.match(releaseBuilder, /npm run lint:ratchet/);
+  assert.match(productionE2ePackage, /guard-production-e2e\.mjs/);
+  assert.match(productionE2ePackage, /tsx probe-real-person\.ts/);
+  assert.match(productionE2eGuard, /PRODUCTION_E2E_APPROVED/);
+  assert.match(productionE2eGuard, /PRODUCTION_RESUME_APPROVED/);
+  assert.match(productionE2eGuard, /PRODUCTION_RESUME_TEXT_SHA256/);
+  assert.match(productionE2eGuard, /PRODUCTION_POSITION_ID/);
+  assert.match(productionE2eHelper, /actualHash !== approvedHash\.toLowerCase\(\)/);
+  assert.match(productionE2eHelper, /获批岗位 ID/);
+  assert.match(productionE2eHelper, /raw\.runId !== runId/);
+  assert.match(productionE2eSimulation, /for \(let q = 0; q < 8; q\+\+\)/);
+  assert.match(productionE2eSimulation, /while \(questions\.length <= q/);
+  assert.match(productionE2eSimulation, /最终题目数量必须恰好为 8/);
+  assert.match(productionE2eReadme, /恰好 8 道计分题/);
+  assert.match(productionE2ePipeline, /\.toBe\(8\)/);
+  assert.match(productionE2eFlow, /八题未完成时结束请求必须被拒绝/);
+  assert.doesNotMatch(productionE2eReadme, /8 道计分题\+1 个不计分/);
+  assert.doesNotMatch(productionE2ePipeline, /toBeGreaterThanOrEqual\(9\)/);
 });
 
 test("OpRun recruitment generator preserves eight distinct dimensions", () => {
@@ -88,7 +136,7 @@ test("evidence v12 generator uses the scored self-intro and seven evidence dimen
   assert.match(generationRoute, /第2至第8题每题都必须明确引用简历/);
   assert.match(generationRoute, /第5题必须是工作样例/);
   assert.match(generationRoute, /技术岗位允许并要求核验必要的代码、接口、数据流/);
-  assert.match(generationRoute, /selectRecruitAnchor\(resumeText/);
+  assert.match(generationRoute, /selectRecruitAnchor\(\s*resumeText/);
   assert.match(generationRoute, /questionReferencesRecruitAnchor\(generatedText, selectedAnchors\.resume\)/);
   assert.match(generationRoute, /questionReferencesRecruitAnchor\(generatedText, selectedAnchors\.job\)/);
   assert.match(generationRoute, /const isTechnicalRole = roleType === "technical"/);
@@ -224,6 +272,7 @@ test("manual next-question transitions are acknowledged or rejected by the relay
 
 test("candidate interface keeps the full question and honest human pacing visible", () => {
   assert.match(voiceInterface, /本题已用/);
+  assert.match(voiceInterface, /sessionElapsedSeconds/);
   assert.match(voiceInterface, /剩余时间/);
   assert.match(voiceInterface, /formatTime\(displayedRemainingSeconds\)/);
   assert.doesNotMatch(voiceInterface, /durationMinutes === 32/);
@@ -254,6 +303,25 @@ test("candidate interface keeps the full question and honest human pacing visibl
     voiceInterface,
     /currentQuestionText[\s\S]{0,200}line-clamp-1/,
   );
+});
+
+test("recruitment silence never advances or reports a false completion", () => {
+  assert.match(relay, /正式计分题两次提醒后仍无回应,标记面试未完成,绝不跳题/);
+  assert.match(relay, /type: "interview_incomplete"/);
+  assert.match(relay, /currentQuestionIndex < 8/);
+  assert.match(relay, /hasSubstantiveRecruitmentAnswer/);
+  assert.match(voiceInterface, /!isOprunRecruitmentInterview[\s\S]{0,120}&& onFinalQuestion/);
+  const voiceHook = readFileSync("src/hooks/use-voice.ts", "utf8");
+  assert.match(voiceHook, /case "interview_incomplete"/);
+  assert.match(openAiRelay, /recruitmentAnswersByQuestion\.get\(currentQuestionIndex\)/);
+  assert.match(openAiRelay, /Do not call this question nine/);
+  assert.doesNotMatch(openAiRelay, /如需跳过，可以直接说/);
+});
+
+test("candidate cannot manually complete recruitment before eight scored answers", () => {
+  assert.match(voiceInterface, /voice\.totalQuestions !== OPRUN_PLANNED_MAIN_QUESTION_COUNT/);
+  assert.match(voiceInterface, /voice\.currentQuestionIndex < OPRUN_PLANNED_MAIN_QUESTION_COUNT - 1/);
+  assert.match(voiceInterface, /八道计分题尚未完整完成，请继续完成当前面试/);
 });
 
 test("invited recruitment candidates see the interview notice before entering", () => {
@@ -342,18 +410,22 @@ test("immutable release gate covers functional flow and exact public readiness",
 });
 
 test("OpenAI fallback readiness is required only when credentials are configured", () => {
-  assert.equal(isOpenAiFallbackConfigured({}), false);
+  const testEnv = (values: Record<string, string> = {}): NodeJS.ProcessEnv => ({
+    NODE_ENV: "test",
+    ...values,
+  });
+  assert.equal(isOpenAiFallbackConfigured(testEnv()), false);
   assert.equal(
-    isOpenAiFallbackConfigured({
+    isOpenAiFallbackConfigured(testEnv({
       AZURE_OPENAI_ENDPOINT: "https://example.openai.azure.com",
-    }),
+    })),
     false,
   );
   assert.equal(
-    isOpenAiFallbackConfigured({
+    isOpenAiFallbackConfigured(testEnv({
       AZURE_OPENAI_ENDPOINT: "https://example.openai.azure.com",
       AZURE_OPENAI_API_KEY: "configured",
-    }),
+    })),
     true,
   );
 });

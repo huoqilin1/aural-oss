@@ -150,6 +150,25 @@ export function isRecruitmentConversationControl(text: string): boolean {
   return controlSignals.some((pattern) => pattern.test(normalized));
 }
 
+/**
+ * Q4 is the scored result-authenticity question. If a candidate gives a
+ * numeric claim but explicitly cannot supply its population, source, or
+ * independent verification, use the scarce follow-up on that single gap.
+ */
+export function recruitmentMetricEvidenceFollowUp(
+  questionIndex: number,
+  answer: string,
+  isZh: boolean,
+): string | null {
+  if (questionIndex !== 3) return null;
+  const hasMetric = /(?:\d+(?:\.\d+)?\s*%|百分之\s*[一二三四五六七八九十百\d]+|\d+(?:\.\d+)?\s*(?:倍|条|人|次|万元|元|天|小时))/i.test(answer);
+  const hasEvidenceGap = /(?:无法|不能|没有|未保留|拿不出|不清楚|记不清|估算|大概|不是.{0,8}(?:独立|第三方)|no\s+(?:raw|source|sample)|cannot\s+(?:provide|verify)|estimate)/i.test(answer);
+  if (!hasMetric || !hasEvidenceGap) return null;
+  return isZh
+    ? "为了确认这项数据的口径，请只补充它对应的具体时间范围和样本量；如果确实无法确认，也请明确说明这项数据应标为待核实。"
+    : "To verify the metric definition, please give only its exact time window and sample size; if those cannot be confirmed, say clearly that the claim should remain unverified.";
+}
+
 export function responseInvitesUserReply(text: string, isZh: boolean): boolean {
   const normalized = text.trim();
   if (!normalized) return false;

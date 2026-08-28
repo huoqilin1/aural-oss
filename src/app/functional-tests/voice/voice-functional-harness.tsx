@@ -18,7 +18,9 @@ type FunctionalScenarioId =
   | "thinking-after-asr"
   | "thinking-until-response"
   | "advance-idempotency"
-  | "advance-followup-guard";
+  | "advance-followup-guard"
+  | "recruitment-incomplete"
+  | "recruitment-eight-question";
 
 declare global {
   interface Window {
@@ -26,6 +28,7 @@ declare global {
     __functionalRelaySentMessages?: Array<Record<string, unknown>>;
     __functionalMediaRequests?: MediaStreamConstraints[];
     __functionalRelayScenario?: FunctionalScenario;
+    __functionalScenarioId?: FunctionalScenarioId;
     __functionalRelayMockInstalled?: boolean;
   }
 }
@@ -202,9 +205,28 @@ const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
       events: [{ type: "close", delay: 30 }],
     },
   },
+  "recruitment-incomplete": {
+    "/ws/voice": {
+      events: [{ type: "ready", delay: 20 }],
+    },
+    "/ws/openai-voice": {
+      events: [{ type: "close", delay: 30 }],
+    },
+  },
+  "recruitment-eight-question": {
+    "/ws/voice": {
+      events: [{ type: "ready", delay: 20 }],
+    },
+    "/ws/openai-voice": {
+      events: [{ type: "close", delay: 30 }],
+    },
+  },
 };
 
-function installFunctionalRelayMocks(scenario: FunctionalScenario) {
+function installFunctionalRelayMocks(
+  scenario: FunctionalScenario,
+  scenarioId: FunctionalScenarioId,
+) {
   const normalizePath = (pathname: string) => pathname.replace(/\/+$/, "") || "/";
   const relayPaths = new Set(["/ws/voice", "/ws/openai-voice"]);
 
@@ -212,6 +234,7 @@ function installFunctionalRelayMocks(scenario: FunctionalScenario) {
   window.__functionalRelaySentMessages = [];
   window.__functionalMediaRequests = [];
   window.__functionalRelayScenario = scenario;
+  window.__functionalScenarioId = scenarioId;
   window.sessionStorage.setItem("__functionalRelayConnections", "[]");
   window.sessionStorage.setItem("__functionalRelaySentMessages", "[]");
   window.sessionStorage.setItem("__functionalMediaRequests", "[]");
@@ -223,6 +246,9 @@ function installFunctionalRelayMocks(scenario: FunctionalScenario) {
     });
   }
   navigator.mediaDevices.getUserMedia = async (constraints) => {
+    if (!constraints) {
+      throw new TypeError("Functional getUserMedia requires explicit constraints");
+    }
     const requests = [...(window.__functionalMediaRequests ?? []), constraints];
     window.__functionalMediaRequests = requests;
     window.sessionStorage.setItem(
@@ -249,6 +275,7 @@ function installFunctionalRelayMocks(scenario: FunctionalScenario) {
     onerror: ((event?: unknown) => void) | null = null;
     onclose: ((event?: unknown) => void) | null = null;
     private scheduled = false;
+    private currentQuestionIndex = 0;
 
     constructor(url: string | URL) {
       this.url = String(url);
@@ -292,7 +319,47 @@ function installFunctionalRelayMocks(scenario: FunctionalScenario) {
         );
       }
 
+      if (
+        parsed?.type === "text_input"
+        && window.__functionalScenarioId === "recruitment-eight-question"
+      ) {
+        const finalQuestion = this.currentQuestionIndex === 7;
+        setTimeout(() => {
+          this.onmessage?.({
+            data: JSON.stringify({ type: "response_started" }),
+          });
+        }, 20);
+        setTimeout(() => {
+          this.onmessage?.({
+            data: JSON.stringify({
+              type: "tts_text",
+              data: {
+                text: finalQuestion
+                  ? "Understood, we're all set. Thanks for your time today and take care."
+                  : "Thanks, that evidence is clear.",
+              },
+            }),
+          });
+        }, 60);
+        setTimeout(() => {
+          this.onmessage?.({ data: JSON.stringify({ type: "tts_ended" }) });
+        }, 100);
+        if (finalQuestion) {
+          setTimeout(() => {
+            this.onmessage?.({
+              data: JSON.stringify({ type: "interview_complete" }),
+            });
+          }, 140);
+        }
+      }
+
       if (parsed?.type === "next_question") {
+        const recruitmentFlow =
+          window.__functionalScenarioId === "recruitment-eight-question";
+        const nextIndex = recruitmentFlow
+          ? Math.min(this.currentQuestionIndex + 1, 7)
+          : 1;
+        this.currentQuestionIndex = nextIndex;
         setTimeout(() => {
           this.onmessage?.({
             data: JSON.stringify({ type: "transitioning", direction: "next" }),
@@ -302,8 +369,8 @@ function installFunctionalRelayMocks(scenario: FunctionalScenario) {
           this.onmessage?.({
             data: JSON.stringify({
               type: "question_change",
-              questionIndex: 1,
-              totalQuestions: 2,
+              questionIndex: nextIndex,
+              totalQuestions: recruitmentFlow ? 8 : 2,
               requestId: parsed?.requestId,
             }),
           });
@@ -373,8 +440,26 @@ export function VoiceFunctionalHarness({
 }) {
   const [parentCompleted, setParentCompleted] = useState(false);
   const [mocksReady, setMocksReady] = useState(false);
-  const isAdvanceScenario = scenario.startsWith("advance-");
-  const functionalQuestions = isAdvanceScenario
+  const isRecruitmentScenario = scenario.startsWith("recruitment-");
+  const isAdvanceScenario = scenario.startsWith("advance-") || isRecruitmentScenario;
+  const recruitmentQuestions = [
+    "请结合你的真实经历做自我介绍。",
+    "请说明一项与岗位核心职责最相关的经历。",
+    "请说明你本人在该经历中负责的具体部分。",
+    "请拆解一次复杂问题的定位和解决过程。",
+    "请展示一个能够核验能力的工作样例。",
+    "请说明结果数据的口径、时间窗口和验证方法。",
+    "请说明一次协作分歧以及你如何处理。",
+    "请说明求职动机、岗位预期和稳定性。",
+  ].map((text, order) => ({
+    text,
+    type: "OPEN_ENDED",
+    description: "Recruitment functional test prompt",
+    order,
+  }));
+  const functionalQuestions = isRecruitmentScenario
+    ? recruitmentQuestions
+    : isAdvanceScenario
     ? [
         {
           text: "Tell me about a project you are proud of.",
@@ -402,7 +487,10 @@ export function VoiceFunctionalHarness({
     const activeScenario =
       functionalScenarios[scenario as FunctionalScenarioId] ??
       functionalScenarios.default;
-    installFunctionalRelayMocks(activeScenario);
+    installFunctionalRelayMocks(
+      activeScenario,
+      scenario as FunctionalScenarioId,
+    );
     setMocksReady(true);
   }, [scenario]);
 
@@ -438,7 +526,7 @@ export function VoiceFunctionalHarness({
             followUpDepth: "Moderate",
             questions: functionalQuestions,
           }}
-          chatEnabled={false}
+          chatEnabled={isRecruitmentScenario}
           videoMode={isAdvanceScenario}
           autoStart={isAdvanceScenario}
           onComplete={() => setParentCompleted(true)}

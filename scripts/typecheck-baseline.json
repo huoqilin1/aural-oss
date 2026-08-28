@@ -1,0 +1,15 @@
+{
+  "src/app/(dashboard)/answer-bank/page.tsx|TS2339": 10,
+  "src/app/(dashboard)/answer-bank/page.tsx|TS7006": 4,
+  "src/app/(dashboard)/practices/[sessionId]/page.tsx|TS2339": 1,
+  "src/components/prep/practice-session-report.tsx|TS2339": 6,
+  "src/components/prep/practice-session-report.tsx|TS7006": 2,
+  "src/components/prep/voice-delivery-timeline.tsx|TS2305": 1,
+  "src/components/prep/voice-delivery-timeline.tsx|TS2339": 8,
+  "src/components/prep/voice-delivery-timeline.tsx|TS7006": 6,
+  "src/lib/ai/providers/deepseek.ts|TS2339": 5,
+  "src/lib/prep/answer-targets.ts|TS2353": 1,
+  "src/lib/prep/voice-timeline.ts|TS2305": 1,
+  "tests/prep-suggested-answer-cache.test.ts|TS2554": 5,
+  "tests/prep-suggested-answer-cache.test.ts|TS2724": 1
+}

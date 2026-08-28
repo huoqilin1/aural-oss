@@ -109,8 +109,8 @@ export const SPOKEN = {
       ? `今天面试的是你应聘的「${position}」岗位。`
       : "";
     return {
-      zh: `你好，我是${aiName}。${zhPositionLead}面试大约 25 分钟，按你的节奏来。${spokenQuestion}`,
-      en: `Hi, I'm ${aiName}. This will take about 20 to 25 minutes. Let's begin. ${spokenQuestion}`,
+      zh: `你好，我是${aiName}。${zhPositionLead}面试通常约 30 分钟，按你的节奏来；如果你的回答需要更多时间，我会让你完整说完。${spokenQuestion}`,
+      en: `Hi, I'm ${aiName}. This interview usually takes about 30 minutes, and you can finish each answer at your own pace. Let's begin. ${spokenQuestion}`,
     };
   },
 

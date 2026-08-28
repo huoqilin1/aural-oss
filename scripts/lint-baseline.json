@@ -1,0 +1,12 @@
+{
+  "src/app/api/hr-copilot/analyze/route.ts|Error|@typescript-eslint/no-explicit-any": 3,
+  "src/app/api/hr-copilot/positions/route.ts|Error|@typescript-eslint/no-explicit-any": 1,
+  "src/app/api/opc-score/route.ts|Error|@typescript-eslint/no-explicit-any": 1,
+  "src/app/opc/page.tsx|Error|@typescript-eslint/no-explicit-any": 5,
+  "src/app/opc/page.tsx|Error|@typescript-eslint/no-unused-vars": 1,
+  "src/components/session/interviewee-onboarding.tsx|Error|@typescript-eslint/no-unused-vars": 4,
+  "src/components/session/voice-interface.tsx|Error|@typescript-eslint/no-unused-vars": 3,
+  "src/components/session/voice-interface.tsx|Warning|react-hooks/exhaustive-deps": 1,
+  "src/hooks/use-interview-recording.ts|Error|@typescript-eslint/no-unused-vars": 1,
+  "src/hooks/use-voice.ts|Warning|react-hooks/exhaustive-deps": 1
+}

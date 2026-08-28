@@ -35,6 +35,7 @@ import {
     evaluateTranscriptManualAdvance,
     finalizeTurnBudgetResponse,
     isRecruitmentConversationControl,
+    recruitmentMetricEvidenceFollowUp,
     isUserEndRequest,
     isUserSkipRequest,
     mergeAsrSegments,
@@ -665,12 +666,18 @@ function buildGreeting(ctx: InterviewContext): string {
 
 function buildTransitionSayHello(
   questionIndex: number,
-  nextQuestion: { text: string; type: string; options?: { options: string[]; allowMultiple?: boolean } | null },
+  nextQuestion: { text: string; type: string; description?: string | null; options?: { options: string[]; allowMultiple?: boolean } | null },
   isZh: boolean
 ): string {
   const isCodingOrWb = nextQuestion.type === "CODING" || nextQuestion.type === "WHITEBOARD";
   const opts = nextQuestion.options as { options: string[]; allowMultiple?: boolean } | null | undefined;
   const qNum = questionIndex + 1;
+
+  if (nextQuestion.description === "oprun_dimension:candidate_questions") {
+    return isZh
+      ? `好的，八道正式计分题已经完成。接下来进入交流环节。${nextQuestion.text}`
+      : `Thank you. The eight scored questions are complete. We will now move to the candidate Q&A. ${nextQuestion.text}`;
+  }
 
   if (isCodingOrWb) {
     return bt(isZh, SPOKEN.transition.codingWb(qNum, bt(isZh, SPOKEN.codingWbIntro(nextQuestion.type))));
@@ -1882,11 +1889,15 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     browserWs.send(JSON.stringify({ type: "interview_complete" }));
     log.info("Interview complete signal sent");
     farewellCompleted = true;
-    // 服务端权威收尾:告别已说完,无论浏览器随后是否还在,立即落库
+    // Recruitment completion is authoritative only after /api/voice/save has
+    // verified eight question-bound USER answers. The relay can signal that
+    // the farewell is done, but must not pre-authorize a completed result.
     if (ctxSessionId) {
       const record = liveSessions.get(ctxSessionId);
       if (record) record.status = "ended";
-      void persistSessionStatus(ctxSessionId, "COMPLETED", "relay_farewell_done");
+      if (!isOprunRecruitmentInterview) {
+        void persistSessionStatus(ctxSessionId, "COMPLETED", "relay_farewell_done");
+      }
     }
   }
 
@@ -2161,10 +2172,27 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       : PROMPTS.response.normal(promptParams));
 
     const startMs = Date.now();
-    let response = await callRelayLLM(prompt, undefined, {
+    const latestParticipantAnswer = [...questionTranscript]
+      .reverse()
+      .find((entry) => entry.role === "user")?.text || "";
+    const deterministicMetricFollowUp = (
+      turnsLeft > 0
+      && isRecruitmentInlineQuestion
+      && !isRecruitmentControlTurn
+    )
+      ? recruitmentMetricEvidenceFollowUp(
+          currentQuestionIndex,
+          latestParticipantAnswer,
+          isZh,
+        )
+      : null;
+    let response = deterministicMetricFollowUp || await callRelayLLM(prompt, undefined, {
       stage: "interview-turn",
       question: currentQuestionIndex + 1,
     });
+    if (deterministicMetricFollowUp) {
+      log.info("Using deterministic Q4 metric-evidence follow-up");
+    }
 
     response = response.replace(/^(追问型|结束型|FOLLOW[- ]?UP|WRAP[- ]?UP)\s*[:：]\s*/i, "").trim();
 
@@ -2334,14 +2362,38 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   }
 
   async function handleTransition(auto = false) {
-    // 切题:重置本题的静默询问状态
-    silenceAskCount = 0;
-    silenceConfirmPending = false;
     if (interviewDone) return;
     if (isTransitioning) {
       if (!auto) queueManualTransition("next");
       return;
     }
+    const hasSubstantiveRecruitmentAnswer = questionTranscript.some(
+      (entry) => entry.role === "user"
+        && !isRecruitmentConversationControl(entry.text)
+        && !isUserSkipRequest(entry.text),
+    );
+    if (
+      isOprunRecruitmentInterview
+      && currentQuestionIndex < 8
+      && !hasSubstantiveRecruitmentAnswer
+    ) {
+      silenceConfirmPending = false;
+      if (browserWs.readyState === WebSocket.OPEN) {
+        browserWs.send(JSON.stringify({
+          type: "transition_rejected",
+          direction: "next",
+          reason: "answer_required",
+          message: "这道正式计分题还没有收到有效回答，请先按真实情况作答；没有相关经历也可以如实说明。",
+          questionIndex: currentQuestionIndex,
+          totalQuestions: sortedQuestions.length,
+        }));
+      }
+      armSilenceAutoSkip();
+      return;
+    }
+    // 切题:仅在确认收到有效回答后重置本题静默状态。
+    silenceAskCount = 0;
+    silenceConfirmPending = false;
     const transitionId = ++transitionGeneration;
     isTransitioning = true;
     pendingProgressiveTransition = false;
@@ -2858,8 +2910,13 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         return;
       }
       if (silenceAskCount >= MAX_SILENT_ASKS_PER_QUESTION) {
-        log.info("本题已询问 2 次仍无回应,判定确认答完,进入下一题");
-        void advanceAfterSilence();
+        if (isOprunRecruitmentInterview) {
+          log.warn("正式计分题两次提醒后仍无回应,标记面试未完成,绝不跳题");
+          abandonForInactivity();
+        } else {
+          log.info("本题已询问 2 次仍无回应,进入下一题");
+          void advanceAfterSilence();
+        }
         return;
       }
       silenceAskCount += 1;
@@ -2872,7 +2929,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     }, SILENCE_ASK_MS);
   }
 
-  /** 询问后继续沉默 = 确认答完 → 切题 */
+  /** 询问后继续沉默：招聘面试继续留在原题，绝不把沉默当成回答。 */
   function armSilenceConfirm() {
     clearSilenceAutoSkip();
     if (interviewDone || endingInterview || !silenceConfirmPending) return;
@@ -2884,8 +2941,18 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         return;
       }
       silenceConfirmPending = false;
-      log.info("询问后候选人继续沉默,视为确认答完,进入下一题");
-      void advanceAfterSilence();
+      if (isOprunRecruitmentInterview) {
+        if (silenceAskCount >= MAX_SILENT_ASKS_PER_QUESTION) {
+          log.warn("正式计分题持续静默,标记面试未完成,绝不跳题");
+          abandonForInactivity();
+        } else {
+          log.info("正式计分题提醒后仍静默,继续停留原题并再次等待");
+          armSilenceAutoSkip();
+        }
+      } else {
+        log.info("询问后候选人继续沉默,进入下一题");
+        void advanceAfterSilence();
+      }
     }, SILENCE_CONFIRM_MS);
   }
 
@@ -2916,7 +2983,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       void persistSessionStatus(ctxSessionId, "ABANDONED", "candidate_inactive");
     }
     if (browserWs.readyState === WebSocket.OPEN) {
-      browserWs.send(JSON.stringify({ type: "interview_complete" }));
+      browserWs.send(JSON.stringify({
+        type: "interview_incomplete",
+        reason: "candidate_inactive",
+        message: "长时间未收到回答，本次面试已暂停并标记为未完成，不会生成完成结果。请联系招聘负责人重新安排。",
+      }));
     }
     log.info("Interview abandoned for inactivity");
   }
@@ -3418,7 +3489,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
           const message = decision.reason === "assistant_busy"
             ? "请等面试官说完并处理完当前回答后，再进入下一题。"
             : decision.reason === "answer_required"
-              ? "请先回答面试官刚刚提出的问题；如需跳过，可以直接说“跳过这题”。"
+              ? "请先回答当前正式计分题；没有相关经历也可以如实说明。"
               : "正在切换题目，请稍候。";
           browserWs.send(JSON.stringify({
             type: "transition_rejected",
@@ -3485,11 +3556,14 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     }
     asrWs?.removeAllListeners();
     asrWs?.close();
-    // 告别已播完但浏览器在收尾窗口内关掉:落库不能丢
+    // Non-recruitment sessions retain relay-side completion fallback. A
+    // recruitment session must pass the eight-answer save API instead.
     if (wasFarewellDone && ctxSessionId) {
       const record = liveSessions.get(ctxSessionId);
       if (record) record.status = "ended";
-      void persistSessionStatus(ctxSessionId, "COMPLETED", "closed_after_farewell");
+      if (!isOprunRecruitmentInterview) {
+        void persistSessionStatus(ctxSessionId, "COMPLETED", "closed_after_farewell");
+      }
     }
     // 其余情况(答到一半离开)交给断线宽限 + 硬限定时器收尾
   });

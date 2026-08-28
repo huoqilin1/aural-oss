@@ -873,6 +873,25 @@ export function useVoice({
           setState((s) => ({ ...s, isInterviewComplete: true }));
           break;
 
+        case "interview_incomplete": {
+          const message = typeof msg.message === "string"
+            ? msg.message
+            : "本次面试尚未完整完成，不会生成完成结果。";
+          log.warn(`Interview incomplete: ${String(msg.reason || "unknown")}`);
+          interruptPlayback();
+          setState((s) => ({
+            ...s,
+            isInterviewComplete: false,
+            isConnected: false,
+            isListening: false,
+            isSpeaking: false,
+            isProcessing: false,
+            isTransitioning: false,
+          }));
+          onError?.(message);
+          break;
+        }
+
         case "error": {
           const message = (msg.message as string) || "Relay error";
           if (

@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { ensureApplication, RESUME_LIBRARY } from "../helpers/apply";
 
-const RESUME_INDEX = Number(process.env.RESUME_INDEX ?? 3);
+const RESUME_INDEX = Number(process.env.RESUME_INDEX);
 const SHOT_DIR = join(__dirname, "..", "screenshots");
 
 async function evidence(page: Page, name: string): Promise<void> {
@@ -45,7 +45,6 @@ test.describe("候选人面试全流程", () => {
     await page.getByRole("checkbox").click();
     await expect(startButton).toBeEnabled();
     await evidence(page, "02-notice-agreed.png");
-    await startButton.click();
   });
 
   test("面试开始:标题带真实岗位,问候播报岗位,第 1 题为自我介绍", async ({ page }) => {
@@ -109,7 +108,7 @@ test.describe("候选人面试全流程", () => {
     await evidence(page, "05-question-2.png");
   });
 
-  test("结束面试走确认框,出现完成页", async ({ page }) => {
+  test("八题未完成时结束请求必须被拒绝", async ({ page }) => {
     await page.goto(inviteUrl, { waitUntil: "domcontentloaded" });
     await page.getByRole("checkbox").click();
     await page.getByRole("button", { name: "开始面试" }).click();
@@ -124,9 +123,11 @@ test.describe("候选人面试全流程", () => {
     await expect(confirmButton).toBeVisible();
     await confirmButton.click();
 
-    await expect(page.getByRole("heading", { name: "测试已完成" })).toBeVisible({
+    await expect(page.getByText(/八道计分题|尚未完整|不能完成|请继续完成/).first()).toBeVisible({
       timeout: 60_000,
     });
-    await evidence(page, "06-completed.png");
+    await expect(page.getByRole("heading", { name: "测试已完成" })).toHaveCount(0);
+    await expect(page.getByText("第 1 / 8 题").first()).toBeVisible();
+    await evidence(page, "06-early-finish-rejected.png");
   });
 });

@@ -46,7 +46,10 @@ npm --prefix "$SOURCE" ci --no-audit --no-fund --registry=https://registry.npmmi
 # Tests run hermetically BEFORE any server env is loaded; with server env
 # present, three tests take provider-specific paths and fail. The suite
 # passing clean here is the release gate.
+(cd "$SOURCE" && npm run lint:ratchet)
+(cd "$SOURCE" && npm run typecheck:ratchet)
 (cd "$SOURCE" && npm run test:web)
+(cd "$SOURCE" && npx playwright install chromium)
 (cd "$SOURCE" && npm run test:functional)
 
 # Build-time env is fetched from the server: NEXT_PUBLIC_* values are inlined

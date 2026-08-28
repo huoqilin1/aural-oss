@@ -9,6 +9,8 @@ import { getProvider } from "@/lib/ai/registry";
 import { createLogger } from "@/lib/logger";
 import {
   questionReferencesRecruitAnchor,
+  recruitAnchorTerms,
+  recruitQuestionFitsRoleType,
   selectRecruitAnchor,
 } from "@/lib/recruit-question-anchors";
 
@@ -292,9 +294,14 @@ export async function POST(
   // opaque question-set hash remains dedicated to idempotency. Fall back to
   // the legacy field so older integrations keep working.
   const contractVersion = questionSpecVersion || questionSetVersion;
-  const roleType = typeof body.roleType === "string"
+  const explicitRoleType = typeof body.roleType === "string"
     ? body.roleType.trim().toLocaleLowerCase()
-    : "nontechnical_core";
+    : "";
+  const roleType = explicitRoleType || (
+    /(?:技术|开发|研发|运维|算法|数据|工程师|架构|程序)/i.test(jobTitle)
+      ? "technical"
+      : "nontechnical_core"
+  );
   const selectedDimensions = recruitDimensions(contractVersion);
   const selectedDimensionSet = new Set(selectedDimensions);
   const preserveOpening = body.preserveOpening === true;
@@ -367,9 +374,10 @@ export async function POST(
 
   const rawQs = Array.isArray(generated?.questions) ? generated.questions : [];
   const evidenceV11 = isEvidenceV11(contractVersion);
-  const isTechnicalRole = roleType === "technical" || /(?:技术|开发|研发|运维|算法|数据|工程师|架构|程序)/i.test(
-    `${jobTitle}\n${jobDescription}`,
-  );
+  // Explicit roleType wins.  A nontechnical recruiter may recruit engineers
+  // and therefore mention 技术/开发 throughout the JD; that must not turn the
+  // candidate's own work sample into a coding or SQL exercise.
+  const isTechnicalRole = roleType === "technical";
   const workSampleInstruction = isTechnicalRole
     ? "请现场给出最小可行方案，包括输入输出、关键数据流，以及必要的伪代码、SQL或配置，并列出至少两项验收或回归检查。"
     : "请现场给出一页可执行交付方案，包括目标、处理步骤、使用的材料或工具、结果指标、主要风险和验收方式。";
@@ -403,19 +411,20 @@ export async function POST(
       job: ["协作", "沟通", "团队", "岗位", "负责"],
     },
   };
-  const anchors = new Map(Object.entries(anchorKeywords).map(([dimension, keywords]) => [
-    dimension,
-    {
-      resume: selectRecruitAnchor(resumeText, keywords.resume),
-      job: selectRecruitAnchor(
-        jobDescription
-          .split("【本轮出题规则】", 1)[0]
-          .replace("【岗位职责】", "")
-          .trim() || jobTitle,
-        keywords.job,
-      ) || jobTitle,
-    },
-  ]));
+  const cleanJobDescription = jobDescription
+    .split("【本轮出题规则】", 1)[0]
+    .replace("【岗位职责】", "")
+    .trim() || jobTitle;
+  const anchors = new Map(Object.entries(anchorKeywords).map(([dimension, keywords]) => {
+    const job = selectRecruitAnchor(cleanJobDescription, keywords.job) || jobTitle;
+    // Prefer a resume line that shares concrete terms with the selected job
+    // requirement. This prevents a valid-but-unrelated resume/JD pair.
+    const resume = selectRecruitAnchor(
+      resumeText,
+      [...recruitAnchorTerms(job), ...keywords.resume],
+    );
+    return [dimension, { resume, job }];
+  }));
   const anchorLead = (dimension: string): string => {
     const selected = anchors.get(dimension) || { resume: "", job: jobTitle };
     const resumeLead = selected.resume
@@ -496,7 +505,9 @@ export async function POST(
     },
     {
       key: "problem_solving",
-      fallback: `${anchorLead("problem_solving")}请现场推演一次相关故障或异常的排查顺序、证据、取舍、修复和回归。`,
+      fallback: `${anchorLead("problem_solving")}${isTechnicalRole
+        ? "请现场推演一次相关故障或异常的排查顺序、证据、取舍、修复和回归。"
+        : "请现场推演一次相关业务异常或复杂问题：你先核对什么证据、如何判断优先级、采取什么处理，并如何复盘防止再次发生。"}`,
       seconds: 150,
     },
     {
@@ -532,6 +543,7 @@ export async function POST(
         && selectedAnchors
         && questionReferencesRecruitAnchor(generatedText, selectedAnchors.resume)
         && questionReferencesRecruitAnchor(generatedText, selectedAnchors.job)
+        && recruitQuestionFitsRoleType(generatedText, isTechnicalRole)
       )
     );
     let text =

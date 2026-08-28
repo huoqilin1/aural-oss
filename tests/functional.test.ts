@@ -361,11 +361,6 @@ test("next-question control sends one request and waits for relay acknowledgemen
     }).count(),
     0,
   );
-  await waitForCondition(async () => {
-    const requests = await readMediaRequests(page);
-    return requests.some((request) => !!request.audio)
-      && requests.some((request) => !!request.video);
-  }, 15_000, "Expected camera and microphone to start automatically");
   await waitForText(page, "Thanks, that evidence is clear.", 8_000);
 
   const nextButton = page.getByRole("button", { name: "下一题" }).first();
@@ -400,15 +395,139 @@ test("latest follow-up must be answered before next-question control unlocks", a
     }).count(),
     0,
   );
-  // A clean Windows/Next dev start can spend more than 15 seconds compiling the
-  // voice harness under load. Keep the assertion strict, but do not turn that
-  // cold-start variance into a false release failure.
-  await waitForText(page, "Could you explain the exact metric and verification method?", 30_000);
+  await waitForCondition(
+    async () => (await readRelayConnections(page)).some((entry) => entry.path === "/ws/voice"),
+    15_000,
+    "Expected the primary relay connection before checking follow-up behavior",
+  );
+  await waitForText(page, "Could you explain the exact metric and verification method?", 10_000);
 
   const nextButtons = page.getByRole("button", { name: "下一题" });
   assert.equal(await nextButtons.first().isEnabled().catch(() => false), false);
   const sent = await readRelaySentMessages(page);
   assert.equal(sent.filter((message) => message.type === "next_question").length, 0);
+
+  await context.close();
+});
+
+test("recruitment entry auto-connects media and rejects completion before eight answers", async () => {
+  const context = await browser.newContext({ locale: "zh-CN" });
+  const page = await context.newPage();
+  const saveBodies: unknown[] = [];
+
+  await page.route("**/api/trpc/session.saveRecording", async (route: Route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ result: { data: { json: { success: true } } } }),
+    });
+  });
+  await page.route("**/api/voice/save", async (route: Route) => {
+    saveBodies.push(JSON.parse(route.request().postData() || "{}"));
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "八道计分题尚未完整完成，请继续完成当前面试" }),
+    });
+  });
+
+  await page.goto(
+    `${baseUrl}/functional-tests/voice?language=zh-CN&scenario=recruitment-incomplete`,
+  );
+  await waitForCondition(
+    async () => (await page.getByTestId("harness-ready").textContent()) === "true",
+    5_000,
+  );
+  assert.equal(
+    await page.getByRole("button", {
+      name: /开启摄像头|摄像头测试|麦克风测试|语音测试|开始语音测试|允许麦克风并开始面试/,
+    }).count(),
+    0,
+  );
+  await waitForCondition(async () => {
+    const requests = await readMediaRequests(page);
+    return requests.some((request) => !!request.audio)
+      && requests.some((request) => !!request.video);
+  }, 15_000, "Expected recruitment camera and microphone to connect automatically");
+  await waitForText(page, "第 1 / 8 题", 10_000);
+
+  await page.locator('[data-tour="voice-progress"] button').nth(2).click();
+  await page.getByRole("button", { name: "结束面试", exact: true }).click();
+  await waitForText(page, "八道计分题尚未完整完成，请继续完成当前面试", 10_000);
+
+  assert.equal(saveBodies.length, 0);
+  assert.equal(await page.getByTestId("parent-complete").textContent(), "false");
+  assert.equal(await page.getByText("第 1 / 8 题", { exact: true }).count() > 0, true);
+
+  await context.close();
+});
+
+test("recruitment completes only after eight distinct scored answers", async () => {
+  const context = await browser.newContext({ locale: "zh-CN" });
+  const page = await context.newPage();
+  const saveBodies: unknown[] = [];
+
+  await page.route("**/api/trpc/session.saveRecording", async (route: Route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ result: { data: { json: { success: true } } } }),
+    });
+  });
+  await page.route("**/api/voice/save", async (route: Route) => {
+    saveBodies.push(JSON.parse(route.request().postData() || "{}"));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true }),
+    });
+  });
+
+  await page.goto(
+    `${baseUrl}/functional-tests/voice?language=zh-CN&scenario=recruitment-eight-question`,
+  );
+  await waitForCondition(
+    async () => (await page.getByTestId("harness-ready").textContent()) === "true",
+    5_000,
+  );
+
+  for (let question = 1; question <= 8; question += 1) {
+    await waitForText(page, `第 ${question} / 8 题`, 10_000);
+    assert.equal(await page.getByTestId("parent-complete").textContent(), "false");
+
+    await page.locator('[data-tour="voice-chat"] button').click();
+    const input = page.getByRole("textbox");
+    await input.fill(
+      `第${question}题回答：这是基于真实经历的具体证据，包含本人职责、执行步骤、结果数据和验证方法。`,
+    );
+    await input.press("Enter");
+    await page.locator('[data-tour="voice-chat"] button').click();
+
+    if (question < 8) {
+      const nextButton = page.locator(
+        '[data-tour="voice-status"]:has-text("本题答完了就点这里") button:has-text("下一题")',
+      );
+      await waitForCondition(
+        async () => await nextButton.isVisible().catch(() => false),
+        10_000,
+        `Expected next-question control after answer ${question}`,
+      );
+      await nextButton.click();
+    }
+  }
+
+  await waitForCondition(
+    async () => (await page.getByTestId("parent-complete").textContent()) === "true",
+    15_000,
+    "Expected completion only after the eighth answer was saved",
+  );
+  const sent = await readRelaySentMessages(page);
+  assert.equal(sent.filter((message) => message.type === "text_input").length, 8);
+  assert.equal(sent.filter((message) => message.type === "next_question").length, 7);
+  const completionWrites = saveBodies.filter(
+    (body) => (body as { complete?: boolean }).complete === true,
+  );
+  assert.equal(completionWrites.length, 1);
 
   await context.close();
 });

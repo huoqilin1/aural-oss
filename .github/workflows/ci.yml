@@ -21,10 +21,19 @@ jobs:
       - run: npm ci
 
       - name: Lint
-        run: npm run lint
+        run: npm run lint:ratchet
 
       - name: Type Check
-        run: npx tsc --noEmit
+        run: npm run typecheck:ratchet
 
-      - name: Test
+      - name: Unit and contract tests
         run: npm run test:web --if-present
+
+      - name: Install Chromium for browser gate
+        run: npx playwright install --with-deps chromium
+
+      - name: Recruitment browser and fault-path gate
+        run: npm run test:functional
+
+      - name: Production build
+        run: npm run build

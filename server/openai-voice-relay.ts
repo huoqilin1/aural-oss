@@ -23,7 +23,11 @@ import {
     evaluateManualQuestionAdvance,
     shouldAllowTtsBargeIn,
 } from "./openai-voice-relay-helpers";
-import { isRecruitmentConversationControl } from "./voice-relay-helpers";
+import {
+    isRecruitmentConversationControl,
+    isUserSkipRequest,
+    recruitmentMetricEvidenceFollowUp,
+} from "./voice-relay-helpers";
 import {
     type BigModelAsrConfig,
     BIGMODEL_ASR_URL,
@@ -156,19 +160,6 @@ const FAST_PREV_PATTERNS = [
   /^(?:上一个问题|上一题|previous\s*question)\.?$/i,
 ];
 
-const USER_SKIP_PATTERNS = [
-  /(?:let'?s|please|can\s+(?:we|you))\s+(?:move\s+on|skip|proceed|go\s+to\s+(?:the\s+)?next)/i,
-  /move\s+on(?:\s+to)?/i,
-  /continue\s+to\s+(?:the\s+)?next/i,
-  /go\s+(?:on\s+)?to\s+(?:the\s+)?next/i,
-  /skip\s+(?:this|the)\s+(?:question|one|problem)/i,
-  /I\s+(?:give\s+up|want\s+to\s+skip|'?d\s+like\s+to\s+skip)/i,
-  /next\s+question/i,
-  /please\s+(?:move\s+on|skip)/i,
-  /(?:跳过|下一(?:个问题|题)|不做了|放弃了?|结束吧|请继续(?:下一|到下))/,
-  /(?:我不会|不想做了|不想答了|过吧|换下一)/,
-];
-
 const USER_PREV_PATTERNS = [
   /(?:go|move|get)\s+back\s+(?:to\s+)?(?:the\s+)?(?:previous|last|prior)/i,
   /(?:return|go)\s+to\s+(?:the\s+)?(?:previous|last|prior)\s+(?:question|one|problem)/i,
@@ -188,10 +179,6 @@ function isFastNextRequest(text: string): boolean {
 function isFastPrevRequest(text: string): boolean {
   const trimmed = text.trim();
   return FAST_PREV_PATTERNS.some((pattern) => pattern.test(trimmed));
-}
-
-function isUserSkipRequest(text: string): boolean {
-  return USER_SKIP_PATTERNS.some((pattern) => pattern.test(text));
 }
 
 function isUserPrevRequest(text: string): boolean {
@@ -941,7 +928,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       lastCommittedUserAnswerAt = Date.now();
       userCommittedWordsThisQuestion += text.trim().split(/\s+/).length;
       if (isOprunRecruitmentInterview) {
-        if (!isRecruitmentConversationControl(text)) {
+        if (!isRecruitmentConversationControl(text) && !isUserSkipRequest(text)) {
           recruitmentAnswersByQuestion.set(
             currentQuestionIndex,
             (recruitmentAnswersByQuestion.get(currentQuestionIndex) || 0) + 1,
@@ -1180,6 +1167,28 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
         }));
       }
       requestAssistantResponse(`${reason}: recruitment conversation control`);
+      return false;
+    }
+    const metricEvidenceFollowUp = (
+      isOprunRecruitmentInterview
+      && (recruitmentFollowUpsByQuestion.get(currentQuestionIndex) || 0) === 0
+      && recruitmentInlineFollowUpsUsed < 2
+    )
+      ? recruitmentMetricEvidenceFollowUp(currentQuestionIndex, committedText, isZh)
+      : null;
+    if (metricEvidenceFollowUp && oaiWs && oaiWs.readyState === WebSocket.OPEN) {
+      oaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "system",
+          content: [{
+            type: "input_text",
+            text: `[SYSTEM] Ask exactly this single evidence-verification question, naturally and without adding another question: ${metricEvidenceFollowUp}`,
+          }],
+        },
+      }));
+      requestAssistantResponse(`${reason}: deterministic Q4 metric evidence check`);
       return false;
     }
     if (!recruitmentMustAdvanceAfterAnswer(committedText)) {
@@ -2265,6 +2274,15 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       }
       return false;
     }
+    if (
+      isOprunRecruitmentInterview
+      && targetIdx > currentQuestionIndex
+      && currentQuestionIndex < 8
+      && (recruitmentAnswersByQuestion.get(currentQuestionIndex) || 0) <= 0
+    ) {
+      rejectManualAdvance("answer_required", requestId);
+      return false;
+    }
     pendingProgressiveTransition = null;
     clearPendingTransition();
     clearQuestionPrompt();
@@ -2317,7 +2335,11 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       isTransitioning = false;
       log.info(`${dir} Q${currentQuestionIndex + 1}/${sortedQuestions.length}`);
 
-      const prompt = reason === "user_request"
+      const nextQuestion = sortedQuestions[currentQuestionIndex];
+      const candidateClosing = nextQuestion?.description === "oprun_dimension:candidate_questions";
+      const prompt = candidateClosing
+        ? `[SYSTEM] The eight scored questions are complete. Do not call this question nine. Briefly acknowledge completion, then open the candidate Q&A using this text: "${nextQuestion.text}".`
+        : reason === "user_request"
         ? `[SYSTEM] The participant explicitly asked to go ${directionLabel.toLowerCase()}. We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly acknowledge the transition and introduce this question now.`
         : reason === "answer_complete"
           ? `[SYSTEM] The answer is complete and the server-side verification budget requires a transition. We are now on question ${currentQuestionIndex + 1}: "${sortedQuestions[currentQuestionIndex]?.text}". Briefly acknowledge the previous answer, then ask this question. Do not add another follow-up.`
@@ -2338,7 +2360,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     const message = reason === "assistant_busy"
       ? "请等面试官说完并处理完当前回答后，再进入下一题。"
       : reason === "answer_required"
-        ? "请先回答面试官刚刚提出的问题；如需跳过，可以直接说“跳过这题”。"
+        ? "请先回答当前正式计分题；没有相关经历也可以如实说明。"
         : reason === "verification_required"
           ? "请先回答最后一道核验追问。"
           : "正在切换题目，请稍候。";
@@ -2408,6 +2430,14 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     }
 
     if (isFastNextRequest(userText) || isUserSkipRequest(userText)) {
+      if (
+        isOprunRecruitmentInterview
+        && currentQuestionIndex < 8
+        && (recruitmentAnswersByQuestion.get(currentQuestionIndex) || 0) <= 0
+      ) {
+        rejectManualAdvance("answer_required");
+        return true;
+      }
       if (isProgressiveOpeningOnly(sortedQuestions)) {
         void transitionToNextWhenReady("user_request");
         return true;

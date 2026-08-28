@@ -10,7 +10,7 @@ import {
   RESUME_LIBRARY,
 } from "../helpers/apply";
 
-const RESUME_INDEX = Number(process.env.RESUME_INDEX ?? 3);
+const RESUME_INDEX = Number(process.env.RESUME_INDEX);
 
 test.describe.configure({ mode: "serial" });
 
@@ -28,8 +28,13 @@ test.describe("投递管线", () => {
   });
 
   test("不选岗位进不了面试:拦截并等待手动选择", async () => {
+    test.skip(
+      process.env.PRODUCTION_NEGATIVE_APPLY_APPROVED !== "YES",
+      "新增第二条无岗申请必须单独批准",
+    );
     test.skip(!RESUME_LIBRARY, "简历库不可用时跳过");
-    const { applicationToken } = await applyWithoutPosition(RESUME_INDEX + 1);
+    const negativeIndex = Number(process.env.PRODUCTION_NEGATIVE_RESUME_INDEX);
+    const { applicationToken } = await applyWithoutPosition(negativeIndex);
 
     // 简历解析完成后应转入"待手动选择",且拿不到面试邀请
     let sawNeedsSelection = false;
@@ -51,18 +56,21 @@ test.describe("投递管线", () => {
     expect(sawNeedsSelection, "解析完成后应进入待手动选择状态").toBe(true);
 
     // 手动确认岗位后,面试正常就绪
-    const [position] = await listOpenPositions();
+    const positionId = Number(process.env.PRODUCTION_POSITION_ID);
+    const positions = await listOpenPositions();
+    const position = positions.find((row) => row.id === positionId);
+    expect(position, `获批岗位 ID ${positionId} 必须仍在招聘`).toBeTruthy();
     const confirm = await fetch(`${HR_API_BASE}/v1/recruit/application/position/confirm`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token: applicationToken, position_id: position.id }),
+      body: JSON.stringify({ token: applicationToken, position_id: position!.id }),
     });
     expect(confirm.ok).toBe(true);
     const payload = (await confirm.json()) as { success?: boolean };
     expect(payload.success).toBe(true);
   });
 
-  test("生成题目质量扫描:无离职前提、无占位岗位名、开场为自我介绍", async ({
+  test("生成题目质量扫描:恰好八道计分题且 Q1 为自我介绍", async ({
     page,
   }) => {
     const stateFile = join(__dirname, "..", "test-results", "e2e-state.json");
@@ -72,10 +80,13 @@ test.describe("投递管线", () => {
 
     const questions = await captureQuestions(page, application.inviteUrl);
     console.log(`捕获题目 ${questions.length} 道`);
-    // 邀请页每秒轮询刷新题目,生成完成前可能只见到开场题,轮询等到全量
+    // 候选人只需 Q1+Q2 即可快速进入；Q3-Q8 在须知和前两题期间动态补齐。
     await expect
       .poll(async () => questions.length, { timeout: 90_000 })
-      .toBeGreaterThanOrEqual(9);
+      .toBeGreaterThanOrEqual(2);
+    await expect
+      .poll(async () => questions.length, { timeout: 180_000 })
+      .toBe(8);
 
     const bannedPatterns: Array<[string, RegExp]> = [
       ["以离职/求职状态为前提", /离职|空窗期|正在找工作|待业/],
@@ -90,6 +101,7 @@ test.describe("投递管线", () => {
       }
     }
     expect(questions[0]).toContain("自我介绍");
+    expect(new Set(questions).size).toBe(8);
   });
 });
 

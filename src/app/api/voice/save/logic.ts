@@ -147,8 +147,12 @@ export async function handleVoiceSave(
     if (complete) {
       const session = await ops.loadSessionForCompletion(sessionId);
 
-      if (session && session.status !== "COMPLETED") {
+      if (session) {
         const isRecruitment = /^数君招聘\s*·\s*/.test(session.interview.title);
+        // Recruitment completion is fail-closed even when another process has
+        // already written COMPLETED.  The relay cannot authoritatively know
+        // whether all question-bound USER messages reached storage, so an
+        // early relay status must never bypass the eight-answer contract.
         if (isRecruitment) {
           const requiredQuestionIds = session.interview.questions
             .filter((question) =>
@@ -173,6 +177,9 @@ export async function handleVoiceSave(
               };
             }
           }
+        }
+        if (session.status === "COMPLETED") {
+          return { status: 200, body: { ok: true } };
         }
         const now = ops.now();
         const cappedNowMs = effectiveNowForSession(session.lastActivityAt, now.getTime());

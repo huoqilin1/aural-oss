@@ -1,10 +1,14 @@
 // 真人模拟面试:完全自主投递+以候选人身份逐题作答(王总 2026-08-22)
 // 不打印简历个人字段;报告只含题目与行为观察。
 import { chromium, type Page } from "@playwright/test";
-import { listOpenPositions } from "./helpers/apply";
+import {
+  assertProductionWriteApproval,
+  getApprovedPosition,
+  loadApprovedResume,
+} from "./helpers/apply";
 
-const API = "https://hr.yifx.vip";
-const INDEX = 7; // 简历库 index 7(资深测试开发, AI 遥感平台背景)
+const API = process.env.HR_API_BASE || "";
+const INDEX = Number(process.env.RESUME_INDEX);
 const LOG: string[] = [];
 function log(line: string) {
   LOG.push(line);
@@ -22,16 +26,9 @@ function dig(value: unknown, path: string[]): unknown {
 }
 
 async function applyResume(positionId: number, positionName: string) {
-  const { readFileSync } = await import("node:fs");
   const { Document, HeadingLevel, Packer, Paragraph, TextRun } = await import("docx");
-  const rows = JSON.parse(
-    readFileSync(
-      process.env.RESUME_LIBRARY || "/mnt/c/Users/wang/Desktop/脑图/30_resumes_extracted.json",
-      "utf-8",
-    ),
-  );
-  const text: string = rows[INDEX].text;
-  const paragraphs: Paragraph[] = [];
+  const text = loadApprovedResume(INDEX).text || "";
+  const paragraphs: Array<InstanceType<typeof Paragraph>> = [];
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line) continue;
@@ -49,7 +46,7 @@ async function applyResume(positionId: number, positionName: string) {
   form.append("idempotency_key", Math.random().toString(36).slice(2) + Date.now().toString(36));
   form.append(
     "resume",
-    new Blob([buffer], {
+    new Blob([Uint8Array.from(buffer).buffer], {
       type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }),
     "resume-sim.docx",
@@ -130,8 +127,8 @@ async function lastAiText(page: Page): Promise<string> {
 }
 
 (async () => {
-  const positions = await listOpenPositions();
-  const chosen = positions.find((p) => p.id === 1) || positions[0];
+  assertProductionWriteApproval();
+  const chosen = await getApprovedPosition();
   log(`选择岗位: ${chosen.name}`);
   const inviteUrl = await applyResume(chosen.id, chosen.name);
 
@@ -177,17 +174,22 @@ async function lastAiText(page: Page): Promise<string> {
   );
   log("面试已开始,开始逐题作答…");
 
-  for (let q = 0; q < 9; q++) {
+  for (let q = 0; q < 8; q++) {
     // 等本题出现(切题后)
     await page.waitForFunction(
-      ({ n, closing }) => closing
-        ? document.body.innerText.includes("交流环节（不计分）")
-        : document.body.innerText.includes(`第 ${n} / 8 题`),
-      { n: q + 1, closing: q === 8 },
+      ({ n }) => document.body.innerText.includes(`第 ${n} / 8 题`),
+      { n: q + 1 },
       { timeout: 120_000 },
     );
     await page.waitForTimeout(2500);
-    const qText = questions[q] || "(题目未捕获)";
+    // 快速开始不等待 Q3-Q8 全部生成；做到某一题时只等待该题到达。
+    const questionDeadline = Date.now() + 180_000;
+    while (questions.length <= q && Date.now() < questionDeadline) {
+      await page.waitForTimeout(500);
+    }
+    const qText = questions[q];
+    if (!qText) throw new Error(`第 ${q + 1} 题在 180 秒内未生成`);
+    if (questions.length > 8) throw new Error(`题目超过 8 道，实际为 ${questions.length}`);
     log(`\n── 第 ${q + 1} 题: ${qText.slice(0, 110)}`);
 
     let followUps = 0;
@@ -197,8 +199,8 @@ async function lastAiText(page: Page): Promise<string> {
       const answer = followUps === 0 ? answerFor(qText) : "我再补充一点：" + answerFor(qText).slice(0, 120);
       await chatAnswer(page, answer);
       log(`  已作答(第 ${followUps + 1} 轮)…`);
-      // 最后一题:CTA 按设计不出现,答完即进入自然收尾等待
-      if (q === 8) {
+      // 最后一题：CTA 按设计不出现，答完即进入自然收尾等待。
+      if (q === 7) {
         answered = true;
         break;
       }
@@ -229,51 +231,30 @@ async function lastAiText(page: Page): Promise<string> {
       answered = true;
     }
 
-    if (q < 8) {
+    if (q < 7) {
       await page
         .locator('[data-tour="voice-status"]:has-text("本题答完了就点这里") button:has-text("下一题")')
-        .click()
-        .catch(async () => {
-          await page.locator('[data-tour="voice-progress"] button').nth(1).click();
-        });
+        .click();
       await page.screenshot({ path: `screenshots/sim-q${q + 1}.png` });
     } else {
-      // 最后一题:CTA 按设计不出现,等静默确认→告别→完成页(约 45s+20s+收尾)
-      log("交流环节答完,等待自然收尾(静默确认→告别→完成页)…");
+      if (questions.length !== 8) {
+        throw new Error(`最终题目数量必须恰好为 8，实际为 ${questions.length}`);
+      }
+      log("第 8 题答完，等待最终核验或自然收尾…");
       await page.waitForFunction(
         () => document.body.innerText.includes("测试已完成"),
         undefined,
         { timeout: 240_000 },
       );
       log("✅ 面试自然收尾,出现完成页");
-      await page.screenshot({ path: "screenshots/sim-q9-completed.png", fullPage: true });
+      await page.screenshot({ path: "screenshots/sim-q8-completed.png", fullPage: true });
       await browser.close();
       log("=== 模拟结束(自然完成) ===");
       return;
     }
   }
 
-  log("\n交流环节作答完毕,等待收尾…");
-  try {
-    await page.waitForFunction(
-      () => document.body.innerText.includes("测试已完成"),
-      undefined,
-      { timeout: 180_000 },
-    );
-    log("✅ 面试正常收尾,出现完成页");
-  } catch {
-    log("⚠️ 未见完成页,尝试结束按钮");
-    await page.locator('[data-tour="voice-progress"] button').nth(2).click();
-    await page.locator('button:has-text("结束面试")').last().click().catch(() => undefined);
-    await page.waitForFunction(
-      () => document.body.innerText.includes("测试已完成"),
-      undefined,
-      { timeout: 60_000 },
-    ).catch(() => log("⚠️ 结束按钮也未能完成"));
-  }
-  await page.screenshot({ path: "screenshots/sim-completed.png", fullPage: true });
-  await browser.close();
-  log("\n=== 模拟结束 ===");
+  throw new Error("八题完成后未进入完成页");
 })().catch((e) => {
   console.error("SIM_FAIL:", e.message);
   process.exit(1);

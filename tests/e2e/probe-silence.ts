@@ -1,4 +1,4 @@
-// 静默询问-确认流程现场侦测:开场后不说话,验证 45s 后小君先问、确认后再切题
+// 静默流程现场侦测：正式计分题没有实质回答时，只能提醒并最终标记未完成，绝不切题。
 import { chromium } from "@playwright/test";
 import { applyAndWaitForInvite } from "./helpers/apply";
 
@@ -24,18 +24,16 @@ import { applyAndWaitForInvite } from "./helpers/apply";
   );
   console.log("T+" + Math.round((Date.now() - t0) / 1000) + "s 面试已开始,保持沉默…");
   await page.waitForFunction(
-    () => document.body.innerText.includes("答完了吗"),
+    () => document.body.innerText.includes("尚未完整完成"),
     undefined,
-    { timeout: 90_000 },
+    { timeout: 180_000 },
   );
-  console.log("T+" + Math.round((Date.now() - t0) / 1000) + "s ✅ 小君开口询问是否答完");
-  await page.waitForFunction(
-    () => document.body.innerText.includes("第 2 / 8 题"),
-    undefined,
-    { timeout: 60_000 },
-  );
-  console.log("T+" + Math.round((Date.now() - t0) / 1000) + "s ✅ 确认后进入第 2 题");
-  await page.screenshot({ path: "screenshots/11-silence-ask-confirm.png", fullPage: true });
+  const body = await page.locator("body").innerText();
+  if (!body.includes("第 1 / 8 题") || body.includes("第 2 / 8 题")) {
+    throw new Error("静默时错误推进了正式计分题");
+  }
+  console.log("T+" + Math.round((Date.now() - t0) / 1000) + "s ✅ 保持第 1 题并标记未完成");
+  await page.screenshot({ path: "screenshots/11-silence-incomplete.png", fullPage: true });
   await browser.close();
 })().catch((e) => {
   console.error("PROBE_FAIL:", e.message);

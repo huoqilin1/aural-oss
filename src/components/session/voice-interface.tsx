@@ -503,6 +503,7 @@ export function VoiceInterface({
 
   // ── Countdown timer state ────────────────────────────────────────
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
+  const [sessionElapsedSeconds, setSessionElapsedSeconds] = useState(0);
   const [questionElapsedSeconds, setQuestionElapsedSeconds] = useState(0);
   // 本题是否已有作答(候选人说过话):用于答完后醒目提示「下一题」(王总 2026-08-20)
   const [answeredCurrentQuestion, setAnsweredCurrentQuestion] = useState(false);
@@ -834,6 +835,15 @@ export function VoiceInterface({
     );
     return () => window.clearInterval(timer);
   }, [locallyCompleted, voice.isConnected, voice.currentQuestionIndex]);
+
+  useEffect(() => {
+    if (!isOprunRecruitmentInterview || !voice.isConnected || locallyCompleted) return;
+    const timer = window.setInterval(
+      () => setSessionElapsedSeconds((value) => value + 1),
+      1000,
+    );
+    return () => window.clearInterval(timer);
+  }, [isOprunRecruitmentInterview, locallyCompleted, voice.isConnected]);
 
   // ── Whiteboard persistence ──────────────────────────────────────
   /** Persist a single drawing to the backend. */
@@ -1337,6 +1347,18 @@ export function VoiceInterface({
   const endingRef = useRef(false);
   const handleEndInterview = useCallback(async () => {
     if (endingRef.current) return;
+    if (
+      isOprunRecruitmentInterview
+      && (
+        voice.totalQuestions !== OPRUN_PLANNED_MAIN_QUESTION_COUNT
+        || voice.currentQuestionIndex < OPRUN_PLANNED_MAIN_QUESTION_COUNT - 1
+        || !answeredCurrentQuestion
+      )
+    ) {
+      setShowEndDialog(false);
+      setError("八道计分题尚未完整完成，请继续完成当前面试");
+      return;
+    }
     endingRef.current = true;
     setIsSaving(true);
 
@@ -1384,7 +1406,17 @@ export function VoiceInterface({
     } finally {
       setIsSaving(false);
     }
-  }, [saveAllDrawings, saveAllCodeSnippets, videoMode, recording, sessionId, voice, onComplete]);
+  }, [
+    answeredCurrentQuestion,
+    isOprunRecruitmentInterview,
+    saveAllDrawings,
+    saveAllCodeSnippets,
+    videoMode,
+    recording,
+    sessionId,
+    voice,
+    onComplete,
+  ]);
 
   useEffect(() => {
     handleEndInterviewRef.current = handleEndInterview;
@@ -1408,16 +1440,21 @@ export function VoiceInterface({
   }, [messages, chatMessages]);
 
   // ── Send chat message helper ──────────────────────────────────
+  const chatSendBlocked =
+    !voice.isConnected
+    || voice.isSpeaking
+    || voice.isProcessing
+    || voice.isTransitioning;
   const handleSendChat = useCallback((text: string) => {
     const trimmed = text.trim();
-    if (!trimmed) return;
-    voice.interruptPlayback();
+    if (!trimmed || chatSendBlocked) return false;
     const msg: Message = { id: crypto.randomUUID(), role: "user", content: trimmed, source: "chat" };
     setAnsweredCurrentQuestion(true);
     setMessages((prev) => [...prev, msg]);
     setChatMessages((prev) => [...prev, msg]);
     voice.sendTextMessage(trimmed);
-  }, [voice]);
+    return true;
+  }, [chatSendBlocked, voice]);
 
   // ── Derived state ───────────────────────────────────────────────
   const isRecruitmentQuestionSet = isOprunRecruitmentInterview;
@@ -1470,7 +1507,9 @@ export function VoiceInterface({
   const isTimeWarning =
     displayedRemainingSeconds !== null && displayedRemainingSeconds <= 5 * 60 && !isTimeCritical;
   const elapsedSeconds =
-    displayedRemainingSeconds !== null && targetDurationMinutes !== undefined
+    isOprunRecruitmentInterview
+      ? sessionElapsedSeconds
+      : displayedRemainingSeconds !== null && targetDurationMinutes !== undefined
       ? Math.max(0, targetDurationMinutes * 60 - displayedRemainingSeconds)
       : 0;
   const conciseInterviewTitle = interviewTitle.replace(/^数君招聘\s*·\s*/, "");
@@ -1521,7 +1560,11 @@ export function VoiceInterface({
   const onFinalQuestion =
     questionTotal > 0 && voice.currentQuestionIndex === questionTotal - 1;
   const stuckAfterFinalAnswer =
-    onFinalQuestion && (voice.isProcessing || voice.isTransitioning) && !voice.isListening;
+    !isOprunRecruitmentInterview
+    && onFinalQuestion
+    && answeredCurrentQuestion
+    && (voice.isProcessing || voice.isTransitioning)
+    && !voice.isListening;
   useEffect(() => {
     if (!stuckAfterFinalAnswer || locallyCompleted) return;
     const timer = setTimeout(() => {
@@ -2602,10 +2645,9 @@ export function VoiceInterface({
                       placeholder="输入消息…"
                       className="h-9 flex-1 text-sm"
                       onKeyDown={(e) => {
-                        if (e.key === "Enter" && !e.shiftKey && chatInput.trim()) {
+                        if (e.key === "Enter" && !e.shiftKey && chatInput.trim() && !chatSendBlocked) {
                           e.preventDefault();
-                          handleSendChat(chatInput);
-                          setChatInput("");
+                          if (handleSendChat(chatInput)) setChatInput("");
                         }
                       }}
                     />
@@ -2613,10 +2655,9 @@ export function VoiceInterface({
                       size="icon"
                       className="h-9 w-9 shrink-0"
                       style={{ background: "#D6B98A", color: "#0F1B2D" }}
-                      disabled={!chatInput.trim()}
+                      disabled={!chatInput.trim() || chatSendBlocked}
                       onClick={() => {
-                        handleSendChat(chatInput);
-                        setChatInput("");
+                        if (handleSendChat(chatInput)) setChatInput("");
                         chatInputRef.current?.focus();
                       }}
                     >
@@ -2836,10 +2877,9 @@ export function VoiceInterface({
                 placeholder="Type a message..."
                 className="h-9 flex-1 text-base md:text-sm"
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey && chatInput.trim()) {
+                  if (e.key === "Enter" && !e.shiftKey && chatInput.trim() && !chatSendBlocked) {
                     e.preventDefault();
-                    handleSendChat(chatInput);
-                    setChatInput("");
+                    if (handleSendChat(chatInput)) setChatInput("");
                   }
                 }}
               />
@@ -2847,10 +2887,9 @@ export function VoiceInterface({
                 size="icon"
                 className="h-9 w-9 shrink-0"
                 style={{ background: "#D6B98A", color: "#0F1B2D" }}
-                disabled={!chatInput.trim()}
+                disabled={!chatInput.trim() || chatSendBlocked}
                 onClick={() => {
-                  handleSendChat(chatInput);
-                  setChatInput("");
+                  if (handleSendChat(chatInput)) setChatInput("");
                   chatInputRef.current?.focus();
                 }}
               >

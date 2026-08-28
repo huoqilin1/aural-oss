@@ -11,11 +11,31 @@ import {
     isUserSkipRequest,
     mergeAsrSegments,
     mergePendingAsrInterim,
+    recruitmentMetricEvidenceFollowUp,
     responseInvitesUserReply,
     shouldHoldBargeInInterimForFinal,
     shouldSuppressAnsweredAsrFinal,
     trimCrossTurnOverlap,
 } from "../server/voice-relay-helpers";
+
+test("Q4 unsupported numeric claims receive one deterministic evidence check", () => {
+  assert.match(
+    recruitmentMetricEvidenceFollowUp(
+      3,
+      "当时我说准确率达到99%，但没有保留原始样本，也不是独立核验。",
+      true,
+    ) || "",
+    /时间范围和样本量/,
+  );
+  assert.equal(
+    recruitmentMetricEvidenceFollowUp(2, "提升99%，但没有原始数据", true),
+    null,
+  );
+  assert.equal(
+    recruitmentMetricEvidenceFollowUp(3, "提升99%，核对了500条记录", true),
+    null,
+  );
+});
 
 test("recruitment greetings and audio checks do not count as scored answers", () => {
   for (const text of [
