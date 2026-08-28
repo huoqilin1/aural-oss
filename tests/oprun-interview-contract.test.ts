@@ -311,7 +311,8 @@ test("questions stay tactful about employment status", () => {
 test("immutable release gate covers functional flow and exact public readiness", () => {
   assert.match(releaseBuilder, /npm run test:web/);
   assert.match(releaseBuilder, /npm run test:functional/);
-  assert.match(releaseRunner, /--max-redirs 5/);
+  assert.match(releaseRunner, /\$publicRoot\/login/);
+  assert.match(releaseRunner, /loginStatus\.Trim\(\) -ne "200"/);
   assert.match(releaseRunner, /api\/version/);
   assert.match(releaseRunner, /api\/health/);
   assert.match(releaseRunner, /api\/ready/);

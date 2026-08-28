@@ -400,7 +400,10 @@ test("latest follow-up must be answered before next-question control unlocks", a
     }).count(),
     0,
   );
-  await waitForText(page, "Could you explain the exact metric and verification method?", 15_000);
+  // A clean Windows/Next dev start can spend more than 15 seconds compiling the
+  // voice harness under load. Keep the assertion strict, but do not turn that
+  // cold-start variance into a false release failure.
+  await waitForText(page, "Could you explain the exact metric and verification method?", 30_000);
 
   const nextButtons = page.getByRole("button", { name: "下一题" });
   assert.equal(await nextButtons.first().isEnabled().catch(() => false), false);
