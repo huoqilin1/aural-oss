@@ -312,6 +312,10 @@ test("immutable release gate covers functional flow and exact public readiness",
   assert.match(releaseBuilder, /npm run test:web/);
   assert.match(releaseBuilder, /npm run test:functional/);
   assert.match(releaseRunner, /\$publicRoot\/login/);
+  assert.match(
+    releaseRunner,
+    /curl\.exe -fsSL --max-redirs 5 --max-time 20 -o NUL -w "%\{http_code\}" "\$publicRoot\/login"/,
+  );
   assert.match(releaseRunner, /loginStatus\.Trim\(\) -ne "200"/);
   assert.match(releaseRunner, /api\/version/);
   assert.match(releaseRunner, /api\/health/);

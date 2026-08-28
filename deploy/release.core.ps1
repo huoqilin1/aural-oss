@@ -244,7 +244,7 @@ if ($LASTEXITCODE -ne 0) { Write-Warning "发布成功，但临时目录清理�
 
 # ---- 6. 公网、版本、健康与语音线路验收 -------------------------------------
 $publicRoot = $PublicBaseUrl.TrimEnd('/')
-$loginStatus = (& curl.exe -fsS --max-time 20 -o NUL -w "%{http_code}" "$publicRoot/login") -join ""
+$loginStatus = (& curl.exe -fsSL --max-redirs 5 --max-time 20 -o NUL -w "%{http_code}" "$publicRoot/login") -join ""
 if ($LASTEXITCODE -ne 0 -or $loginStatus.Trim() -ne "200") {
   throw "公网登录页验收失败：状态=$loginStatus"
 }
