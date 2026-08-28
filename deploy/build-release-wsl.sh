@@ -43,9 +43,11 @@ SOURCE="$BUILD_ROOT/source"
 export CI=1
 
 npm --prefix "$SOURCE" ci --no-audit --no-fund --registry=https://registry.npmmirror.com
+npm --prefix "$SOURCE/tests/e2e" ci --no-audit --no-fund --registry=https://registry.npmmirror.com
 # Tests run hermetically BEFORE any server env is loaded; with server env
 # present, three tests take provider-specific paths and fail. The suite
 # passing clean here is the release gate.
+(cd "$SOURCE/tests/e2e" && npm run typecheck)
 (cd "$SOURCE" && npm run lint:ratchet)
 (cd "$SOURCE" && npm run typecheck:ratchet)
 (cd "$SOURCE" && npm run test:web)

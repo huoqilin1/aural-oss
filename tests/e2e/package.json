@@ -3,13 +3,16 @@
   "private": true,
   "description": "OpRun 招聘面试全链路 E2E：投递→面试就绪→须知→答题→下一题→结束。独立依赖树，不进入生产发布包（发布用 git archive 只打包已跟踪源码）。",
   "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "test:e2e": "node guard-production-e2e.mjs && tsx probe-real-person.ts",
     "test:e2e:diagnostic": "node guard-production-e2e.mjs && playwright test",
     "test:e2e:list": "playwright test --list"
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
+    "@types/node": "^20.19.24",
     "docx": "^9.1.0",
-    "tsx": "4.21.0"
+    "tsx": "4.21.0",
+    "typescript": "^5.9.3"
   }
 }

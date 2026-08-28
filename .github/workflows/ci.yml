@@ -20,6 +20,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Install and type-check isolated production E2E
+        run: npm --prefix tests/e2e ci && npm --prefix tests/e2e run typecheck
+
       - name: Lint
         run: npm run lint:ratchet
 
