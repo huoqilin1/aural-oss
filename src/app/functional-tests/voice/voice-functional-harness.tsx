@@ -260,6 +260,13 @@ function installFunctionalRelayMocks(
   window.sessionStorage.setItem("__functionalRelaySentMessages", "[]");
   window.sessionStorage.setItem("__functionalMediaRequests", "[]");
 
+  // Keep the generated sources alive for the lifetime of the test page. An
+  // empty MediaStream is not a faithful getUserMedia result: consumers such as
+  // createMediaStreamSource correctly reject it, which makes otherwise valid
+  // camera/microphone startup tests depend on React effect ordering.
+  const functionalAudioContexts: AudioContext[] = [];
+  const functionalVideoCanvases: HTMLCanvasElement[] = [];
+
   if (!navigator.mediaDevices) {
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
@@ -285,7 +292,20 @@ function installFunctionalRelayMocks(
       window.__functionalMediaFailureInjected = true;
       throw new DOMException("Injected transient microphone failure", "NotReadableError");
     }
-    return new MediaStream();
+    const tracks: MediaStreamTrack[] = [];
+    if (constraints.audio) {
+      const context = new AudioContext();
+      functionalAudioContexts.push(context);
+      tracks.push(...context.createMediaStreamDestination().stream.getAudioTracks());
+    }
+    if (constraints.video) {
+      const canvas = document.createElement("canvas");
+      canvas.width = 640;
+      canvas.height = 480;
+      functionalVideoCanvases.push(canvas);
+      tracks.push(...canvas.captureStream(1).getVideoTracks());
+    }
+    return new MediaStream(tracks);
   };
 
   if (window.__functionalRelayMockInstalled) {

@@ -287,8 +287,15 @@ export function useInterviewRecording({
       mixDestRef.current = dest;
 
       // Attach mic if provided
-      if (micStream) {
-        attachMicStream(micStream);
+      if (micStream?.getAudioTracks().length) {
+        try {
+          attachMicStream(micStream);
+        } catch (err) {
+          // Camera capture is an independent recruitment requirement. A mic
+          // track that ends between permission and recorder startup must not
+          // prevent the camera from being acquired below.
+          log.warn("Microphone stream could not be attached to recording:", err);
+        }
       }
 
       // Start MediaRecorder — prefer MP4/AAC (iOS-compatible) with WebM fallback

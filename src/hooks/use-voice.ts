@@ -376,6 +376,9 @@ export function useVoice({
     (pcmData: ArrayBuffer) => {
       const ctx = audioContextRef.current;
       if (!ctx) return;
+      if (ctx.state === "suspended") {
+        void ctx.resume().catch(() => {});
+      }
 
       const int16 = new Int16Array(pcmData);
       if (int16.length === 0) return;
@@ -454,7 +457,12 @@ export function useVoice({
       // Create AudioContext for playback
       if (!audioContextRef.current) {
         audioContextRef.current = new AudioContext({ sampleRate: 24000 });
-        if (audioContextRef.current && audioContextRef.current.state === "suspended") { try { await audioContextRef.current.resume(); } catch {} }
+        if (audioContextRef.current.state === "suspended") {
+          // resume() can remain pending when an auto-start effect runs after
+          // transient browser user activation has expired. Relay connection
+          // must still proceed; playback retries the resume when audio arrives.
+          void audioContextRef.current.resume().catch(() => {});
+        }
       }
 
       // Reset tracked messages
