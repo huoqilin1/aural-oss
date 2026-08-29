@@ -24,6 +24,10 @@ const voiceInterface = readFileSync(
   "src/components/session/voice-interface.tsx",
   "utf8",
 );
+const completionAutoClose = readFileSync(
+  "src/lib/voice/completion-auto-close.ts",
+  "utf8",
+);
 const intervieweeOnboarding = readFileSync(
   "src/components/session/interviewee-onboarding.tsx",
   "utf8",
@@ -334,8 +338,11 @@ test("recruitment silence never advances or reports a false completion", () => {
 });
 
 test("candidate cannot manually complete recruitment before eight scored answers", () => {
-  assert.match(voiceInterface, /voice\.totalQuestions !== OPRUN_PLANNED_MAIN_QUESTION_COUNT/);
-  assert.match(voiceInterface, /voice\.currentQuestionIndex < OPRUN_PLANNED_MAIN_QUESTION_COUNT - 1/);
+  assert.match(voiceInterface, /shouldBlockRecruitmentCompletion\(\{/);
+  assert.match(completionAutoClose, /input\.totalQuestions !== input\.plannedMainQuestionCount/);
+  assert.match(completionAutoClose, /input\.currentQuestionIndex < input\.plannedMainQuestionCount - 1/);
+  assert.match(completionAutoClose, /!input\.answeredCurrentQuestion/);
+  assert.match(completionAutoClose, /input\.interviewComplete\) return false/);
   assert.match(voiceInterface, /八道计分题尚未完整完成，请继续完成当前面试/);
 });
 

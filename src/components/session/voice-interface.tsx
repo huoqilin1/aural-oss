@@ -38,7 +38,10 @@ import {
     isInternalQuestionDescription,
     OPRUN_PLANNED_MAIN_QUESTION_COUNT,
 } from "@/lib/voice/dynamic-question-sync";
-import { completionAutoCloseDelayMs } from "@/lib/voice/completion-auto-close";
+import {
+  completionAutoCloseDelayMs,
+  shouldBlockRecruitmentCompletion,
+} from "@/lib/voice/completion-auto-close";
 import {
     AlertCircle,
     Check,
@@ -1369,14 +1372,14 @@ export function VoiceInterface({
   const endingRef = useRef(false);
   const handleEndInterview = useCallback(async () => {
     if (endingRef.current) return;
-    if (
-      isOprunRecruitmentInterview
-      && (
-        voice.totalQuestions !== OPRUN_PLANNED_MAIN_QUESTION_COUNT
-        || voice.currentQuestionIndex < OPRUN_PLANNED_MAIN_QUESTION_COUNT - 1
-        || !answeredCurrentQuestion
-      )
-    ) {
+    if (shouldBlockRecruitmentCompletion({
+      isRecruitmentInterview: isOprunRecruitmentInterview,
+      interviewComplete: voice.isInterviewComplete,
+      totalQuestions: voice.totalQuestions,
+      currentQuestionIndex: voice.currentQuestionIndex,
+      answeredCurrentQuestion,
+      plannedMainQuestionCount: OPRUN_PLANNED_MAIN_QUESTION_COUNT,
+    })) {
       setShowEndDialog(false);
       setError("八道计分题尚未完整完成，请继续完成当前面试");
       return;

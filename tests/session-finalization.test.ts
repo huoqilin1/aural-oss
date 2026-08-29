@@ -7,6 +7,7 @@ import {
 import {
   COMPLETION_WITH_VISIBLE_FAREWELL_FALLBACK_MS,
   completionAutoCloseDelayMs,
+  shouldBlockRecruitmentCompletion,
 } from "../src/lib/voice/completion-auto-close";
 
 const GRACE = 10 * 60_000;
@@ -32,6 +33,48 @@ test("naturally finished farewell owns the normal close path", () => {
       farewellReadyToClose: true,
     }),
     null,
+  );
+});
+
+test("authoritative recruitment completion can save after an unscored closing item", () => {
+  assert.equal(
+    shouldBlockRecruitmentCompletion({
+      isRecruitmentInterview: true,
+      interviewComplete: true,
+      totalQuestions: 9,
+      currentQuestionIndex: 8,
+      answeredCurrentQuestion: false,
+      plannedMainQuestionCount: 8,
+    }),
+    false,
+  );
+});
+
+test("recruitment completion remains blocked before all scored questions finish", () => {
+  assert.equal(
+    shouldBlockRecruitmentCompletion({
+      isRecruitmentInterview: true,
+      interviewComplete: false,
+      totalQuestions: 8,
+      currentQuestionIndex: 6,
+      answeredCurrentQuestion: true,
+      plannedMainQuestionCount: 8,
+    }),
+    true,
+  );
+});
+
+test("eight answered scored questions can still use the normal end path", () => {
+  assert.equal(
+    shouldBlockRecruitmentCompletion({
+      isRecruitmentInterview: true,
+      interviewComplete: false,
+      totalQuestions: 8,
+      currentQuestionIndex: 7,
+      answeredCurrentQuestion: true,
+      plannedMainQuestionCount: 8,
+    }),
+    false,
   );
 });
 
