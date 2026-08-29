@@ -233,6 +233,29 @@ export function finalizeTurnBudgetResponse(input: {
   };
 }
 
+export function shouldConsumeFollowUpBudget(input: {
+  isRecruitmentInterview: boolean;
+  hasNextTransition: boolean;
+  hasPreviousTransition: boolean;
+  userTurnsOnCurrentQuestion: number;
+  isRecruitmentControlTurn: boolean;
+  keepsConversationOpen: boolean;
+}): boolean {
+  if (
+    input.hasNextTransition
+    || input.hasPreviousTransition
+    || input.userTurnsOnCurrentQuestion <= 0
+    || input.isRecruitmentControlTurn
+  ) {
+    return false;
+  }
+
+  // In recruitment, any response without a transition token keeps the scored
+  // question open in practice. Count it even when the language heuristic misses
+  // an indirect follow-up, otherwise the two-follow-up session cap can leak.
+  return input.isRecruitmentInterview || input.keepsConversationOpen;
+}
+
 function normalizeAsrComparisonText(text: string): string {
   const normalized = Array.from(text
     .normalize("NFKC")

@@ -35,6 +35,7 @@ import {
     decidePendingFinalSpeechHold,
     evaluateTranscriptManualAdvance,
     finalizeTurnBudgetResponse,
+    shouldConsumeFollowUpBudget,
     isRecruitmentConversationControl,
     recruitmentMetricEvidenceFollowUp,
     isUserEndRequest,
@@ -2270,13 +2271,14 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     }
 
     const spokenResponse = response.replace(NEXT_TOKEN, "").replace(PREV_TOKEN, "").trim();
-    if (
-      !response.includes(NEXT_TOKEN) &&
-      !response.includes(PREV_TOKEN) &&
-      userTurnsOnCurrentQ > 0 &&
-      !isRecruitmentControlTurn &&
-      replyKeepsConversationOpen(spokenResponse, isZh)
-    ) {
+    if (shouldConsumeFollowUpBudget({
+      isRecruitmentInterview: isOprunRecruitmentInterview,
+      hasNextTransition: response.includes(NEXT_TOKEN),
+      hasPreviousTransition: response.includes(PREV_TOKEN),
+      userTurnsOnCurrentQuestion: userTurnsOnCurrentQ,
+      isRecruitmentControlTurn,
+      keepsConversationOpen: replyKeepsConversationOpen(spokenResponse, isZh),
+    })) {
       totalFollowUpsUsed = Math.min(
         isOprunRecruitmentInterview
           ? OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT

@@ -14,6 +14,7 @@ import {
     mergePendingAsrInterim,
     recruitmentMetricEvidenceFollowUp,
     responseInvitesUserReply,
+    shouldConsumeFollowUpBudget,
     shouldHoldBargeInInterimForFinal,
     shouldSuppressAnsweredAsrFinal,
     trimCrossTurnOverlap,
@@ -233,6 +234,45 @@ test("turn budget finalizer leaves normal follow-ups untouched before limit", ()
       response: "能具体举一个例子吗？",
       changed: false,
     },
+  );
+});
+
+test("recruitment consumes a follow-up whenever the response omits a transition", () => {
+  assert.equal(
+    shouldConsumeFollowUpBudget({
+      isRecruitmentInterview: true,
+      hasNextTransition: false,
+      hasPreviousTransition: false,
+      userTurnsOnCurrentQuestion: 1,
+      isRecruitmentControlTurn: false,
+      keepsConversationOpen: false,
+    }),
+    true,
+  );
+});
+
+test("transition and control responses do not consume recruitment follow-up budget", () => {
+  assert.equal(
+    shouldConsumeFollowUpBudget({
+      isRecruitmentInterview: true,
+      hasNextTransition: true,
+      hasPreviousTransition: false,
+      userTurnsOnCurrentQuestion: 1,
+      isRecruitmentControlTurn: false,
+      keepsConversationOpen: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldConsumeFollowUpBudget({
+      isRecruitmentInterview: true,
+      hasNextTransition: false,
+      hasPreviousTransition: false,
+      userTurnsOnCurrentQuestion: 1,
+      isRecruitmentControlTurn: true,
+      keepsConversationOpen: true,
+    }),
+    false,
   );
 });
 
