@@ -24,6 +24,7 @@ const voiceInterface = readFileSync(
   "src/components/session/voice-interface.tsx",
   "utf8",
 );
+const voiceHook = readFileSync("src/hooks/use-voice.ts", "utf8");
 const completionAutoClose = readFileSync(
   "src/lib/voice/completion-auto-close.ts",
   "utf8",
@@ -73,6 +74,17 @@ test("release truth distinguishes local, deployed, and production acceptance", (
   assert.match(recruitmentContract, /重复三遍源码\/正则检查不能替代行为和生产证据/);
   assert.match(recruitmentContract, /已部署，生产真人验收未完成/);
   assert.match(recruitmentContract, /任何生产\s*失败都必须重新打开任务/);
+});
+
+test("candidate listening UI waits for an explicit relay input-ready handshake", () => {
+  assert.match(relay, /type: "input_ready"/);
+  assert.match(openAiRelay, /type: "input_ready"/);
+  assert.match(voiceHook, /case "input_ready"/);
+  assert.doesNotMatch(
+    voiceHook.match(/case "session_reconnected":[\s\S]*?break;/)?.[0] || "",
+    /isInputReady:\s*true/,
+  );
+  assert.match(voiceInterface, /voice\.isInputReady\s*&&\s*voice\.isListening/);
 });
 
 test("release gates execute browser behavior and production E2E fails closed", () => {

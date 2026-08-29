@@ -418,6 +418,34 @@ test("latest follow-up must be answered before next-question control unlocks", a
   await context.close();
 });
 
+test("candidate input stays unavailable until the relay confirms ASR readiness", async () => {
+  const context = await browser.newContext({ locale: "zh-CN" });
+  const page = await context.newPage();
+
+  await page.goto(
+    `${baseUrl}/functional-tests/voice?language=zh-CN&scenario=advance-input-readiness`,
+  );
+  await waitForCondition(
+    async () => (await page.getByTestId("harness-ready").textContent()) === "true",
+    5_000,
+  );
+  await waitForText(
+    page,
+    "Explain a difficult decision you made in that project.",
+    10_000,
+  );
+  await page.waitForTimeout(750);
+
+  assert.equal(
+    await page.getByText("🎤 正在听,请说", { exact: true }).count(),
+    0,
+    "Question change, TTS completion, and reconnect alone must not claim ASR readiness",
+  );
+
+  await waitForText(page, "🎤 正在听,请说", 5_000, true);
+  await context.close();
+});
+
 test("recruitment notice has one start action then auto-connects camera and microphone", async () => {
   const context = await browser.newContext({ locale: "zh-CN" });
   const page = await context.newPage();

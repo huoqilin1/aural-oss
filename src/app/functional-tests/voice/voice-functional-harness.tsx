@@ -21,6 +21,7 @@ type FunctionalScenarioId =
   | "thinking-until-response"
   | "advance-idempotency"
   | "advance-followup-guard"
+  | "advance-input-readiness"
   | "recruitment-entry"
   | "recruitment-auto-retry"
   | "recruitment-incomplete"
@@ -204,6 +205,37 @@ const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
           },
         },
         { type: "json", delay: 240, message: { type: "tts_ended" } },
+      ],
+    },
+    "/ws/openai-voice": {
+      events: [{ type: "close", delay: 30 }],
+    },
+  },
+  "advance-input-readiness": {
+    "/ws/voice": {
+      events: [
+        { type: "ready", delay: 20 },
+        { type: "json", delay: 80, message: { type: "transitioning", direction: "next" } },
+        {
+          type: "json",
+          delay: 120,
+          message: {
+            type: "question_change",
+            questionIndex: 1,
+            totalQuestions: 2,
+          },
+        },
+        {
+          type: "json",
+          delay: 200,
+          message: {
+            type: "tts_text",
+            data: { text: "Explain a difficult decision you made in that project." },
+          },
+        },
+        { type: "json", delay: 260, message: { type: "tts_ended" } },
+        { type: "json", delay: 600, message: { type: "session_reconnected" } },
+        { type: "json", delay: 1_200, message: { type: "input_ready" } },
       ],
     },
     "/ws/openai-voice": {
@@ -395,6 +427,9 @@ function installFunctionalRelayMocks(
         setTimeout(() => {
           this.onmessage?.({ data: JSON.stringify({ type: "tts_ended" }) });
         }, 100);
+        setTimeout(() => {
+          this.onmessage?.({ data: JSON.stringify({ type: "input_ready" }) });
+        }, 120);
         if (finalQuestion) {
           setTimeout(() => {
             this.onmessage?.({
@@ -426,6 +461,9 @@ function installFunctionalRelayMocks(
             }),
           });
         }, 120);
+        setTimeout(() => {
+          this.onmessage?.({ data: JSON.stringify({ type: "input_ready" }) });
+        }, 180);
       }
 
       if (parsed?.type === "init" && !this.scheduled) {

@@ -63,6 +63,8 @@ interface UseVoiceOptions {
 interface VoiceState {
   isConnected: boolean;
   isListening: boolean;
+  /** True only when the relay confirms that candidate audio is being accepted. */
+  isInputReady: boolean;
   isSpeaking: boolean;
   isProcessing: boolean;
   isTransitioning: boolean;
@@ -112,6 +114,7 @@ export function useVoice({
   const [state, setState] = useState<VoiceState>({
     isConnected: false,
     isListening: false,
+    isInputReady: false,
     isSpeaking: false,
     isProcessing: false,
     isTransitioning: false,
@@ -252,6 +255,7 @@ export function useVoice({
       ...prev,
       isConnected: false,
       isListening: false,
+      isInputReady: false,
       isSpeaking: false,
       isProcessing: false,
       isTransitioning: false,
@@ -615,7 +619,7 @@ export function useVoice({
       switch (msg.type) {
         case "ready":
           log.info("Session ready:", msg.sessionId);
-          setState((s) => ({ ...s, isConnected: true }));
+          setState((s) => ({ ...s, isConnected: true, isInputReady: false }));
           break;
 
         case "interrupt":
@@ -710,7 +714,13 @@ export function useVoice({
 
         case "response_started":
           clearAsrProcessingTimer();
-          setState((s) => ({ ...s, userTranscript: "", aiTranscript: "", isProcessing: true }));
+          setState((s) => ({
+            ...s,
+            userTranscript: "",
+            aiTranscript: "",
+            isInputReady: false,
+            isProcessing: true,
+          }));
           break;
 
         case "chat": {
@@ -737,6 +747,7 @@ export function useVoice({
               ...s,
               aiTranscript: chatBufferRef.current,
               lastAssistantUtteranceEndedAt: 0,
+              isInputReady: false,
               isProcessing: false,
             }));
             log.debug(
@@ -800,12 +811,32 @@ export function useVoice({
           }
           chatBufferRef.current = "";
           lastOnAIResponseRef.current = "";
-          setState((s) => ({ ...s, aiTranscript: "", isProcessing: true }));
+          setState((s) => ({
+            ...s,
+            aiTranscript: "",
+            isInputReady: false,
+            isProcessing: true,
+          }));
           break;
 
         case "session_reconnected":
           clearAsrProcessingTimer();
-          setState((s) => ({ ...s, isProcessing: false }));
+          setState((s) => ({
+            ...s,
+            isInputReady: false,
+            isProcessing: false,
+          }));
+          break;
+
+        case "input_ready":
+          clearAsrProcessingTimer();
+          setState((s) => ({
+            ...s,
+            isInputReady: true,
+            isProcessing: false,
+            isTransitioning: false,
+            transitionDirection: null,
+          }));
           break;
 
         case "question_change": {
@@ -831,11 +862,10 @@ export function useVoice({
             ...s,
             currentQuestionIndex: idx,
             totalQuestions: total,
-              isTransitioning: false,
-              transitionDirection: null,
-              aiTranscript: "",
-              lastAssistantUtteranceEndedAt: 0,
-            }));
+            isInputReady: false,
+            aiTranscript: "",
+            lastAssistantUtteranceEndedAt: 0,
+          }));
           onQuestionChange?.(idx, total);
           log.info(`Question ${idx + 1}/${total}`);
           break;
@@ -857,6 +887,7 @@ export function useVoice({
             setState((s) => ({
               ...s,
               isTransitioning: true,
+              isInputReady: false,
               transitionDirection: dir,
               isSpeaking: false,
               aiTranscript: "",
@@ -866,6 +897,7 @@ export function useVoice({
             setState((s) => ({
               ...s,
               isTransitioning: true,
+              isInputReady: false,
               transitionDirection: dir,
             }));
           }

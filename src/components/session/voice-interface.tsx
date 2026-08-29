@@ -1662,6 +1662,7 @@ export function VoiceInterface({
     !showVoiceTransitioning &&
     !showVoiceProcessing &&
     !showVoiceSpeaking &&
+    voice.isInputReady &&
     voice.isListening;
 
   const codeEditorInitialData = useMemo(() => {

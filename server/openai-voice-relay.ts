@@ -1914,6 +1914,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
             const respOutputCount = msg.response?.output?.length ?? 0;
             const responseQuestionIndex = activeResponseQuestionIndex;
             const responseHadFunctionCall = pendingFunctionCalls.length > 0;
+            const responseNeedsContinuation = responseHadFunctionCall;
             responseInFlight = false;
             const queuedResponse = takeQueuedAssistantResponse();
 
@@ -2011,6 +2012,16 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               requestAssistantResponse("function call follow-up");
             } else if (queuedResponse) {
               requestAssistantResponse(`queued after ${queuedResponse.reason}`, queuedResponse.response);
+            }
+
+            if (
+              hadTts
+              && !responseNeedsContinuation
+              && !queuedResponse
+              && !interviewDone
+              && !reconnecting
+            ) {
+              send({ type: "input_ready" });
             }
 
             if (completedFarewellTurn) {
@@ -2204,6 +2215,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
           pendingQuestionPrompt = null;
           if (pendingPromptTimer) { clearTimeout(pendingPromptTimer); pendingPromptTimer = null; }
           sendQuestionPrompt(prompt);
+        } else {
+          send({ type: "input_ready" });
         }
         return;
       } catch (err) {

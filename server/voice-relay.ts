@@ -2867,7 +2867,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         log.error("Response generation failed:", err);
       } finally {
         generatingResponse = false;
-        if (!interviewDone && browserWs.readyState === WebSocket.OPEN) {
+        if (
+          !interviewDone
+          && !isTransitioning
+          && browserWs.readyState === WebSocket.OPEN
+        ) {
           try {
             await reopenAsr();
             const followUp = queuedUserUtteranceWhileGenerating.trim();
@@ -3085,6 +3089,16 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
       }
 
       log.info("ASR reconnected — ready for user input");
+      if (
+        !interviewDone
+        && !endingInterview
+        && !isTransitioning
+        && !generatingResponse
+        && !ttsSpeaking
+        && browserWs.readyState === WebSocket.OPEN
+      ) {
+        browserWs.send(JSON.stringify({ type: "input_ready" }));
+      }
     } catch (err) {
       log.error("ASR reopen failed:", err instanceof Error ? err.message : err);
       autoReconnectAsr().catch((reconnectErr) => {
@@ -3403,6 +3417,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         }
 
         browserWs.send(JSON.stringify({ type: "session_reconnected" }));
+        browserWs.send(JSON.stringify({ type: "input_ready" }));
         log.info(`ASR auto-reconnect succeeded on attempt ${attempt}`);
         return;
       } catch (err) {
@@ -3438,7 +3453,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     log.info(`Starting greeting TTS for Q${currentQuestionIndex + 1}`);
     speakAndHandle(greeting, { trackInTranscript: false })
       .then(() => {
-        if (!interviewDone && browserWs.readyState === WebSocket.OPEN) {
+        if (
+          !interviewDone
+          && !isTransitioning
+          && browserWs.readyState === WebSocket.OPEN
+        ) {
           // Reconnect ASR to clear echo accumulated during greeting TTS
           reopenAsr().catch(log.error);
         }
