@@ -58,6 +58,40 @@ export interface TranscriptManualAdvanceDecision {
   latestAssistantLooksLikeQuestion: boolean;
 }
 
+export interface PendingFinalSpeechHoldContext {
+  qualifiesForHold: boolean;
+  heldForMs: number;
+  maxHoldMs: number;
+  recentlyChanged: boolean;
+  micStillActive: boolean;
+}
+
+export interface PendingFinalSpeechHoldDecision {
+  hold: boolean;
+  hardCapExceeded: boolean;
+}
+
+/**
+ * Decide whether an accumulated ASR final may keep waiting for active speech.
+ * The hard cap must win even when the provider keeps revising the text; without
+ * that priority, a stream of changing `definite` packets can postpone a turn
+ * forever and the interview never reaches its next-question decision.
+ */
+export function decidePendingFinalSpeechHold({
+  qualifiesForHold,
+  heldForMs,
+  maxHoldMs,
+  recentlyChanged,
+  micStillActive,
+}: PendingFinalSpeechHoldContext): PendingFinalSpeechHoldDecision {
+  if (!qualifiesForHold) return { hold: false, hardCapExceeded: false };
+  if (maxHoldMs > 0 && heldForMs >= maxHoldMs) {
+    return { hold: false, hardCapExceeded: true };
+  }
+  if (recentlyChanged) return { hold: true, hardCapExceeded: false };
+  return { hold: micStillActive, hardCapExceeded: false };
+}
+
 export function evaluateTranscriptManualAdvance({
   isTransitioning,
   assistantBusy,

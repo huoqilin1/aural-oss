@@ -32,6 +32,7 @@ import {
 import { callRelayLLM, logRelayLlmStartup } from "./relay-llm";
 import {
     collapseInternalAsrRepetitions,
+    decidePendingFinalSpeechHold,
     evaluateTranscriptManualAdvance,
     finalizeTurnBudgetResponse,
     isRecruitmentConversationControl,
@@ -1491,22 +1492,26 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   function shouldHoldPendingAsrFinalForActiveSpeech(finalText: string): boolean {
     if (!finalText || ASR_ACTIVE_SPEECH_HOLD_MS <= 0) return false;
     const wordCount = finalText.split(/\s+/).filter(Boolean).length;
-    if (wordCount < 12 && finalText.length < 80) return false;
+    const qualifiesForHold = wordCount >= 12 || finalText.length >= 80;
     const heldForMs = pendingAsrFinalStartedAt ? Date.now() - pendingAsrFinalStartedAt : 0;
     const recentlyChanged =
       pendingAsrFinalLastChangedAt > 0 &&
       Date.now() - pendingAsrFinalLastChangedAt < ASR_PENDING_FINAL_QUIET_MS;
-    if (recentlyChanged) return true;
-
     const micStillActive = Date.now() - lastUserAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS;
-    if (!micStillActive) return false;
-
-    if (ASR_MAX_ACTIVE_SPEECH_HOLD_MS > 0 && heldForMs > ASR_MAX_ACTIVE_SPEECH_HOLD_MS) {
+    const holdDecision = decidePendingFinalSpeechHold({
+      qualifiesForHold,
+      heldForMs,
+      maxHoldMs: ASR_MAX_ACTIVE_SPEECH_HOLD_MS,
+      recentlyChanged,
+      micStillActive,
+    });
+    if (holdDecision.hardCapExceeded) {
       log.warn(
         `ASR active-speech hold exceeded ${ASR_MAX_ACTIVE_SPEECH_HOLD_MS}ms; committing pending final`,
       );
       return false;
     }
+    if (!holdDecision.hold) return false;
 
     const textStuckMs =
       pendingAsrFinalLastChangedAt > 0

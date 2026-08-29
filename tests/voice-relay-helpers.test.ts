@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
     collapseInternalAsrRepetitions,
+    decidePendingFinalSpeechHold,
     evaluateTranscriptManualAdvance,
     finalizeTurnBudgetResponse,
     isAsrRollingRevision,
@@ -17,6 +18,30 @@ import {
     shouldSuppressAnsweredAsrFinal,
     trimCrossTurnOverlap,
 } from "../server/voice-relay-helpers";
+
+test("pending ASR final hard cap wins over continuously revised active speech", () => {
+  assert.deepEqual(
+    decidePendingFinalSpeechHold({
+      qualifiesForHold: true,
+      heldForMs: 60_000,
+      maxHoldMs: 60_000,
+      recentlyChanged: true,
+      micStillActive: true,
+    }),
+    { hold: false, hardCapExceeded: true },
+  );
+
+  assert.deepEqual(
+    decidePendingFinalSpeechHold({
+      qualifiesForHold: true,
+      heldForMs: 59_999,
+      maxHoldMs: 60_000,
+      recentlyChanged: true,
+      micStillActive: true,
+    }),
+    { hold: true, hardCapExceeded: false },
+  );
+});
 
 test("Q4 unsupported numeric claims receive one deterministic evidence check", () => {
   assert.match(
