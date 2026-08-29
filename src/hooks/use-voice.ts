@@ -446,7 +446,7 @@ export function useVoice({
   }, [interviewContext.questions, interviewId]);
 
   /** Connect to the voice relay server */
-  const connect = useCallback(async () => {
+  const connect = useCallback(async (): Promise<boolean> => {
     try {
       // Request microphone permission
       await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -520,10 +520,12 @@ export function useVoice({
 
       relayConnectorRef.current = connector;
       await connector.connect();
+      return true;
     } catch (error) {
       const msg =
         error instanceof Error ? error.message : "Voice connection failed";
       onError?.(msg);
+      return false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onError, playAudio, interviewContext]);

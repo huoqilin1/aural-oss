@@ -80,6 +80,8 @@ test("release gates execute browser behavior and production E2E fails closed", (
   assert.match(ciWorkflow, /npm run lint:ratchet/);
   assert.match(ciWorkflow, /npm run typecheck:ratchet/);
   assert.match(ciWorkflow, /npm run build/);
+  assert.match(ciWorkflow, /SUPABASE_SERVICE_ROLE_KEY: ci-service-role-key/);
+  assert.match(ciWorkflow, /NEXT_PUBLIC_SUPABASE_URL: https:\/\/ci\.invalid/);
   assert.match(releaseBuilder, /npm run typecheck:ratchet/);
   assert.match(releaseBuilder, /npm run lint:ratchet/);
   assert.match(releaseBuilder, /npm --prefix "\$SOURCE\/tests\/e2e" ci/);

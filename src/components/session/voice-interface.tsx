@@ -765,7 +765,15 @@ export function VoiceInterface({
     }
   }, [error]);
 
-  const autoStartAttemptedRef = useRef(false);
+  const autoStartInFlightRef = useRef(false);
+  const autoStartAttemptsRef = useRef(0);
+  const autoStartRetryTimerRef = useRef<number | null>(null);
+  const [autoStartRetryNonce, setAutoStartRetryNonce] = useState(0);
+  useEffect(() => () => {
+    if (autoStartRetryTimerRef.current !== null) {
+      window.clearTimeout(autoStartRetryTimerRef.current);
+    }
+  }, []);
   useEffect(() => {
     // 招聘铁律:须知页的「开始面试」是唯一站内点击。进入本组件后自动
     // 连接麦克风，并由 videoMode 自动启动摄像头录制；不得再显示测试/开始按钮。
@@ -773,13 +781,26 @@ export function VoiceInterface({
       !autoStart
       || preview
       || voice.isConnected
-      || autoStartAttemptedRef.current
+      || autoStartInFlightRef.current
+      || autoStartAttemptsRef.current >= 3
     ) return;
-    autoStartAttemptedRef.current = true;
+    autoStartInFlightRef.current = true;
+    autoStartAttemptsRef.current += 1;
     setError("");
     setIsStartingInterview(true);
-    void voice.connect().catch(() => setIsStartingInterview(false));
-  }, [autoStart, preview, voice.isConnected, voice.connect]);
+    void voice.connect().then((connected) => {
+      autoStartInFlightRef.current = false;
+      if (connected) return;
+      if (autoStartAttemptsRef.current >= 3) {
+        setIsStartingInterview(false);
+        return;
+      }
+      autoStartRetryTimerRef.current = window.setTimeout(() => {
+        autoStartRetryTimerRef.current = null;
+        setAutoStartRetryNonce((value) => value + 1);
+      }, 500 * autoStartAttemptsRef.current);
+    });
+  }, [autoStart, preview, voice.isConnected, voice.connect, autoStartRetryNonce]);
 
   // ── Start recording when voice connects (video mode) ───────────
   const recordingStartedRef = useRef(false);
@@ -2711,6 +2732,7 @@ export function VoiceInterface({
                 size="icon"
                 variant={chatOpen ? "default" : "secondary"}
                 className="h-9 w-9 rounded-full"
+                aria-label={chatOpen ? "关闭文字输入" : "打开文字输入"}
                 onClick={() => setChatOpen((prev) => !prev)}
               >
                 <MessageSquare className="h-4 w-4" />

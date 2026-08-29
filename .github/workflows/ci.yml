@@ -40,3 +40,12 @@ jobs:
 
       - name: Production build
         run: npm run build
+        env:
+          # Match the release builder's minimum build-time contract without
+          # exposing production credentials. Some server-only routes create a
+          # Supabase client while Next.js collects page data.
+          SUPABASE_URL: https://ci.invalid
+          SUPABASE_ANON_KEY: ci-anon-key
+          SUPABASE_SERVICE_ROLE_KEY: ci-service-role-key
+          NEXT_PUBLIC_SUPABASE_URL: https://ci.invalid
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-anon-key

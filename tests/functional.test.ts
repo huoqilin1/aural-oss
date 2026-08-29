@@ -366,7 +366,7 @@ test("next-question control sends one request and waits for relay acknowledgemen
   // the relay response has finished and the next control is enabled. Clean WSL
   // builds can compile/hydrate more slowly than a warm Windows workspace.
   await waitForCondition(
-    async () => await nextButton.isEnabled(),
+    async () => await nextButton.isEnabled({ timeout: 250 }).catch(() => false),
     20_000,
     "Expected next-question control after relay acknowledgement",
   );
@@ -408,9 +408,79 @@ test("latest follow-up must be answered before next-question control unlocks", a
   await waitForText(page, "Could you explain the exact metric and verification method?", 10_000);
 
   const nextButtons = page.getByRole("button", { name: "下一题" });
-  assert.equal(await nextButtons.first().isEnabled().catch(() => false), false);
+  assert.equal(
+    await nextButtons.first().isEnabled({ timeout: 250 }).catch(() => false),
+    false,
+  );
   const sent = await readRelaySentMessages(page);
   assert.equal(sent.filter((message) => message.type === "next_question").length, 0);
+
+  await context.close();
+});
+
+test("recruitment notice has one start action then auto-connects camera and microphone", async () => {
+  const context = await browser.newContext({ locale: "zh-CN" });
+  const page = await context.newPage();
+
+  await page.goto(
+    `${baseUrl}/functional-tests/voice?language=zh-CN&scenario=recruitment-entry`,
+  );
+  await waitForCondition(
+    async () => (await page.getByTestId("harness-ready").textContent()) === "true",
+    5_000,
+  );
+
+  await waitForText(page, "面试须知", 10_000, true);
+  assert.equal(await page.getByRole("button", { name: "开始面试", exact: true }).count(), 1);
+  assert.equal(
+    await page.getByRole("button", {
+      name: /开启摄像头|摄像头测试|麦克风测试|语音测试|开始语音测试|允许麦克风并开始面试/,
+    }).count(),
+    0,
+  );
+  assert.deepEqual(await readMediaRequests(page), []);
+
+  await page.getByText("我已阅读并同意以上面试须知", { exact: true }).click();
+  await page.getByRole("button", { name: "开始面试", exact: true }).click();
+
+  await waitForCondition(
+    async () => await page.getByRole("button", { name: "开始面试", exact: true }).count() === 0,
+    5_000,
+    "Expected the single start action to disappear after entry",
+  );
+  await waitForCondition(async () => {
+    const requests = await readMediaRequests(page);
+    return requests.some((request) => !!request.audio)
+      && requests.some((request) => !!request.video);
+  }, 15_000, "Expected recruitment camera and microphone to connect automatically");
+  await waitForText(page, "第 1 / 8 题", 10_000);
+
+  await context.close();
+});
+
+test("recruitment auto-start retries a transient media failure without a second start action", async () => {
+  const context = await browser.newContext({ locale: "zh-CN" });
+  const page = await context.newPage();
+
+  await page.goto(
+    `${baseUrl}/functional-tests/voice?language=zh-CN&scenario=recruitment-auto-retry`,
+  );
+  await waitForCondition(
+    async () => (await page.getByTestId("harness-ready").textContent()) === "true",
+    5_000,
+  );
+  assert.equal(
+    await page.getByRole("button", {
+      name: /开启摄像头|摄像头测试|麦克风测试|语音测试|开始语音测试|允许麦克风并开始面试/,
+    }).count(),
+    0,
+  );
+  await waitForCondition(async () => {
+    const requests = await readMediaRequests(page);
+    const audioRequests = requests.filter((request) => !!request.audio);
+    return audioRequests.length >= 2 && requests.some((request) => !!request.video);
+  }, 15_000, "Expected recruitment auto-start to recover from a transient media failure");
+  await waitForText(page, "第 1 / 8 题", 10_000);
 
   await context.close();
 });
@@ -500,13 +570,13 @@ test("recruitment completes only after eight distinct scored answers", async () 
     await waitForText(page, `第 ${question} / 8 题`, 10_000);
     assert.equal(await page.getByTestId("parent-complete").textContent(), "false");
 
-    await page.locator('[data-tour="voice-chat"] button').click();
+    await page.getByRole("button", { name: "打开文字输入", exact: true }).click();
     const input = page.getByRole("textbox");
     await input.fill(
       `第${question}题回答：这是基于真实经历的具体证据，包含本人职责、执行步骤、结果数据和验证方法。`,
     );
     await input.press("Enter");
-    await page.locator('[data-tour="voice-chat"] button').click();
+    await page.getByRole("button", { name: "关闭文字输入", exact: true }).click();
 
     if (question < 8) {
       const nextButton = page.locator(

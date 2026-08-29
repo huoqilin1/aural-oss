@@ -1,6 +1,7 @@
 "use client";
 
 import { VoiceInterface } from "@/components/session/voice-interface";
+import { IntervieweeOnboarding } from "@/components/session/interviewee-onboarding";
 import { useEffect, useState } from "react";
 
 type FunctionalRelayEvent =
@@ -19,6 +20,8 @@ type FunctionalScenarioId =
   | "thinking-until-response"
   | "advance-idempotency"
   | "advance-followup-guard"
+  | "recruitment-entry"
+  | "recruitment-auto-retry"
   | "recruitment-incomplete"
   | "recruitment-eight-question";
 
@@ -30,6 +33,7 @@ declare global {
     __functionalRelayScenario?: FunctionalScenario;
     __functionalScenarioId?: FunctionalScenarioId;
     __functionalRelayMockInstalled?: boolean;
+    __functionalMediaFailureInjected?: boolean;
   }
 }
 
@@ -205,6 +209,22 @@ const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
       events: [{ type: "close", delay: 30 }],
     },
   },
+  "recruitment-entry": {
+    "/ws/voice": {
+      events: [{ type: "ready", delay: 20 }],
+    },
+    "/ws/openai-voice": {
+      events: [{ type: "close", delay: 30 }],
+    },
+  },
+  "recruitment-auto-retry": {
+    "/ws/voice": {
+      events: [{ type: "ready", delay: 20 }],
+    },
+    "/ws/openai-voice": {
+      events: [{ type: "close", delay: 30 }],
+    },
+  },
   "recruitment-incomplete": {
     "/ws/voice": {
       events: [{ type: "ready", delay: 20 }],
@@ -235,6 +255,7 @@ function installFunctionalRelayMocks(
   window.__functionalMediaRequests = [];
   window.__functionalRelayScenario = scenario;
   window.__functionalScenarioId = scenarioId;
+  window.__functionalMediaFailureInjected = false;
   window.sessionStorage.setItem("__functionalRelayConnections", "[]");
   window.sessionStorage.setItem("__functionalRelaySentMessages", "[]");
   window.sessionStorage.setItem("__functionalMediaRequests", "[]");
@@ -255,6 +276,15 @@ function installFunctionalRelayMocks(
       "__functionalMediaRequests",
       JSON.stringify(requests),
     );
+    if (
+      scenarioId === "recruitment-auto-retry"
+      && !!constraints.audio
+      && !constraints.video
+      && !window.__functionalMediaFailureInjected
+    ) {
+      window.__functionalMediaFailureInjected = true;
+      throw new DOMException("Injected transient microphone failure", "NotReadableError");
+    }
     return new MediaStream();
   };
 
@@ -440,6 +470,7 @@ export function VoiceFunctionalHarness({
 }) {
   const [parentCompleted, setParentCompleted] = useState(false);
   const [mocksReady, setMocksReady] = useState(false);
+  const [onboardingCompleted, setOnboardingCompleted] = useState(false);
   const isRecruitmentScenario = scenario.startsWith("recruitment-");
   const isAdvanceScenario = scenario.startsWith("advance-") || isRecruitmentScenario;
   const recruitmentQuestions = [
@@ -509,7 +540,18 @@ export function VoiceFunctionalHarness({
       <div data-testid="harness-ready" className="sr-only">
         {mocksReady ? "true" : "false"}
       </div>
-      {mocksReady && (
+      {mocksReady && scenario === "recruitment-entry" && !onboardingCompleted ? (
+        <IntervieweeOnboarding
+          interviewTitle="数君招聘 · Functional Voice Interview"
+          questionCount={8}
+          timeLimitMinutes={30}
+          language={language}
+          voiceEnabled
+          aiName="TestInterviewer"
+          questionsReady
+          onComplete={() => setOnboardingCompleted(true)}
+        />
+      ) : mocksReady && (
         <VoiceInterface
           sessionId="functional-session"
           interviewId="functional-interview"
