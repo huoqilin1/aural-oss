@@ -71,6 +71,15 @@ const DEFAULT_OPENAI_RELAY_PORT = "8767";
 const DEFAULT_VOICE_RELAY_PATH = "/ws/voice";
 const DEFAULT_OPENAI_RELAY_PATH = "/ws/openai-voice";
 const READY_STATE_OPEN = 1;
+const SESSION_SUPERSEDED_CLOSE_CODE = 4001;
+const SESSION_SUPERSEDED_CLOSE_REASON = "session_reconnected";
+
+export function isSessionSupersededClose(event: unknown): boolean {
+  if (!event || typeof event !== "object") return false;
+  const closeEvent = event as { code?: unknown; reason?: unknown };
+  return closeEvent.code === SESSION_SUPERSEDED_CLOSE_CODE
+    && closeEvent.reason === SESSION_SUPERSEDED_CLOSE_REASON;
+}
 
 export function isChineseVoiceLanguage(language?: string): boolean {
   if (!language) return false;
@@ -511,9 +520,22 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
         reject(new Error(`${relayDisplayName(target.kind)} websocket error`));
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         clear();
         if (this.destroyed) return;
+        if (socket !== this.socket || attemptId !== this.attemptSerial) return;
+
+        // A refreshed page has already claimed this persisted interview.
+        // Retrying from the stale document could reclaim ownership and create
+        // a reconnect loop, so this specific server close is terminal here.
+        if (isSessionSupersededClose(event)) {
+          if (socket === this.socket) {
+            this.socket = null;
+            this.ready = false;
+          }
+          this.destroyed = true;
+          return;
+        }
 
         if (!this.ready) {
           if (!settled) {
@@ -523,7 +545,6 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
           return;
         }
 
-        if (socket !== this.socket) return;
         this.socket = null;
         this.ready = false;
         void this.failover(`${relayDisplayName(target.kind)} disconnected`).catch(() => {

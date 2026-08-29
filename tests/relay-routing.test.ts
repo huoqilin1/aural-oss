@@ -38,9 +38,9 @@ class FakeSocket implements RelaySocketLike {
     this.onmessage?.({ data: JSON.stringify(data) });
   }
 
-  emitClose(): void {
+  emitClose(code?: number, reason?: string): void {
     this.readyState = 3;
-    this.onclose?.();
+    this.onclose?.({ code, reason });
   }
 
   emitError(): void {
@@ -352,6 +352,75 @@ test("RelayConnector reconnects to the same relay successfully without failover"
   assert.equal(connector.target?.kind, "voice");
   assert.equal(connector.isReady, true);
   assert.equal(failovers.length, 0);
+});
+
+test("RelayConnector does not reconnect after a refreshed page supersedes it", async () => {
+  const sockets: FakeSocket[] = [];
+  const connector = new RelayConnector<Record<string, unknown>>({
+    targets: [
+      { kind: "voice", url: "ws://voice-primary:8766" },
+      { kind: "openai", url: "ws://openai-fallback:8767" },
+    ],
+    reconnectAttempts: 2,
+    reconnectDelayMs: 1,
+    buildInitMessage: () => ({ type: "init" }),
+    createSocket: (url) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      return socket;
+    },
+    onJsonMessage: () => {},
+  });
+
+  const connectPromise = connector.connect();
+  sockets[0].emitOpen();
+  await flush();
+  sockets[0].emitJson({ type: "ready" });
+  await connectPromise;
+
+  sockets[0].emitClose(4001, "session_reconnected");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(sockets.length, 1);
+  assert.equal(connector.isReady, false);
+  assert.equal(connector.sendJson({ type: "ping" }), false);
+});
+
+test("a late superseded close from an old socket cannot stop the current reconnect", async () => {
+  const sockets: FakeSocket[] = [];
+  const connector = new RelayConnector<Record<string, unknown>>({
+    targets: [
+      { kind: "voice", url: "ws://voice-primary:8766" },
+      { kind: "openai", url: "ws://openai-fallback:8767" },
+    ],
+    reconnectAttempts: 1,
+    reconnectDelayMs: 1,
+    buildInitMessage: () => ({ type: "init" }),
+    createSocket: (url) => {
+      const socket = new FakeSocket(url);
+      sockets.push(socket);
+      return socket;
+    },
+    onJsonMessage: () => {},
+  });
+
+  const connectPromise = connector.connect();
+  sockets[0].emitOpen();
+  await flush();
+  sockets[0].emitJson({ type: "ready" });
+  await connectPromise;
+
+  sockets[0].emitClose();
+  await waitFor(() => sockets.length === 2, 2_000);
+  sockets[1].emitOpen();
+  await flush();
+  sockets[1].emitJson({ type: "ready" });
+  await waitFor(() => connector.isReady, 2_000);
+
+  sockets[0].emitClose(4001, "session_reconnected");
+  assert.equal(connector.isReady, true);
+  assert.equal(connector.sendJson({ type: "ping" }), true);
+  assert.deepEqual(JSON.parse(sockets[1].sent.at(-1) || "{}"), { type: "ping" });
 });
 
 test("RelayConnector reports permanent failure after all relay targets fail", async () => {

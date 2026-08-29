@@ -68,6 +68,7 @@ import {
   planSessionFinalization,
   type LiveSessionRecord,
 } from "./session-finalization";
+import { SessionConnectionRegistry } from "./session-connection-registry";
 
 const log = createLogger("voice-relay");
 
@@ -806,6 +807,7 @@ const SESSION_DISCONNECT_GRACE_MS =
   Number(process.env.SESSION_DISCONNECT_GRACE_MS) || 10 * 60_000;
 
 const liveSessions = new Map<string, LiveSessionRecord>();
+const browserSessionConnections = new SessionConnectionRegistry<WebSocket>();
 
 async function persistSessionStatus(
   sessionId: string,
@@ -1126,9 +1128,20 @@ async function handleMicTestConnection(browserWs: WebSocket) {
 
 async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewContext) {
   // ── 服务端收尾登记:本连接活跃时持续摸时间,关页后由宽限/硬限兜底 ──
-  registerLiveSession(ctx);
   const ctxSessionId = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
+  const connectionClaim = ctxSessionId
+    ? browserSessionConnections.claim(ctxSessionId, browserWs)
+    : null;
+  const ownsPersistedSession = () =>
+    !ctxSessionId
+    || !connectionClaim
+    || browserSessionConnections.isCurrent(ctxSessionId, connectionClaim.lease);
+  if (connectionClaim?.superseded) {
+    log.info("New browser connection superseded the previous relay for this session");
+  }
+  registerLiveSession(ctx);
   browserWs.on("message", () => {
+    if (!ownsPersistedSession()) return;
     const record = ctxSessionId ? liveSessions.get(ctxSessionId) : undefined;
     if (record && record.status === "live") record.lastActiveAtMs = Date.now();
   });
@@ -1874,6 +1887,10 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
   function endInterview() {
     if (interviewDone) return;
+    if (!ownsPersistedSession()) {
+      interviewDone = true;
+      return;
+    }
     interviewDone = true;
     clearPendingAsrFinal();
     awaitingFinalResponse = false;
@@ -1903,6 +1920,11 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
   function queueFarewellAndEnd(reason: string) {
     if (interviewDone || endingInterview) return;
+    if (!ownsPersistedSession()) {
+      interviewDone = true;
+      endingInterview = true;
+      return;
+    }
     endingInterview = true;
 
     awaitingFinalResponse = false;
@@ -2972,6 +2994,14 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   /** AFK 守卫:页面开着但人不在,空转两题后诚实收尾,不留全空回答记录 */
   function abandonForInactivity() {
     if (interviewDone || endingInterview) return;
+    if (!ownsPersistedSession()) {
+      interviewDone = true;
+      endingInterview = true;
+      clearSilenceAutoSkip();
+      clearPendingAsrFinal();
+      cancelTts();
+      return;
+    }
     endingInterview = true;
     interviewDone = true;
     clearSilenceAutoSkip();
@@ -3422,6 +3452,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
   // ── Browser message handling ────────────────────────────────────
 
   browserWs.on("message", (data) => {
+    if (!ownsPersistedSession()) return;
     try {
       const msg = JSON.parse(data.toString());
 
@@ -3539,6 +3570,9 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
   browserWs.on("close", () => {
     log.info("Browser disconnected");
+    if (ctxSessionId && connectionClaim) {
+      browserSessionConnections.release(ctxSessionId, connectionClaim.lease);
+    }
     const wasFarewellDone = farewellCompleted;
     interviewDone = true;
     clearPendingAsrFinal();
