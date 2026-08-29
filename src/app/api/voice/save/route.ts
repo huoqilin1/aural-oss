@@ -7,6 +7,7 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
 import {
   handleVoiceSave,
+  requireVoiceStorageResult,
   type ActivitySegment,
   type CompletionSession,
   type ProgressSession,
@@ -17,7 +18,7 @@ import {
 const log = createLogger("api/voice/save");
 const voiceSaveOps: VoiceSaveOps = {
   async insertMessages(sessionId, messages) {
-    await supabaseAdmin.from("messages").insert(
+    const result = await supabaseAdmin.from("messages").insert(
       messages.map((m) => ({
         sessionId,
         role: m.role === "user" ? ("USER" as const) : ("ASSISTANT" as const),
@@ -28,9 +29,10 @@ const voiceSaveOps: VoiceSaveOps = {
         transcription: m.source === "chat" ? "chat" : null,
       })),
     );
+    requireVoiceStorageResult("insert voice messages", result);
   },
   async loadSessionForCompletion(sessionId) {
-    const { data } = await supabaseAdmin
+    const result = await supabaseAdmin
       .from("sessions")
       .select(
         `*, interview:interviews!inner(title, objective, language, userId, projectId, assessmentCriteria, questions(id, text, order, type, description))`,
@@ -42,55 +44,61 @@ const voiceSaveOps: VoiceSaveOps = {
       })
       .single();
 
+    const data = requireVoiceStorageResult("load completion session", result);
     return (data as CompletionSession | null) ?? null;
   },
   async loadActivitySegments(sessionId) {
-    const { data } = await supabaseAdmin
+    const result = await supabaseAdmin
       .from("sessions")
       .select("activitySegments")
       .eq("id", sessionId)
       .single();
+    const data = requireVoiceStorageResult("load activity segments", result);
     return ((data?.activitySegments as ActivitySegment[]) ?? []);
   },
   async closeOpenSegments(sessionId, now) {
-    const { data } = await supabaseAdmin
+    const loadResult = await supabaseAdmin
       .from("sessions")
       .select("activitySegments")
       .eq("id", sessionId)
       .single();
+    const data = requireVoiceStorageResult("load open activity segments", loadResult);
     const segments = ((data?.activitySegments as ActivitySegment[]) ?? []);
     const closed = segments.map((s) =>
       s.leftAt === null ? { ...s, leftAt: now } : s,
     );
-    await supabaseAdmin
+    const updateResult = await supabaseAdmin
       .from("sessions")
       .update({ activitySegments: closed })
       .eq("id", sessionId);
+    requireVoiceStorageResult("close activity segments", updateResult);
     return closed;
   },
   async loadMessageTimestamps(sessionId) {
-    const { data } = await supabaseAdmin
+    const result = await supabaseAdmin
       .from("messages")
       .select("timestamp")
       .eq("sessionId", sessionId)
       .order("timestamp", { ascending: true });
 
+    const data = requireVoiceStorageResult("load message timestamps", result);
     return (data ?? []).map((r) => r.timestamp as string);
   },
   async loadAnsweredQuestionIds(sessionId) {
-    const { data } = await supabaseAdmin
+    const result = await supabaseAdmin
       .from("messages")
       .select("questionId")
       .eq("sessionId", sessionId)
       .eq("role", "USER")
       .not("questionId", "is", null);
 
+    const data = requireVoiceStorageResult("load answered question ids", result);
     return (data ?? [])
       .map((row) => row.questionId as string | null)
       .filter((questionId): questionId is string => Boolean(questionId));
   },
   async loadSessionForProgress(sessionId) {
-    const { data } = await supabaseAdmin
+    const result = await supabaseAdmin
       .from("sessions")
       .select(`*, interview:interviews!inner(questions(*))`)
       .eq("id", sessionId)
@@ -100,10 +108,15 @@ const voiceSaveOps: VoiceSaveOps = {
       })
       .single();
 
+    const data = requireVoiceStorageResult("load progress session", result);
     return (data as ProgressSession | null) ?? null;
   },
   async updateSession(sessionId, payload) {
-    await supabaseAdmin.from("sessions").update(payload).eq("id", sessionId);
+    const result = await supabaseAdmin
+      .from("sessions")
+      .update(payload)
+      .eq("id", sessionId);
+    requireVoiceStorageResult("update voice session", result);
   },
   generateSummary,
   log,

@@ -4,6 +4,7 @@ import {
   candidateFacingQuestionCount,
   isInternalQuestionDescription,
   isProgressiveOpeningOnly,
+  LiveQuestionIdLookup,
   mergeExpandedQuestionSet,
   shouldWaitForQuestionExpansion,
 } from "../src/lib/voice/dynamic-question-sync";
@@ -126,6 +127,28 @@ test("expands a conditional fallback snapshot without changing answered question
   const merged = mergeExpandedQuestionSet(openingWithFallback, generated, 1);
   assert.equal(merged?.length, 8);
   assert.deepEqual(merged?.slice(0, 2), openingWithFallback);
+});
+
+test("a live question-id lookup binds Q3-Q8 after progressive expansion", () => {
+  const lookup = new LiveQuestionIdLookup([
+    { id: "q-1", order: 0 },
+    { id: "q-2", order: 1 },
+  ]);
+  const relayCallbackCreatedAtStart = (index: number) => lookup.idAt(index);
+
+  assert.equal(relayCallbackCreatedAtStart(2), undefined);
+
+  lookup.update(
+    Array.from({ length: 8 }, (_, index) => ({
+      id: `q-${index + 1}`,
+      order: index,
+    })),
+  );
+
+  assert.deepEqual(
+    Array.from({ length: 8 }, (_, index) => relayCallbackCreatedAtStart(index)),
+    ["q-1", "q-2", "q-3", "q-4", "q-5", "q-6", "q-7", "q-8"],
+  );
 });
 
 test("restores an invited candidate to the persisted question", () => {

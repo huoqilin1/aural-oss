@@ -4,6 +4,34 @@ export interface DynamicQuestionLike {
   description?: string | null;
 }
 
+export interface QuestionIdLike {
+  id?: string | null;
+  order: number;
+}
+
+/**
+ * Stable lookup used by long-lived relay callbacks. A progressive recruitment
+ * interview may contain only Q1/Q2 when the relay is connected; updating this
+ * object lets that original callback bind later answers to generated Q3-Q8.
+ */
+export class LiveQuestionIdLookup {
+  private ids: Array<string | undefined> = [];
+
+  constructor(questions: readonly QuestionIdLike[]) {
+    this.update(questions);
+  }
+
+  update(questions: readonly QuestionIdLike[]): void {
+    this.ids = [...questions]
+      .sort((left, right) => left.order - right.order)
+      .map((question) => question.id || undefined);
+  }
+
+  idAt(index: number): string | undefined {
+    return this.ids[index];
+  }
+}
+
 const LEGACY_OPRUN_MAIN_DIMENSIONS = new Set([
   "communication",
   "job_duty_primary",

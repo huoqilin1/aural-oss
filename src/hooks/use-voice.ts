@@ -19,6 +19,7 @@ import {
   shouldFlushPlaybackQueue,
 } from "@/lib/voice/playback-jitter-buffer";
 import { requeueFailedProgressMessages } from "@/lib/voice/progress-save";
+import { LiveQuestionIdLookup } from "@/lib/voice/dynamic-question-sync";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const log = createLogger("voice");
@@ -161,6 +162,12 @@ export function useVoice({
   const currentQuestionIndexRef = useRef(
     interviewContext.startQuestionIndex ?? 0
   );
+  const questionIdLookupRef = useRef<LiveQuestionIdLookup | null>(null);
+  if (!questionIdLookupRef.current) {
+    questionIdLookupRef.current = new LiveQuestionIdLookup(interviewContext.questions);
+  } else {
+    questionIdLookupRef.current.update(interviewContext.questions);
+  }
   const latestCodeUpdateRef = useRef<{ content: string; language: string } | null>(
     null
   );
@@ -177,8 +184,8 @@ export function useVoice({
   }, [state]);
 
   const questionIdAt = useCallback(
-    (index: number) => interviewContext.questions[index]?.id,
-    [interviewContext.questions],
+    (index: number) => questionIdLookupRef.current?.idAt(index),
+    [],
   );
 
   // Cleanup on unmount

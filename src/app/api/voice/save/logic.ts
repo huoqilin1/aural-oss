@@ -12,6 +12,21 @@ export type VoiceSavePayload = {
 
 export type ActivitySegment = { enteredAt: string; leftAt: string | null };
 
+type StorageResult<T> = {
+  data: T;
+  error: { code?: string | null } | null;
+};
+
+export function requireVoiceStorageResult<T>(
+  operation: string,
+  result: StorageResult<T>,
+): T {
+  if (result.error) {
+    throw new Error(`${operation} failed (${result.error.code || "unknown"})`);
+  }
+  return result.data;
+}
+
 const ACTIVITY_GAP_CAP_MS = 5 * 60 * 1000;
 const STALE_SESSION_GRACE_MS = 10 * 60 * 1000;
 

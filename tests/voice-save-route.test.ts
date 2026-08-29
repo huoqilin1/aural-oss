@@ -5,8 +5,23 @@ import {
   computeMessageBasedDuration,
   computeSegmentDuration,
   handleVoiceSave,
+  requireVoiceStorageResult,
   type ActivitySegment,
 } from "@/app/api/voice/save/logic";
+
+test("voice storage failures throw so progress messages can be requeued", () => {
+  assert.throws(
+    () => requireVoiceStorageResult("insert voice messages", {
+      data: null,
+      error: { code: "storage_failure" },
+    }),
+    /insert voice messages failed \(storage_failure\)/,
+  );
+  assert.equal(
+    requireVoiceStorageResult("insert voice messages", { data: "ok", error: null }),
+    "ok",
+  );
+});
 
 // ── computeSegmentDuration unit tests ───────────────────────────────
 
