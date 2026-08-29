@@ -18,6 +18,7 @@ import {
   PLAYBACK_SAMPLE_RATE,
   shouldFlushPlaybackQueue,
 } from "@/lib/voice/playback-jitter-buffer";
+import { requeueFailedProgressMessages } from "@/lib/voice/progress-save";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const log = createLogger("voice");
@@ -141,6 +142,7 @@ export function useVoice({
   );
   const isListeningRef = useRef(false);
   const trackedMessagesRef = useRef<TrackedMessage[]>([]);
+  const progressSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const micHoldUntilRef = useRef(0);
   const bargeInFramesRef = useRef(0);
 
@@ -571,22 +573,30 @@ export function useVoice({
 
       if (messages.length === 0 && typeof currentQuestionIndex !== "number") return;
 
-      try {
-        const response = await fetch("/api/voice/save", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionId, messages, currentQuestionIndex }),
-          keepalive: true,
-        });
-        if (!response.ok) {
-          throw new Error(`Progress save failed with HTTP ${response.status}`);
+      const operation = progressSaveChainRef.current.then(async () => {
+        try {
+          const response = await fetch("/api/voice/save", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sessionId, messages, currentQuestionIndex }),
+            keepalive: true,
+          });
+          if (!response.ok) {
+            throw new Error(`Progress save failed with HTTP ${response.status}`);
+          }
+          log.info(
+            `Progress saved: ${messages.length} msgs, Q${currentQuestionIndex + 1}`
+          );
+        } catch (err) {
+          trackedMessagesRef.current = requeueFailedProgressMessages(
+            messages,
+            trackedMessagesRef.current,
+          );
+          log.error("Failed to save progress; messages requeued:", err);
         }
-        log.info(
-          `Progress saved: ${messages.length} msgs, Q${currentQuestionIndex + 1}`
-        );
-      } catch (err) {
-        log.error("Failed to save progress:", err);
-      }
+      });
+      progressSaveChainRef.current = operation;
+      await operation;
     },
     [questionIdAt, sessionId]
   );
@@ -1087,6 +1097,11 @@ export function useVoice({
 
   /** Save remaining tracked messages and complete the session */
   const saveAndComplete = useCallback(async () => {
+    // A question transition saves in the background. Wait for all queued
+    // progress saves so completion cannot race ahead of durable answers.
+    // Failed batches are requeued by saveProgress and included below.
+    await progressSaveChainRef.current;
+
     // Flush any pending buffers before saving
     const pendingAsrText = asrBufferRef.current.trim();
     if (pendingAsrText) {
