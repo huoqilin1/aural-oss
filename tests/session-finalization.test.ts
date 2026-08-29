@@ -6,7 +6,9 @@ import {
 } from "../server/session-finalization";
 import {
   COMPLETION_WITH_VISIBLE_FAREWELL_FALLBACK_MS,
+  RECRUITMENT_CLOSING_FALLBACK_MS,
   completionAutoCloseDelayMs,
+  recruitmentClosingAutoCloseDelayMs,
   shouldBlockRecruitmentCompletion,
 } from "../src/lib/voice/completion-auto-close";
 
@@ -75,6 +77,66 @@ test("eight answered scored questions can still use the normal end path", () => 
       plannedMainQuestionCount: 8,
     }),
     false,
+  );
+});
+
+test("answered unscored closing item can use the normal end path", () => {
+  assert.equal(
+    shouldBlockRecruitmentCompletion({
+      isRecruitmentInterview: true,
+      interviewComplete: false,
+      totalQuestions: 9,
+      currentQuestionIndex: 8,
+      answeredCurrentQuestion: true,
+      plannedMainQuestionCount: 8,
+    }),
+    false,
+  );
+});
+
+test("unexpected extra recruitment items remain blocked", () => {
+  assert.equal(
+    shouldBlockRecruitmentCompletion({
+      isRecruitmentInterview: true,
+      interviewComplete: false,
+      totalQuestions: 10,
+      currentQuestionIndex: 9,
+      answeredCurrentQuestion: true,
+      plannedMainQuestionCount: 8,
+    }),
+    true,
+  );
+});
+
+test("idle answered recruitment closing has a bounded save fallback", () => {
+  assert.equal(
+    recruitmentClosingAutoCloseDelayMs({
+      isRecruitmentInterview: true,
+      locallyCompleted: false,
+      isCandidateClosing: true,
+      answeredCurrentQuestion: true,
+      isListening: false,
+      isSpeaking: false,
+      isProcessing: false,
+      isTransitioning: false,
+    }),
+    RECRUITMENT_CLOSING_FALLBACK_MS,
+  );
+});
+
+test("recruitment closing fallback waits while the candidate or AI is active", () => {
+  assert.equal(
+    recruitmentClosingAutoCloseDelayMs({
+      isRecruitmentInterview: true,
+      locallyCompleted: false,
+      isCandidateClosing: true,
+      answeredCurrentQuestion: true,
+      isListening: false,
+      isSpeaking: false,
+      isProcessing: true,
+      isTransitioning: false,
+    }),
+    null,
   );
 });
 

@@ -40,6 +40,7 @@ import {
 } from "@/lib/voice/dynamic-question-sync";
 import {
   completionAutoCloseDelayMs,
+  recruitmentClosingAutoCloseDelayMs,
   shouldBlockRecruitmentCompletion,
 } from "@/lib/voice/completion-auto-close";
 import {
@@ -1585,6 +1586,28 @@ export function VoiceInterface({
     }, completionFallbackDelayMs);
     return () => clearTimeout(timer);
   }, [completionFallbackDelayMs]);
+
+  // A completed recruitment relay normally sends interview_complete. If that
+  // final WebSocket frame is lost, do not strand the candidate after they have
+  // answered the optional, unscored closing item. The save route still fails
+  // closed unless all eight scored, question-bound answers are present.
+  const recruitmentClosingFallbackDelayMs = recruitmentClosingAutoCloseDelayMs({
+    isRecruitmentInterview: isOprunRecruitmentInterview,
+    locallyCompleted,
+    isCandidateClosing,
+    answeredCurrentQuestion,
+    isListening: voice.isListening,
+    isSpeaking: voice.isSpeaking,
+    isProcessing: voice.isProcessing,
+    isTransitioning: voice.isTransitioning,
+  });
+  useEffect(() => {
+    if (recruitmentClosingFallbackDelayMs === null) return;
+    const timer = setTimeout(() => {
+      handleEndInterviewRef.current();
+    }, recruitmentClosingFallbackDelayMs);
+    return () => clearTimeout(timer);
+  }, [recruitmentClosingFallbackDelayMs]);
 
   // 看门狗：最后一题答完后，如果「思考/准备下一题」状态卡住（现场曾卡 5 分钟
   // 直到候选人手动结束），30 秒后按正常收尾流程自动结束，进度不丢。

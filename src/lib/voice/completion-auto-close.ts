@@ -1,5 +1,6 @@
 export const COMPLETION_WITHOUT_FAREWELL_DELAY_MS = 8_000;
 export const COMPLETION_WITH_VISIBLE_FAREWELL_FALLBACK_MS = 30_000;
+export const RECRUITMENT_CLOSING_FALLBACK_MS = 30_000;
 
 export function shouldBlockRecruitmentCompletion(input: {
   isRecruitmentInterview: boolean;
@@ -11,11 +12,44 @@ export function shouldBlockRecruitmentCompletion(input: {
 }): boolean {
   if (!input.isRecruitmentInterview || input.interviewComplete) return false;
 
+  const hasAllowedQuestionCount =
+    input.totalQuestions === input.plannedMainQuestionCount
+    || (
+      input.totalQuestions === input.plannedMainQuestionCount + 1
+      && input.currentQuestionIndex >= input.plannedMainQuestionCount
+    );
+
   return (
-    input.totalQuestions !== input.plannedMainQuestionCount
+    !hasAllowedQuestionCount
     || input.currentQuestionIndex < input.plannedMainQuestionCount - 1
     || !input.answeredCurrentQuestion
   );
+}
+
+export function recruitmentClosingAutoCloseDelayMs(input: {
+  isRecruitmentInterview: boolean;
+  locallyCompleted: boolean;
+  isCandidateClosing: boolean;
+  answeredCurrentQuestion: boolean;
+  isListening: boolean;
+  isSpeaking: boolean;
+  isProcessing: boolean;
+  isTransitioning: boolean;
+}): number | null {
+  if (
+    !input.isRecruitmentInterview
+    || input.locallyCompleted
+    || !input.isCandidateClosing
+    || !input.answeredCurrentQuestion
+    || input.isListening
+    || input.isSpeaking
+    || input.isProcessing
+    || input.isTransitioning
+  ) {
+    return null;
+  }
+
+  return RECRUITMENT_CLOSING_FALLBACK_MS;
 }
 
 export function completionAutoCloseDelayMs(input: {

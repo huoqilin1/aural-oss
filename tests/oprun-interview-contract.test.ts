@@ -339,7 +339,8 @@ test("recruitment silence never advances or reports a false completion", () => {
 
 test("candidate cannot manually complete recruitment before eight scored answers", () => {
   assert.match(voiceInterface, /shouldBlockRecruitmentCompletion\(\{/);
-  assert.match(completionAutoClose, /input\.totalQuestions !== input\.plannedMainQuestionCount/);
+  assert.match(completionAutoClose, /input\.totalQuestions === input\.plannedMainQuestionCount \+ 1/);
+  assert.match(completionAutoClose, /!hasAllowedQuestionCount/);
   assert.match(completionAutoClose, /input\.currentQuestionIndex < input\.plannedMainQuestionCount - 1/);
   assert.match(completionAutoClose, /!input\.answeredCurrentQuestion/);
   assert.match(completionAutoClose, /input\.interviewComplete\) return false/);
