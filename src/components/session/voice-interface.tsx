@@ -38,6 +38,7 @@ import {
     isInternalQuestionDescription,
     OPRUN_PLANNED_MAIN_QUESTION_COUNT,
 } from "@/lib/voice/dynamic-question-sync";
+import { completionAutoCloseDelayMs } from "@/lib/voice/completion-auto-close";
 import {
     AlertCircle,
     Check,
@@ -1567,13 +1568,20 @@ export function VoiceInterface({
     return () => clearTimeout(timer);
   }, [farewellReadyToClose, locallyCompleted]);
 
+  const completionFallbackDelayMs = completionAutoCloseDelayMs({
+    interviewComplete: voice.isInterviewComplete,
+    locallyCompleted,
+    hasVisibleFarewell,
+    farewellReadyToClose,
+  });
+
   useEffect(() => {
-    if (!voice.isInterviewComplete || locallyCompleted || hasVisibleFarewell) return;
+    if (completionFallbackDelayMs === null) return;
     const timer = setTimeout(() => {
       handleEndInterviewRef.current();
-    }, 8000);
+    }, completionFallbackDelayMs);
     return () => clearTimeout(timer);
-  }, [voice.isInterviewComplete, locallyCompleted, hasVisibleFarewell]);
+  }, [completionFallbackDelayMs]);
 
   // 看门狗：最后一题答完后，如果「思考/准备下一题」状态卡住（现场曾卡 5 分钟
   // 直到候选人手动结束），30 秒后按正常收尾流程自动结束，进度不丢。

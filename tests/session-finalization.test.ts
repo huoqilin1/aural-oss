@@ -4,8 +4,36 @@ import {
   planSessionFinalization,
   type LiveSessionRecord,
 } from "../server/session-finalization";
+import {
+  COMPLETION_WITH_VISIBLE_FAREWELL_FALLBACK_MS,
+  completionAutoCloseDelayMs,
+} from "../src/lib/voice/completion-auto-close";
 
 const GRACE = 10 * 60_000;
+
+test("completed farewell has a bounded save fallback when playback never settles", () => {
+  assert.equal(
+    completionAutoCloseDelayMs({
+      interviewComplete: true,
+      locallyCompleted: false,
+      hasVisibleFarewell: true,
+      farewellReadyToClose: false,
+    }),
+    COMPLETION_WITH_VISIBLE_FAREWELL_FALLBACK_MS,
+  );
+});
+
+test("naturally finished farewell owns the normal close path", () => {
+  assert.equal(
+    completionAutoCloseDelayMs({
+      interviewComplete: true,
+      locallyCompleted: false,
+      hasVisibleFarewell: true,
+      farewellReadyToClose: true,
+    }),
+    null,
+  );
+});
 
 function record(overrides: Partial<LiveSessionRecord> = {}): LiveSessionRecord {
   return {
