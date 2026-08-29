@@ -204,6 +204,10 @@ test("invited candidates resume the persisted question and transcript", () => {
   assert.match(candidateRouter, /session:sessions\(\*, messages\(\*\)\)/);
   assert.match(invitedCandidateSession, /session\.currentQuestionId/);
   assert.match(invitedCandidateSession, /buildInviteResumeState/);
+  assert.match(invitedCandidateSession, /useRecruitmentOnboardingGate/);
+  assert.match(invitedCandidateSession, /hasServerProgress: !!candidateResumeState\?\.isResuming/);
+  assert.match(invitedCandidateSession, /if \(!onboardingReady\)/);
+  assert.match(invitedCandidateSession, /onComplete=\{completeOnboarding\}/);
   assert.match(invitedCandidateSession, /startQuestionIndex: resumeState\.questionIndex/);
   assert.match(invitedCandidateSession, /initialMessages=\{resumeState\.isResuming \? resumeTextMessages/);
   assert.match(invitedCandidateSession, /initialDrawings=\{resumeState\.isResuming && resumeDrawings\.length/);

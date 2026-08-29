@@ -2,6 +2,7 @@
 
 import { VoiceInterface } from "@/components/session/voice-interface";
 import { IntervieweeOnboarding } from "@/components/session/interviewee-onboarding";
+import { useRecruitmentOnboardingGate } from "@/hooks/use-recruitment-onboarding-gate";
 import { useEffect, useState } from "react";
 
 type FunctionalRelayEvent =
@@ -490,9 +491,13 @@ export function VoiceFunctionalHarness({
 }) {
   const [parentCompleted, setParentCompleted] = useState(false);
   const [mocksReady, setMocksReady] = useState(false);
-  const [onboardingCompleted, setOnboardingCompleted] = useState(false);
   const isRecruitmentScenario = scenario.startsWith("recruitment-");
   const isAdvanceScenario = scenario.startsWith("advance-") || isRecruitmentScenario;
+  const recruitmentOnboarding = useRecruitmentOnboardingGate({
+    isRecruitmentInterview: scenario === "recruitment-entry",
+    sessionId: "functional-session",
+    hasServerProgress: false,
+  });
   const recruitmentQuestions = [
     "请结合你的真实经历做自我介绍。",
     "请说明一项与岗位核心职责最相关的经历。",
@@ -560,7 +565,9 @@ export function VoiceFunctionalHarness({
       <div data-testid="harness-ready" className="sr-only">
         {mocksReady ? "true" : "false"}
       </div>
-      {mocksReady && scenario === "recruitment-entry" && !onboardingCompleted ? (
+      {mocksReady && scenario === "recruitment-entry" && !recruitmentOnboarding.ready ? (
+        <div data-testid="onboarding-restoring">restoring</div>
+      ) : mocksReady && scenario === "recruitment-entry" && !recruitmentOnboarding.done ? (
         <IntervieweeOnboarding
           interviewTitle="数君招聘 · Functional Voice Interview"
           questionCount={8}
@@ -569,7 +576,7 @@ export function VoiceFunctionalHarness({
           voiceEnabled
           aiName="TestInterviewer"
           questionsReady
-          onComplete={() => setOnboardingCompleted(true)}
+          onComplete={recruitmentOnboarding.complete}
         />
       ) : mocksReady && (
         <VoiceInterface

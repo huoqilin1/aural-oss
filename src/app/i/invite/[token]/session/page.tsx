@@ -16,6 +16,7 @@ import { CheckCircle2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import { useRecruitmentOnboardingGate } from "@/hooks/use-recruitment-onboarding-gate";
 
 const ChatInterface = dynamic(
   () => import("@/components/session/chat-interface").then((m) => m.ChatInterface),
@@ -33,7 +34,6 @@ export default function InviteSessionPage() {
 
   const [completed, setCompleted] = useState(false);
   const [completionReason, setCompletionReason] = useState<string | undefined>();
-  const [onboardingDone, setOnboardingDone] = useState(false);
 
   const handleComplete = (reason?: string) => {
     setCompletionReason(reason);
@@ -46,6 +46,26 @@ export default function InviteSessionPage() {
   );
 
   const candidateInterview = (candidate.data as any)?.interview;
+  const candidateSession = (candidate.data as any)?.session;
+  const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(
+    String(candidateInterview?.title ?? ""),
+  );
+  const candidateResumeState = candidateSession && candidateInterview
+    ? buildInviteResumeState(
+        candidateInterview.questions ?? [],
+        candidateSession.currentQuestionId,
+        candidateSession.messages ?? [],
+      )
+    : null;
+  const {
+    ready: onboardingReady,
+    done: onboardingDone,
+    complete: completeOnboarding,
+  } = useRecruitmentOnboardingGate({
+    isRecruitmentInterview: isOprunRecruitmentInterview,
+    sessionId: candidateSession?.id,
+    hasServerProgress: !!candidateResumeState?.isResuming,
+  });
   const isWaitingForGeneratedQuestions = isProgressiveOpeningOnly(
     candidateInterview?.questions ?? [],
   );
@@ -77,14 +97,15 @@ export default function InviteSessionPage() {
 
   const session = (candidate.data as any).session;
   const interview = (candidate.data as any).interview;
-  const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(
-    String(interview.title ?? ""),
-  );
   const displayedQuestionCount = candidateFacingQuestionCount(
     interview.questions ?? [],
   );
 
   if (!session) {
+    return <PreparingScreen />;
+  }
+
+  if (!onboardingReady) {
     return <PreparingScreen />;
   }
 
@@ -145,7 +166,7 @@ export default function InviteSessionPage() {
         aiName={interview.aiName}
         questionTypes={resumeState.orderedQuestions.map((q: any) => q.type as string)}
         questionsReady={!isWaitingForGeneratedQuestions}
-        onComplete={() => setOnboardingDone(true)}
+        onComplete={completeOnboarding}
       />
     );
   }

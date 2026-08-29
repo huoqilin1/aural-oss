@@ -455,6 +455,23 @@ test("recruitment notice has one start action then auto-connects camera and micr
   }, 15_000, "Expected recruitment camera and microphone to connect automatically");
   await waitForText(page, "第 1 / 8 题", 10_000);
 
+  await page.reload();
+  await waitForCondition(
+    async () => (await page.getByTestId("harness-ready").textContent()) === "true",
+    5_000,
+  );
+  assert.equal(
+    await page.getByRole("button", { name: "开始面试", exact: true }).count(),
+    0,
+    "Expected a refreshed recruitment interview to resume without a second start action",
+  );
+  await waitForCondition(async () => {
+    const requests = await readMediaRequests(page);
+    return requests.some((request) => !!request.audio)
+      && requests.some((request) => !!request.video);
+  }, 15_000, "Expected refreshed recruitment interview media to reconnect automatically");
+  await waitForText(page, "第 1 / 8 题", 10_000);
+
   await context.close();
 });
 
