@@ -24,6 +24,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
+import type { RelayLlmRoute } from "../src/lib/relay-llm-route";
 import {
   isProgressiveOpeningOnly,
   mergeExpandedQuestionSet,
@@ -75,6 +76,7 @@ import {
   type LiveSessionRecord,
 } from "./session-finalization";
 import { SessionConnectionRegistry } from "./session-connection-registry";
+import { loadInterviewRelayLlmRoute } from "./interview-llm-route";
 
 const log = createLogger("voice-relay");
 
@@ -740,7 +742,8 @@ function buildFarewellSayHello(isZh: boolean): string {
 async function summarizeQuestion(
   questionText: string,
   transcript: TranscriptEntry[],
-  isZh: boolean
+  isZh: boolean,
+  llmRoute?: RelayLlmRoute,
 ): Promise<string> {
   if (transcript.length === 0) return "";
 
@@ -751,7 +754,7 @@ async function summarizeQuestion(
   try {
     const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), undefined, {
       stage: "q-summary",
-    });
+    }, llmRoute);
     log.info(`Q summary: "${result.slice(0, 100)}..."`);
     return result;
   } catch (err) {
@@ -794,10 +797,12 @@ wss.on("connection", (browserWs) => {
       } else if (msg.type === "init" && msg.context) {
         clearTimeout(timeout);
         browserWs.removeListener("message", handler);
-        void assertRelayLlmReady()
-          .then(() => {
+        const context = msg.context as InterviewContext;
+        void loadInterviewRelayLlmRoute(dynamicQuestionClient, context.interviewId)
+          .then(async (llmRoute) => {
+            await assertRelayLlmReady({ route: llmRoute });
             if (browserWs.readyState === WebSocket.OPEN) {
-              handleBrowserConnection(browserWs, msg.context as InterviewContext);
+              await handleBrowserConnection(browserWs, context, llmRoute);
             }
           })
           .catch((error) => {
@@ -1150,7 +1155,11 @@ async function handleMicTestConnection(browserWs: WebSocket) {
 
 // ── Interview handler ───────────────────────────────────────────────
 
-async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewContext) {
+async function handleBrowserConnection(
+  browserWs: WebSocket,
+  ctx: InterviewContext,
+  llmRoute?: RelayLlmRoute,
+) {
   // ── 服务端收尾登记:本连接活跃时持续摸时间,关页后由宽限/硬限兜底 ──
   const ctxSessionId = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
   const connectionClaim = ctxSessionId
@@ -1972,7 +1981,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     const currentQ = sortedQuestions[currentQuestionIndex];
     const transcriptSnapshot = [...questionTranscript];
     if (transcriptSnapshot.length > 0) {
-      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh)
+      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute)
         .then((summary) => questionSummaries.push(summary))
         .catch(log.error);
     }
@@ -2239,7 +2248,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
     let response = deterministicMetricFollowUp || await callRelayLLM(prompt, undefined, {
       stage: "interview-turn",
       question: currentQuestionIndex + 1,
-    });
+    }, llmRoute);
     if (deterministicMetricFollowUp) {
       log.info("Using deterministic Q4 metric-evidence follow-up");
     }
@@ -2522,7 +2531,7 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         log.info(`→ Q${currentQuestionIndex + 1}/${sortedQuestions.length}: ${nextQ.text.slice(0, 60)}...`);
         const previousQuestionIndex = currentQuestionIndex - 1;
         const summaryPromise = transcriptSnapshot.length > 0
-          ? summarizeQuestion(currentQ.text, transcriptSnapshot, isZh)
+          ? summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute)
           : Promise.resolve("");
         const [, summary] = await Promise.all([
           speakAndHandle(transition, { trackInTranscript: false }),
@@ -2531,7 +2540,12 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
         questionSummaries[previousQuestionIndex] = summary;
       } else {
         if (transcriptSnapshot.length > 0) {
-          const lastSummary = await summarizeQuestion(currentQ.text, transcriptSnapshot, isZh);
+          const lastSummary = await summarizeQuestion(
+            currentQ.text,
+            transcriptSnapshot,
+            isZh,
+            llmRoute,
+          );
           questionSummaries.push(lastSummary);
         }
 
@@ -2598,7 +2612,12 @@ async function handleBrowserConnection(browserWs: WebSocket, ctx: InterviewConte
 
       const currentQ = sortedQuestions[currentQuestionIndex];
       if (transcriptSnapshot.length > 0) {
-        const summary = await summarizeQuestion(currentQ.text, transcriptSnapshot, isZh);
+        const summary = await summarizeQuestion(
+          currentQ.text,
+          transcriptSnapshot,
+          isZh,
+          llmRoute,
+        );
         questionSummaries.push(summary);
       }
 

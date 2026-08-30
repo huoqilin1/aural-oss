@@ -4,6 +4,10 @@ import {
   validateApiKey,
 } from "@/lib/api-key-auth";
 import { nanoid } from "@/lib/id";
+import {
+  RELAY_LLM_PROVIDER_SPECS,
+  parseRelayLlmRoute,
+} from "@/lib/relay-llm-route";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 
 export async function GET(request: Request) {
@@ -123,6 +127,16 @@ export async function POST(request: Request) {
   const followUpDepth = body.followUpDepth === "LIGHT" || body.followUpDepth === "MODERATE" || body.followUpDepth === "DEEP" ? body.followUpDepth : "MODERATE";
   const language = typeof body.language === "string" && body.language.trim() ? body.language.trim() : "en";
   const antiCheatingEnabled = typeof body.antiCheatingEnabled === "boolean" ? body.antiCheatingEnabled : false;
+  const relayLlmRoute = body.relayLlmRoute === undefined
+    ? null
+    : parseRelayLlmRoute(body.relayLlmRoute);
+  if (body.relayLlmRoute !== undefined && !relayLlmRoute) {
+    return apiError(
+      "BAD_REQUEST",
+      "relayLlmRoute must contain one primary and two unique supported fallbacks.",
+      400,
+    );
+  }
 
   let timeLimitMinutes: number | null = null;
   if (body.timeLimitMinutes !== undefined && body.timeLimitMinutes !== null) {
@@ -150,6 +164,13 @@ export async function POST(request: Request) {
     userId: auth.userId,
     requireInvite: true,
     publicSlug: nanoid(10),
+    ...(relayLlmRoute
+      ? {
+          llmProvider: relayLlmRoute.primary,
+          llmModel: RELAY_LLM_PROVIDER_SPECS[relayLlmRoute.primary].relayModel,
+          customBranding: { oprunRelayLlmRoute: relayLlmRoute },
+        }
+      : {}),
   };
 
   const { data: interview, error } = await supabaseAdmin

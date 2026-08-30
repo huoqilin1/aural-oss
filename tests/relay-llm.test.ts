@@ -155,6 +155,76 @@ test("402 primary falls back to Kimi K3 without legacy temperature and opens a c
   }
 });
 
+test("an HR-selected route overrides the static provider order without changing secrets", async () => {
+  const originalFetch = globalThis.fetch;
+  const models: string[] = [];
+  globalThis.fetch = (async (_input, init) => {
+    const body = JSON.parse(String(init?.body || "{}")) as { model?: string };
+    models.push(body.model || "");
+    return Response.json({
+      choices: [{ message: { content: "READY" } }],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    });
+  }) as typeof fetch;
+
+  try {
+    await withEnvAsync(
+      {
+        RELAY_LLM_MODEL: "legacy-model-must-not-win",
+        DEEPSEEK_API_KEY: "d-test",
+        ZHIPU_API_KEY: "z-test",
+        KIMI_API_KEY: "k-test",
+      },
+      async () => {
+        const text = await relayLlm.callRelayLLM(
+          "hello",
+          undefined,
+          { stage: "test" },
+          { primary: "kimi", fallbacks: ["zhipu", "deepseek"] },
+        );
+        assert.equal(text, "READY");
+        assert.deepEqual(models, ["kimi-k3"]);
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an HR-selected route never escapes to a legacy fourth provider", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    return Response.json({ choices: [{ message: { content: "unexpected" } }] });
+  }) as typeof fetch;
+
+  try {
+    await withEnvAsync(
+      {
+        RELAY_LLM_MODEL: "legacy-model-must-not-win",
+        RELAY_LLM_API_KEY: "legacy-key-must-not-win",
+        DEEPSEEK_API_KEY: undefined,
+        ZHIPU_API_KEY: undefined,
+        GLM_API_KEY: undefined,
+        KIMI_API_KEY: undefined,
+      },
+      async () => {
+        const text = await relayLlm.callRelayLLM(
+          "hello",
+          undefined,
+          { stage: "test" },
+          { primary: "deepseek", fallbacks: ["zhipu", "kimi"] },
+        );
+        assert.equal(text, "");
+        assert.equal(calls, 0);
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("readiness probe fails closed when every configured provider fails", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () => new Response("unavailable", { status: 404 })) as typeof fetch;

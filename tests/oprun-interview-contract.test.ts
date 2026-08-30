@@ -93,7 +93,8 @@ test("recruitment start and release both require a real relay LLM probe", () => 
     scripts?: Record<string, string>;
   };
 
-  assert.match(relay, /assertRelayLlmReady\(\)/);
+  assert.match(relay, /loadInterviewRelayLlmRoute\(dynamicQuestionClient, context\.interviewId\)/);
+  assert.match(relay, /assertRelayLlmReady\(\{ route: llmRoute \}\)/);
   assert.match(relay, /relay_llm_unavailable/);
   assert.match(release, /npm run probe:relay-llm/);
   assert.equal(pkg.scripts?.["probe:relay-llm"], "tsx server/relay-llm-probe.ts");

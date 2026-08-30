@@ -8,6 +8,11 @@
 
 import { GoogleGenAI } from "@google/genai";
 import { createLogger } from "../src/lib/logger";
+import {
+  type RelayLlmProviderId,
+  type RelayLlmRoute,
+  relayLlmRouteOrder,
+} from "../src/lib/relay-llm-route";
 
 const log = createLogger("relay-llm");
 
@@ -53,10 +58,10 @@ interface RelayLlmEndpoint {
 
 let cachedChain: RelayLlmEndpoint[] | null = null;
 let geminiClient: GoogleGenAI | null = null;
-let logged = false;
+const loggedRoutes = new Set<string>();
 const endpointCooldowns = new Map<string, number>();
 let readinessProbe:
-  | { expiresAt: number; promise: Promise<void> }
+  | { key: string; expiresAt: number; promise: Promise<void> }
   | null = null;
 
 const READINESS_CACHE_MS = 60_000;
@@ -143,48 +148,53 @@ function resolveFallbackEndpoint(primary: RelayLlmEndpoint): RelayLlmEndpoint | 
 }
 
 // 按密钥可用性构建默认链：DeepThink → 智谱 GLM → Kimi（王总 2026-08-20 排序）。
-function buildProviderChain(): RelayLlmEndpoint[] {
-  const temperature = parseTemperature();
-  const chain: RelayLlmEndpoint[] = [];
-
-  const deepseekKey = process.env.DEEPSEEK_API_KEY?.trim();
-  if (deepseekKey) {
-    chain.push({
+function providerEndpoint(
+  provider: RelayLlmProviderId,
+  temperature: number,
+): RelayLlmEndpoint | null {
+  if (provider === "deepseek") {
+    const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
+    return apiKey ? {
       model: deepseekRelayModel(),
       temperature,
-      apiKey: deepseekKey,
+      apiKey,
       baseUrl: process.env.DEEPSEEK_BASE_URL?.trim() || DEEPSEEK_DEFAULT_BASE_URL,
       useGemini: false,
-    });
+    } : null;
   }
-
-  const zhipuKey = process.env.ZHIPU_API_KEY?.trim() || process.env.GLM_API_KEY?.trim();
-  if (zhipuKey) {
-    chain.push({
+  if (provider === "zhipu") {
+    const apiKey = process.env.ZHIPU_API_KEY?.trim() || process.env.GLM_API_KEY?.trim();
+    return apiKey ? {
       model: zhipuRelayModel(),
       temperature,
-      apiKey: zhipuKey,
+      apiKey,
       baseUrl: process.env.ZHIPU_BASE_URL?.trim() || ZHIPU_DEFAULT_BASE_URL,
       useGemini: false,
-    });
+    } : null;
   }
-
-  const kimiKey = process.env.KIMI_API_KEY?.trim();
-  if (kimiKey) {
-    chain.push({
-      model: kimiRelayModel(),
-      temperature,
-      apiKey: kimiKey,
-      baseUrl: process.env.KIMI_BASE_URL?.trim() || KIMI_DEFAULT_BASE_URL,
-      useGemini: false,
-    });
-  }
-
-  return chain;
+  const apiKey = process.env.KIMI_API_KEY?.trim();
+  return apiKey ? {
+    model: kimiRelayModel(),
+    temperature,
+    apiKey,
+    baseUrl: process.env.KIMI_BASE_URL?.trim() || KIMI_DEFAULT_BASE_URL,
+    useGemini: false,
+  } : null;
 }
 
-function buildEndpointChain(): RelayLlmEndpoint[] {
-  if (process.env.RELAY_LLM_MODEL?.trim()) {
+function buildProviderChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
+  const temperature = parseTemperature();
+  const order: RelayLlmProviderId[] = route
+    ? relayLlmRouteOrder(route)
+    : ["deepseek", "zhipu", "kimi"];
+  return order.flatMap((provider) => {
+    const endpoint = providerEndpoint(provider, temperature);
+    return endpoint ? [endpoint] : [];
+  });
+}
+
+function buildEndpointChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
+  if (!route && process.env.RELAY_LLM_MODEL?.trim()) {
     // 显式指定模型：保持旧的单端点 + 旧回退行为。
     const primary = resolveLegacyPrimaryEndpoint();
     const chain = [primary];
@@ -192,13 +202,17 @@ function buildEndpointChain(): RelayLlmEndpoint[] {
     if (fallback) chain.push(fallback);
     return chain;
   }
-  const providerChain = buildProviderChain();
+  const providerChain = buildProviderChain(route);
   if (providerChain.length > 0) return providerChain;
+  // A route selected by HR is authoritative. Never escape to a legacy fourth
+  // provider when every selected provider is unconfigured.
+  if (route) return [];
   // 没有任何供应商密钥时保持旧行为（Gemini 默认端点）。
   return [resolveLegacyPrimaryEndpoint()];
 }
 
-function getEndpointChain(): RelayLlmEndpoint[] {
+function getEndpointChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
+  if (route) return buildEndpointChain(route);
   if (!cachedChain) cachedChain = buildEndpointChain();
   return cachedChain;
 }
@@ -207,7 +221,7 @@ function getEndpointChain(): RelayLlmEndpoint[] {
 export function resetRelayLlmCacheForTests(): void {
   cachedChain = null;
   geminiClient = null;
-  logged = false;
+  loggedRoutes.clear();
   endpointCooldowns.clear();
   readinessProbe = null;
 }
@@ -226,8 +240,14 @@ export function getRelayLlmFallbackModel(): string | null {
 }
 
 function logConfig(chain: RelayLlmEndpoint[]): void {
-  if (logged) return;
-  logged = true;
+  const routeKey = chain.map(endpointKey).join(",");
+  if (loggedRoutes.has(routeKey)) return;
+  loggedRoutes.add(routeKey);
+
+  if (chain.length === 0) {
+    log.warn("Relay LLM: no API key configured for the HR-selected provider route");
+    return;
+  }
 
   const primary = chain[0]!;
   if (!primary.apiKey && !chain[1]?.apiKey) {
@@ -368,8 +388,9 @@ export async function callRelayLLM(
   prompt: string,
   maxTokens?: number,
   meta?: RelayLlmCallMeta,
+  route?: RelayLlmRoute,
 ): Promise<string> {
-  const chain = getEndpointChain();
+  const chain = getEndpointChain(route);
   logConfig(chain);
 
   const configured = chain.filter((e) => e.apiKey);
@@ -425,9 +446,18 @@ export async function callRelayLLM(
 
 export async function assertRelayLlmReady(options?: {
   force?: boolean;
+  route?: RelayLlmRoute;
 }): Promise<void> {
   const now = Date.now();
-  if (!options?.force && readinessProbe && readinessProbe.expiresAt > now) {
+  const routeKey = options?.route
+    ? relayLlmRouteOrder(options.route).join(",")
+    : "default";
+  if (
+    !options?.force
+    && readinessProbe
+    && readinessProbe.key === routeKey
+    && readinessProbe.expiresAt > now
+  ) {
     return readinessProbe.promise;
   }
 
@@ -435,10 +465,15 @@ export async function assertRelayLlmReady(options?: {
     "Reply with exactly READY.",
     undefined,
     { stage: "readiness_probe" },
+    options?.route,
   ).then((text) => {
     if (!text.trim()) throw new Error("Relay LLM readiness probe returned no text");
   });
-  readinessProbe = { expiresAt: now + READINESS_CACHE_MS, promise };
+  readinessProbe = {
+    key: routeKey,
+    expiresAt: now + READINESS_CACHE_MS,
+    promise,
+  };
   try {
     await promise;
   } catch (error) {
