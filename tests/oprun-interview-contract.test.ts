@@ -87,6 +87,18 @@ test("candidate listening UI waits for an explicit relay input-ready handshake",
   assert.match(voiceInterface, /voice\.isInputReady\s*&&\s*voice\.isListening/);
 });
 
+test("recruitment start and release both require a real relay LLM probe", () => {
+  const release = readFileSync("deploy/production/apply-release.sh", "utf8");
+  const pkg = JSON.parse(readFileSync("package.json", "utf8")) as {
+    scripts?: Record<string, string>;
+  };
+
+  assert.match(relay, /assertRelayLlmReady\(\)/);
+  assert.match(relay, /relay_llm_unavailable/);
+  assert.match(release, /npm run probe:relay-llm/);
+  assert.equal(pkg.scripts?.["probe:relay-llm"], "tsx server/relay-llm-probe.ts");
+});
+
 test("release gates execute browser behavior and production E2E fails closed", () => {
   assert.match(releaseBuilder, /npx playwright install chromium/);
   assert.match(releaseBuilder, /npm run test:functional/);

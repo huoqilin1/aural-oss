@@ -29,7 +29,11 @@ import {
   mergeExpandedQuestionSet,
   shouldWaitForQuestionExpansion,
 } from "../src/lib/voice/dynamic-question-sync";
-import { callRelayLLM, logRelayLlmStartup } from "./relay-llm";
+import {
+  assertRelayLlmReady,
+  callRelayLLM,
+  logRelayLlmStartup,
+} from "./relay-llm";
 import {
     collapseInternalAsrRepetitions,
     decidePendingFinalSpeechHold,
@@ -790,7 +794,25 @@ wss.on("connection", (browserWs) => {
       } else if (msg.type === "init" && msg.context) {
         clearTimeout(timeout);
         browserWs.removeListener("message", handler);
-        handleBrowserConnection(browserWs, msg.context as InterviewContext);
+        void assertRelayLlmReady()
+          .then(() => {
+            if (browserWs.readyState === WebSocket.OPEN) {
+              handleBrowserConnection(browserWs, msg.context as InterviewContext);
+            }
+          })
+          .catch((error) => {
+            log.error(
+              "Relay LLM unavailable before interview start:",
+              error instanceof Error ? error.message : String(error),
+            );
+            if (browserWs.readyState === WebSocket.OPEN) {
+              browserWs.send(JSON.stringify({
+                type: "error",
+                message: "面试服务暂时不可用，请稍后刷新重试。",
+              }));
+              browserWs.close(1013, "relay_llm_unavailable");
+            }
+          });
       }
     } catch {
       // Not JSON, ignore

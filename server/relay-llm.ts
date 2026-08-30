@@ -25,7 +25,8 @@ function zhipuRelayModel(): string {
   return process.env.ZHIPU_MODEL?.trim() || process.env.GLM_MODEL?.trim() || "glm-5.3";
 }
 function kimiRelayModel(): string {
-  return process.env.KIMI_MODEL?.trim() || "kimi-latest";
+  const configured = process.env.KIMI_MODEL?.trim();
+  return !configured || configured === "kimi-latest" ? "kimi-k3" : configured;
 }
 const ZHIPU_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
 const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
@@ -53,6 +54,14 @@ interface RelayLlmEndpoint {
 let cachedChain: RelayLlmEndpoint[] | null = null;
 let geminiClient: GoogleGenAI | null = null;
 let logged = false;
+const endpointCooldowns = new Map<string, number>();
+let readinessProbe:
+  | { expiresAt: number; promise: Promise<void> }
+  | null = null;
+
+const READINESS_CACHE_MS = 60_000;
+const TRANSIENT_FAILURE_COOLDOWN_MS = 30_000;
+const NON_RETRYABLE_FAILURE_COOLDOWN_MS = 15 * 60_000;
 
 function parseTemperature(): number {
   const raw = process.env.RELAY_LLM_TEMPERATURE?.trim();
@@ -73,7 +82,8 @@ function usesGemini(model: string): boolean {
 }
 
 function resolveLegacyPrimaryEndpoint(): RelayLlmEndpoint {
-  const model = process.env.RELAY_LLM_MODEL?.trim() || "gemini-3.1-flash-lite";
+  const configuredModel = process.env.RELAY_LLM_MODEL?.trim() || "gemini-3.1-flash-lite";
+  const model = configuredModel === "kimi-latest" ? "kimi-k3" : configuredModel;
   const useGemini = usesGemini(model);
   const apiKey = useGemini
     ? (process.env.RELAY_LLM_API_KEY?.trim() || process.env.GEMINI_API_KEY?.trim() || "")
@@ -99,7 +109,7 @@ function resolveLegacyPrimaryEndpoint(): RelayLlmEndpoint {
 }
 
 function resolveFallbackEndpoint(primary: RelayLlmEndpoint): RelayLlmEndpoint | null {
-  const model =
+  const configuredModel =
     process.env.RELAY_LLM_FALLBACK_MODEL?.trim() || "abab6.5s-chat";
   const apiKey = process.env.RELAY_LLM_FALLBACK_API_KEY?.trim() || process.env.MINIMAX_API_KEY?.trim() || "";
   if (!apiKey) return null;
@@ -108,6 +118,10 @@ function resolveFallbackEndpoint(primary: RelayLlmEndpoint): RelayLlmEndpoint | 
     process.env.RELAY_LLM_FALLBACK_BASE_URL?.trim() ||
     process.env.MINIMAX_BASE_URL?.trim() ||
     "https://api.minimaxi.com/v1";
+  const model =
+    configuredModel === "kimi-latest" && /moonshot\.(?:cn|ai|com)/i.test(baseUrl)
+      ? "kimi-k3"
+      : configuredModel;
 
   const fallback: RelayLlmEndpoint = {
     model,
@@ -194,6 +208,8 @@ export function resetRelayLlmCacheForTests(): void {
   cachedChain = null;
   geminiClient = null;
   logged = false;
+  endpointCooldowns.clear();
+  readinessProbe = null;
 }
 
 /** Resolved after dotenv loads (see getEndpointChain). */
@@ -287,9 +303,14 @@ async function callOpenAICompatible(
   const reqBody: Record<string, unknown> = {
     model: endpoint.model,
     messages: [{ role: "user", content: prompt }],
-    temperature: endpoint.temperature,
     ...(maxTokens ? { max_tokens: maxTokens } : {}),
   };
+  // Kimi K3 rejects the legacy `temperature` field. The official Kimi
+  // Chat Completions quickstart omits it, while DeepSeek/GLM/MiniMax keep
+  // accepting the configured value.
+  if (!endpoint.model.toLowerCase().startsWith("kimi-")) {
+    reqBody.temperature = endpoint.temperature;
+  }
   // 关思考(GLM/deepseek 支持):RELAY_LLM_DISABLE_THINKING=1 时禁用推理,秒回省成本。
   // 注意:DeepThink 优先策略下不要设置此变量(2026-08-20 王总要的是深思考质量)。
   if (process.env.RELAY_LLM_DISABLE_THINKING?.trim() === "1") {
@@ -319,6 +340,17 @@ async function callOpenAICompatible(
   return { text: data.choices?.[0]?.message?.content?.trim() || "", usage };
 }
 
+function endpointKey(endpoint: RelayLlmEndpoint): string {
+  return `${endpoint.baseUrl}|${endpoint.model}`;
+}
+
+function failureCooldownMs(error: unknown): number {
+  const message = error instanceof Error ? error.message : String(error);
+  return /LLM API (?:400|401|402|403|404)\b/.test(message)
+    ? NON_RETRYABLE_FAILURE_COOLDOWN_MS
+    : TRANSIENT_FAILURE_COOLDOWN_MS;
+}
+
 async function callEndpoint(
   endpoint: RelayLlmEndpoint,
   prompt: string,
@@ -345,13 +377,22 @@ export async function callRelayLLM(
     return "";
   }
 
+  const now = Date.now();
+  const available = configured.filter(
+    (endpoint) => (endpointCooldowns.get(endpointKey(endpoint)) ?? 0) <= now,
+  );
+  // If every provider is cooling down, retry the chain so recovery is not
+  // permanently blocked. Otherwise skip known-bad providers immediately.
+  const candidates = available.length > 0 ? available : configured;
+
   const startMs = Date.now();
   let lastError: unknown;
 
-  for (let i = 0; i < configured.length; i++) {
-    const endpoint = configured[i]!;
+  for (let i = 0; i < candidates.length; i++) {
+    const endpoint = candidates[i]!;
     try {
       const { text, usage } = await callEndpoint(endpoint, prompt, maxTokens);
+      endpointCooldowns.delete(endpointKey(endpoint));
       const latencyMs = Date.now() - startMs;
       // Token 分类账：每笔调用一行，stage 区分环节（turn/summarize/generate…），
       // 供"每场消耗多少、花在哪"的看板汇总。
@@ -359,12 +400,16 @@ export async function callRelayLLM(
         `relay-llm usage: stage=${meta?.stage ?? "unlabeled"} session=${meta?.session ?? "-"} ` +
         `q=${meta?.question ?? "-"} model=${endpoint.model} ` +
         `tokens_in=${usage?.promptTokens ?? "?"} tokens_out=${usage?.completionTokens ?? "?"} ` +
-        `latency_ms=${latencyMs}${i > 0 ? ` recovered_from=${configured[0]!.model}` : ""}`,
+        `latency_ms=${latencyMs}${i > 0 ? ` recovered_from=${candidates[0]!.model}` : ""}`,
       );
       return text;
     } catch (err) {
       lastError = err;
-      const next = configured[i + 1];
+      endpointCooldowns.set(
+        endpointKey(endpoint),
+        Date.now() + failureCooldownMs(err),
+      );
+      const next = candidates[i + 1];
       if (next) {
         log.warn(
           `Relay LLM failed for ${endpoint.model}, falling back to ${next.model}`,
@@ -376,4 +421,28 @@ export async function callRelayLLM(
 
   log.error("Relay LLM failed on all configured models", lastError);
   throw lastError ?? new Error("Relay LLM failed");
+}
+
+export async function assertRelayLlmReady(options?: {
+  force?: boolean;
+}): Promise<void> {
+  const now = Date.now();
+  if (!options?.force && readinessProbe && readinessProbe.expiresAt > now) {
+    return readinessProbe.promise;
+  }
+
+  const promise = callRelayLLM(
+    "Reply with exactly READY.",
+    undefined,
+    { stage: "readiness_probe" },
+  ).then((text) => {
+    if (!text.trim()) throw new Error("Relay LLM readiness probe returned no text");
+  });
+  readinessProbe = { expiresAt: now + READINESS_CACHE_MS, promise };
+  try {
+    await promise;
+  } catch (error) {
+    if (readinessProbe?.promise === promise) readinessProbe = null;
+    throw error;
+  }
 }

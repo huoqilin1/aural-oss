@@ -228,6 +228,17 @@ if ! curl -fsS -o /dev/null --max-time 10 http://127.0.0.1:3000/api/ready; then
   echo "local readiness endpoint failed" >&2
   false
 fi
+if ! (
+  cd "$CURRENT"
+  set -a
+  # shellcheck disable=SC1091
+  . "$ENV_DIR/.env.local"
+  set +a
+  npm run probe:relay-llm
+); then
+  echo "relay LLM readiness probe failed" >&2
+  false
+fi
 [ "$(readlink -f "$CURRENT")" = "$RELEASE_FINAL" ]
 [ "$(cat "$RELEASE_FINAL/REVISION")" = "$REVISION" ]
 
