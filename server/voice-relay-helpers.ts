@@ -274,6 +274,21 @@ export function failClosedRecruitmentResumeBudget(
 }
 
 /**
+ * A speech turn belongs to the scored question that was active when VAD first
+ * detected it.  ASR providers can deliver a late final after the relay has
+ * already moved on.  Treating that late final as an answer to the new question
+ * can silently skip an unanswered question, so it must be discarded.
+ */
+export function shouldDiscardCrossQuestionUserTranscript(
+  speechQuestionIndex: number,
+  currentQuestionIndex: number,
+): boolean {
+  return Number.isInteger(speechQuestionIndex)
+    && Number.isInteger(currentQuestionIndex)
+    && speechQuestionIndex !== currentQuestionIndex;
+}
+
+/**
  * Rebuild the server-side recruitment verification budget after a browser
  * refresh or relay reconnect. The first substantive USER turn on a scored
  * question is its main answer. A follow-up is consumed only when a later

@@ -22,6 +22,7 @@ type FunctionalScenarioId =
   | "advance-idempotency"
   | "advance-followup-guard"
   | "advance-input-readiness"
+  | "advance-late-asr"
   | "recruitment-entry"
   | "recruitment-auto-retry"
   | "recruitment-incomplete"
@@ -236,6 +237,66 @@ const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
         { type: "json", delay: 260, message: { type: "tts_ended" } },
         { type: "json", delay: 600, message: { type: "session_reconnected" } },
         { type: "json", delay: 1_200, message: { type: "input_ready" } },
+      ],
+    },
+    "/ws/openai-voice": {
+      events: [{ type: "close", delay: 30 }],
+    },
+  },
+  "advance-late-asr": {
+    "/ws/voice": {
+      events: [
+        { type: "ready", delay: 20 },
+        {
+          type: "json",
+          delay: 100,
+          message: {
+            type: "asr_ended",
+            text: "I owned the first project answer.",
+            questionIndex: 0,
+          },
+        },
+        { type: "json", delay: 130, message: { type: "response_started" } },
+        {
+          type: "json",
+          delay: 180,
+          message: {
+            type: "tts_text",
+            data: { text: "Thanks, that evidence is clear." },
+          },
+        },
+        { type: "json", delay: 220, message: { type: "tts_ended", questionIndex: 0 } },
+        { type: "json", delay: 240, message: { type: "transitioning", direction: "next", auto: true } },
+        {
+          type: "json",
+          delay: 280,
+          message: {
+            type: "question_change",
+            questionIndex: 1,
+            totalQuestions: 2,
+            auto: true,
+          },
+        },
+        {
+          type: "json",
+          delay: 320,
+          message: {
+            type: "tts_text",
+            data: { text: "Explain a difficult decision you made in that project." },
+          },
+        },
+        { type: "json", delay: 360, message: { type: "tts_ended", questionIndex: 1 } },
+        {
+          type: "json",
+          delay: 400,
+          message: {
+            type: "asr_ended",
+            text: "",
+            discarded: true,
+            questionIndex: 0,
+          },
+        },
+        { type: "json", delay: 440, message: { type: "input_ready" } },
       ],
     },
     "/ws/openai-voice": {

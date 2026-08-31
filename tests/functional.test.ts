@@ -582,6 +582,43 @@ test("recruitment entry auto-connects media and rejects completion before eight 
   await context.close();
 });
 
+test("a late ASR final from the previous question is not saved twice", async () => {
+  const context = await browser.newContext({ locale: "en-US" });
+  const page = await context.newPage();
+  const saveBodies: Array<{ messages?: Array<{ content?: string }> }> = [];
+
+  await page.route("**/api/voice/save", async (route: Route) => {
+    saveBodies.push(JSON.parse(route.request().postData() || "{}"));
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true }),
+    });
+  });
+
+  await page.goto(
+    `${baseUrl}/functional-tests/voice?language=en&scenario=advance-late-asr`,
+  );
+  await waitForCondition(
+    async () => (await page.getByTestId("harness-ready").textContent()) === "true",
+    5_000,
+  );
+  await waitForText(
+    page,
+    "Explain a difficult decision you made in that project.",
+    10_000,
+  );
+  await page.waitForTimeout(750);
+
+  const savedMessages = saveBodies.flatMap((body) => body.messages || []);
+  assert.equal(
+    savedMessages.filter((message) => message.content === "I owned the first project answer.").length,
+    1,
+  );
+
+  await context.close();
+});
+
 test("recruitment completes only after eight distinct scored answers", async () => {
   const context = await browser.newContext({ locale: "zh-CN" });
   const page = await context.newPage();

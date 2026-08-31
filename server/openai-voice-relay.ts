@@ -30,6 +30,7 @@ import {
     mergePersistedRecruitmentFollowUpBudget,
     readPersistedRecruitmentFollowUpBudget,
     recruitmentMetricEvidenceFollowUp,
+    shouldDiscardCrossQuestionUserTranscript,
     summarizeRecruitmentResumeBudget,
 } from "./voice-relay-helpers";
 import {
@@ -938,6 +939,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   let openAiTranscriptionEnabled = true;
   let pendingSpeechFinalize: ReturnType<typeof setTimeout> | null = null;
   let speechTranscriptCommitted = false;
+  let activeSpeechQuestionIndex = currentQuestionIndex;
   let responseInFlight = false;
 
   let pendingQuestionPrompt: string | null = null;
@@ -1302,8 +1304,32 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     if (!committedText) return "";
 
     speechTranscriptCommitted = true;
+    if (shouldDiscardCrossQuestionUserTranscript(
+      activeSpeechQuestionIndex,
+      currentQuestionIndex,
+    )) {
+      send({
+        type: "asr_ended",
+        text: "",
+        discarded: true,
+        questionIndex: activeSpeechQuestionIndex,
+      });
+      log.warn(
+        `Discarded late user transcript from Q${activeSpeechQuestionIndex + 1} `
+        + `after transition to Q${currentQuestionIndex + 1} (${reason})`,
+      );
+      inputTranscriptBuffer = "";
+      volcAsrAccumulator = "";
+      lastTranscriptUpdateAt = 0;
+      armStaleAsrGuard(committedText);
+      return "";
+    }
     pushHistory("user", committedText);
-    send({ type: "asr_ended", text: committedText });
+    send({
+      type: "asr_ended",
+      text: committedText,
+      questionIndex: activeSpeechQuestionIndex,
+    });
     log.info(`Committed user transcript (${reason}): ${JSON.stringify(committedText)}`);
     inputTranscriptBuffer = "";
     volcAsrAccumulator = "";
@@ -1421,6 +1447,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     }
     cancelOngoingResponse();
     clearSpeechFinalizeTimer();
+    activeSpeechQuestionIndex = currentQuestionIndex;
     vadSpeechActive = true;
     lastTranscriptUpdateAt = 0;
     if (speechTranscriptCommitted) {
@@ -2000,7 +2027,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
                   lastAssistantQuestionAt = Date.now();
                 }
               }
-              send({ type: "tts_ended" });
+              send({ type: "tts_ended", questionIndex: responseQuestionIndex });
             } else if (hadTts) {
               log.info(`TTS interrupted before audio (0B): ${JSON.stringify(capturedModelText)}`);
               pendingTtsText = [];

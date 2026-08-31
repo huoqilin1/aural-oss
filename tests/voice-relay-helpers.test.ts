@@ -17,12 +17,18 @@ import {
     readPersistedRecruitmentFollowUpBudget,
     recruitmentMetricEvidenceFollowUp,
     responseInvitesUserReply,
+    shouldDiscardCrossQuestionUserTranscript,
     shouldConsumeFollowUpBudget,
     shouldHoldBargeInInterimForFinal,
     shouldSuppressAnsweredAsrFinal,
     summarizeRecruitmentResumeBudget,
     trimCrossTurnOverlap,
 } from "../server/voice-relay-helpers";
+
+test("late ASR finals cannot answer a newly displayed recruitment question", () => {
+  assert.equal(shouldDiscardCrossQuestionUserTranscript(2, 3), true);
+  assert.equal(shouldDiscardCrossQuestionUserTranscript(3, 3), false);
+});
 
 test("resumed recruitment budget fails closed when hydration is unavailable", () => {
   assert.deepEqual(failClosedRecruitmentResumeBudget(0), {

@@ -567,7 +567,7 @@ export function useVoice({
   /** Save accumulated messages to the server (incremental, non-completing).
    *  Called on each question transition so progress is not lost. */
   const saveProgress = useCallback(
-    async (currentQuestionIndex: number) => {
+    async (currentQuestionIndex: number, pendingQuestionIndex: number) => {
       // Flush any remaining ASR buffer (chatBuffer is already cleared
       // before this is called by the question_change handler).
       const pendingAsrText = asrBufferRef.current.trim();
@@ -575,7 +575,7 @@ export function useVoice({
         trackedMessagesRef.current.push({
           role: "user",
           content: pendingAsrText,
-          questionId: questionIdAt(currentQuestionIndexRef.current),
+          questionId: questionIdAt(pendingQuestionIndex),
         });
         asrBufferRef.current = "";
       }
@@ -672,6 +672,18 @@ export function useVoice({
           clearAsrProcessingTimer();
           // 打字(chat)已由 sendTextMessage 本地落库;中转又会回传一条 asr_ended,这里跳过,避免同一句存两遍(否则防作弊会把重复误判成背稿)
           if (msg.source === "chat") break;
+          if (msg.discarded === true) {
+            asrBufferRef.current = "";
+            setState((s) => ({
+              ...s,
+              userTranscript: "",
+              isProcessing: false,
+            }));
+            break;
+          }
+          const eventQuestionIndex = Number.isInteger(Number(msg.questionIndex))
+            ? Number(msg.questionIndex)
+            : currentQuestionIndexRef.current;
           const finalFromRelay =
             typeof msg.text === "string" ? msg.text.trim() : "";
           const finalText = cleanPeriodArtifacts(
@@ -697,7 +709,7 @@ export function useVoice({
               trackedMessagesRef.current.push({
                 role: "user",
                 content: finalText,
-                questionId: questionIdAt(currentQuestionIndexRef.current),
+                questionId: questionIdAt(eventQuestionIndex),
               });
               log.debug(
                 `Tracked USER: "${finalText.slice(0, 60)}..."`
@@ -775,6 +787,9 @@ export function useVoice({
             isProcessing: false,
           }));
           if (fullResponse) {
+            const eventQuestionIndex = Number.isInteger(Number(msg.questionIndex))
+              ? Number(msg.questionIndex)
+              : currentQuestionIndexRef.current;
             // Dedupe: chat_ended and tts_ended often both fire for same response.
             // Use dedicated ref — trackedMessagesRef can lag; normalize for comparison.
             const normalized = fullResponse.replace(/\s+/g, " ").trim();
@@ -787,7 +802,7 @@ export function useVoice({
               trackedMessagesRef.current.push({
                 role: "assistant",
                 content: fullResponse,
-                questionId: questionIdAt(currentQuestionIndexRef.current),
+                questionId: questionIdAt(eventQuestionIndex),
               });
               log.debug(
                 `Tracked ASSISTANT (${msg.type}): "${fullResponse.slice(0, 60)}..."`
@@ -855,9 +870,13 @@ export function useVoice({
           lastOnAIResponseRef.current = "";
           const idx = msg.questionIndex as number;
           const total = msg.totalQuestions as number;
+          const previousQuestionIndex = currentQuestionIndexRef.current;
 
           // Persist messages from the previous question (fire-and-forget)
-          saveProgress(idx);
+          saveProgress(idx, previousQuestionIndex);
+          // Update synchronously so media events arriving before React's next
+          // render are attributed to the newly visible question.
+          currentQuestionIndexRef.current = idx;
 
           setState((s) => ({
             ...s,
