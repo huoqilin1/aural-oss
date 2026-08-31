@@ -172,6 +172,13 @@ before(async () => {
   baseUrl = `http://127.0.0.1:${port}`;
   serverProcess = startAppServer(port);
   await waitForHttp(`${baseUrl}/login`);
+  // A clean release build has no Next.js development cache. Compile the
+  // functional voice page once during suite setup so per-scenario navigation
+  // timeouts continue to measure runtime behavior instead of cold compilation.
+  await waitForHttp(
+    `${baseUrl}/functional-tests/voice?language=en&scenario=english-failover`,
+    120_000,
+  );
   const systemChrome = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
     || (process.platform === "win32"
       && existsSync("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe")
