@@ -82,6 +82,29 @@ test("legacy same-timestamp batches fail closed instead of reopening the follow-
   assert.deepEqual(summary.followUpsByQuestion, [[1, 1], [2, 1]]);
 });
 
+test("legacy same-timestamp control-looking turns still fail closed", () => {
+  const timestamp = "2026-08-31T01:11:16.000Z";
+  const summary = summarizeRecruitmentResumeBudget(
+    ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"],
+    [
+      { role: "ASSISTANT", questionId: "q2", content: "请介绍这个项目。", timestamp },
+      { role: "USER", questionId: "q2", content: "我负责招聘流程设计。", timestamp },
+      { role: "ASSISTANT", questionId: "q2", content: "请补充本人职责边界。", timestamp },
+      // Legacy batches cannot recover whether this apparent control turn was
+      // before or after the probe. Count conservatively so reconnecting can
+      // never reopen the whole-interview follow-up budget.
+      { role: "USER", questionId: "q2", content: "下一题。", timestamp },
+      { role: "ASSISTANT", questionId: "q3", content: "请说明结果。", timestamp },
+      { role: "USER", questionId: "q3", content: "我把周期缩短了20%。", timestamp },
+      { role: "ASSISTANT", questionId: "q3", content: "请补充数据口径。", timestamp },
+      { role: "USER", questionId: "q3", content: "能听到吗？", timestamp },
+    ],
+  );
+
+  assert.equal(summary.inlineFollowUpsUsed, 2);
+  assert.deepEqual(summary.followUpsByQuestion, [[1, 1], [2, 1]]);
+});
+
 test("persisted recruitment budget is capped and preserves unrelated metadata", () => {
   const metadata = mergePersistedRecruitmentFollowUpBudget(
     { source: "hr", nested: { keep: true } },

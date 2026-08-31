@@ -292,6 +292,7 @@ export function summarizeRecruitmentResumeBudget(
   });
 
   const states = new Map<number, {
+    rawUserCount: number;
     answerCount: number;
     awaitingFollowUpAnswer: boolean;
     followUpAnswered: boolean;
@@ -306,6 +307,7 @@ export function summarizeRecruitmentResumeBudget(
     const content = String(message.content || "").trim();
     if (!content) continue;
     const state = states.get(questionIndex) ?? {
+      rawUserCount: 0,
       answerCount: 0,
       awaitingFollowUpAnswer: false,
       followUpAnswered: false,
@@ -316,6 +318,7 @@ export function summarizeRecruitmentResumeBudget(
     if (message.timestamp) state.timestamps.add(message.timestamp);
     const role = message.role.toUpperCase();
     if (role === "USER") {
+      state.rawUserCount += 1;
       if (isRecruitmentConversationControl(content) || isUserSkipRequest(content)) {
         state.lastUserWasControl = true;
         states.set(questionIndex, state);
@@ -354,10 +357,11 @@ export function summarizeRecruitmentResumeBudget(
     // Older /api/voice/save batches assigned one database timestamp to every
     // message. PostgreSQL therefore cannot reproduce the original USER ->
     // ASSISTANT -> USER order after a reconnect. When such a legacy batch has
-    // multiple substantive user turns plus assistant turns, treat one probe as
-    // consumed. This intentionally fails closed: an old split-ASR batch may
-    // forfeit a probe, but it can never create an illegal third probe.
-    const ambiguousLegacyBatch = state.answerCount > 1
+    // multiple raw user turns plus assistant turns, treat one probe as
+    // consumed even when a turn looks like a control or skip command. This
+    // intentionally fails closed: an old split-ASR/control batch may forfeit a
+    // probe, but it can never create an illegal third probe.
+    const ambiguousLegacyBatch = state.rawUserCount > 1
       && state.assistantCount > 0
       && state.timestamps.size === 1;
     if (questionIndex > 0 && (state.followUpAnswered || ambiguousLegacyBatch)) {
