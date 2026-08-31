@@ -613,6 +613,10 @@ test("recruitment completes only after eight distinct scored answers", async () 
 
   for (let question = 1; question <= 8; question += 1) {
     await waitForText(page, `第 ${question} / 8 题`, 10_000);
+    // A question_change arrives just before the relay's input_ready handshake.
+    // Wait for the real candidate-input state so the harness cannot submit into
+    // that transition window and silently lose an answer.
+    await waitForText(page, "正在听取回答，慢慢来", 10_000, true);
     assert.equal(await page.getByTestId("parent-complete").textContent(), "false");
 
     await page.getByRole("button", { name: "打开文字输入", exact: true }).click();

@@ -28,6 +28,7 @@ const ASR_PROCESSING_AUDIO_ACTIVITY_RMS_THRESHOLD = 0.018;
 
 export interface InterviewContext {
   interviewId?: string;
+  sessionId?: string;
   title: string;
   objective?: string | null;
   aiName: string;

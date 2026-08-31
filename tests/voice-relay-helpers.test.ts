@@ -5,6 +5,7 @@ import {
     collapseInternalAsrRepetitions,
     decidePendingFinalSpeechHold,
     evaluateTranscriptManualAdvance,
+    failClosedRecruitmentResumeBudget,
     finalizeTurnBudgetResponse,
     isAsrRollingRevision,
     isRecruitmentConversationControl,
@@ -17,8 +18,84 @@ import {
     shouldConsumeFollowUpBudget,
     shouldHoldBargeInInterimForFinal,
     shouldSuppressAnsweredAsrFinal,
+    summarizeRecruitmentResumeBudget,
     trimCrossTurnOverlap,
 } from "../server/voice-relay-helpers";
+
+test("resumed recruitment budget fails closed when hydration is unavailable", () => {
+  assert.deepEqual(failClosedRecruitmentResumeBudget(0), {
+    answersByQuestion: [],
+    followUpsByQuestion: [],
+    inlineFollowUpsUsed: 0,
+    finalFollowUpsUsed: 0,
+  });
+  assert.deepEqual(failClosedRecruitmentResumeBudget(3), {
+    answersByQuestion: [],
+    followUpsByQuestion: [],
+    inlineFollowUpsUsed: 2,
+    finalFollowUpsUsed: 1,
+  });
+});
+
+test("recruitment resume budget survives a relay reconnect", () => {
+  const summary = summarizeRecruitmentResumeBudget(
+    ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"],
+    [
+      { role: "USER", questionId: "q1", content: "我负责过招聘和员工关系项目。" },
+      { role: "USER", questionId: "q2", content: "我本人负责流程设计和落地。" },
+      { role: "ASSISTANT", questionId: "q2", content: "请说明你本人负责的边界。" },
+      { role: "USER", questionId: "q2", content: "补充边界，重大决策由管理层审批。" },
+      { role: "USER", questionId: "q3", content: "我用系统记录验证实施结果。" },
+      { role: "ASSISTANT", questionId: "q3", content: "请补充验证方法。" },
+      { role: "USER", questionId: "q3", content: "补充验证方法和失败复盘。" },
+      { role: "ASSISTANT", questionId: "q3", content: "谢谢，下面进入下一题。" },
+    ],
+  );
+
+  assert.deepEqual(summary.answersByQuestion, [[0, 1], [1, 2], [2, 2]]);
+  assert.deepEqual(summary.followUpsByQuestion, [[1, 1], [2, 1]]);
+  assert.equal(summary.inlineFollowUpsUsed, 2);
+  assert.equal(summary.finalFollowUpsUsed, 0);
+});
+
+test("resume budget ignores greetings and caps persisted over-limit turns", () => {
+  const summary = summarizeRecruitmentResumeBudget(
+    ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"],
+    [
+      { role: "USER", questionId: "q2", content: "你好" },
+      { role: "USER", questionId: "q2", content: "我负责招聘流程。" },
+      { role: "ASSISTANT", questionId: "q2", content: "请补充你的个人职责。" },
+      { role: "USER", questionId: "q2", content: "第一次补充。" },
+      { role: "USER", questionId: "q2", content: "历史异常产生的第二次补充。" },
+      { role: "USER", questionId: "q8", content: "我的岗位动机是长期做人力资源。" },
+      { role: "ASSISTANT", questionId: "q8", content: "请再说明一个现实稳定性条件。" },
+      { role: "USER", questionId: "q8", content: "补充现实稳定性条件。" },
+    ],
+  );
+
+  assert.deepEqual(summary.answersByQuestion, [[1, 3], [7, 2]]);
+  assert.deepEqual(summary.followUpsByQuestion, [[1, 1], [7, 1]]);
+  assert.equal(summary.inlineFollowUpsUsed, 1);
+  assert.equal(summary.finalFollowUpsUsed, 1);
+});
+
+test("resume budget does not mistake split ASR finals for follow-up answers", () => {
+  const summary = summarizeRecruitmentResumeBudget(
+    ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"],
+    [
+      { role: "USER", questionId: "q4", content: "我先说明项目背景和目标。" },
+      { role: "USER", questionId: "q4", content: "接着说明我的动作和结果。" },
+      { role: "USER", questionId: "q5", content: "我解决过一次复杂协作问题。" },
+      { role: "USER", questionId: "q5", content: "能听到吗？" },
+      { role: "ASSISTANT", questionId: "q5", content: "可以听到，请继续。" },
+      { role: "USER", questionId: "q5", content: "我继续补充原回答的结果。" },
+    ],
+  );
+
+  assert.deepEqual(summary.answersByQuestion, [[3, 2], [4, 2]]);
+  assert.deepEqual(summary.followUpsByQuestion, []);
+  assert.equal(summary.inlineFollowUpsUsed, 0);
+});
 
 test("pending ASR final hard cap wins over continuously revised active speech", () => {
   assert.deepEqual(

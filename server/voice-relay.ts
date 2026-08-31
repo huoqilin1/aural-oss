@@ -39,6 +39,7 @@ import {
     collapseInternalAsrRepetitions,
     decidePendingFinalSpeechHold,
     evaluateTranscriptManualAdvance,
+    failClosedRecruitmentResumeBudget,
     finalizeTurnBudgetResponse,
     shouldConsumeFollowUpBudget,
     isRecruitmentConversationControl,
@@ -51,6 +52,7 @@ import {
     shouldHoldBargeInInterimForFinal,
     shouldSuppressAnsweredAsrFinal,
     shouldSuppressRecentAsrFinal,
+    summarizeRecruitmentResumeBudget,
     trimCrossTurnOverlap,
     type RecentAsrFinal,
 } from "./voice-relay-helpers";
@@ -261,6 +263,7 @@ interface InterviewContext {
   followUpDepth: string;
   startQuestionIndex?: number;
   questions: Array<{
+    id?: string;
     text: string;
     type: string;
     description?: string | null;
@@ -1451,6 +1454,49 @@ async function handleBrowserConnection(
   if (startIdx > 0 && startIdx < sortedQuestions.length) {
     currentQuestionIndex = startIdx;
   }
+
+  async function hydrateRecruitmentResumeBudget() {
+    if (!isOprunRecruitmentInterview) return;
+    const applyFailClosedBudget = (reason: string) => {
+      const fallback = failClosedRecruitmentResumeBudget(currentQuestionIndex);
+      recruitmentInlineFollowUpsUsed = fallback.inlineFollowUpsUsed;
+      recruitmentFinalFollowUpsUsed = fallback.finalFollowUpsUsed;
+      totalFollowUpsUsed = recruitmentInlineFollowUpsUsed + recruitmentFinalFollowUpsUsed;
+      log.warn(
+        `Recruitment resume budget hydration unavailable (${reason}); `
+        + `fail-closed inline=${recruitmentInlineFollowUpsUsed}/2 `
+        + `final=${recruitmentFinalFollowUpsUsed}/1`,
+      );
+    };
+    if (!ctx.sessionId || !dynamicQuestionClient) {
+      applyFailClosedBudget(!ctx.sessionId ? "missing session id" : "missing database client");
+      return;
+    }
+    const { data, error } = await dynamicQuestionClient
+      .from("messages")
+      .select("role,questionId,content,timestamp")
+      .eq("sessionId", ctx.sessionId)
+      .order("timestamp", { ascending: true });
+    if (error) {
+      applyFailClosedBudget(`database error: ${error.message}`);
+      return;
+    }
+
+    const summary = summarizeRecruitmentResumeBudget(
+      sortedQuestions.map((question) => question.id),
+      data ?? [],
+    );
+    recruitmentInlineFollowUpsUsed = summary.inlineFollowUpsUsed;
+    recruitmentFinalFollowUpsUsed = summary.finalFollowUpsUsed;
+    totalFollowUpsUsed = recruitmentInlineFollowUpsUsed + recruitmentFinalFollowUpsUsed;
+    userTurnsOnCurrentQ = new Map(summary.answersByQuestion).get(currentQuestionIndex) || 0;
+    log.info(
+      `Hydrated recruitment resume budget: inline=${recruitmentInlineFollowUpsUsed}/2 `
+      + `final=${recruitmentFinalFollowUpsUsed}/1 current_turns=${userTurnsOnCurrentQ}`,
+    );
+  }
+
+  await hydrateRecruitmentResumeBudget();
 
   let maxFollowUps: number;
   switch (ctx.followUpDepth) {

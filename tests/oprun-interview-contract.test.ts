@@ -247,6 +247,7 @@ test("invited candidates resume the persisted question and transcript", () => {
 });
 
 test("OpRun recruitment relay caps follow-ups across the entire interview", () => {
+  const voiceHook = readFileSync("src/hooks/use-voice.ts", "utf8");
   assert.match(relay, /GLOBAL_FOLLOW_UP_LIMIT = 15/);
   assert.match(relay, /OPRUN_RECRUITMENT_FOLLOW_UP_LIMIT = 3/);
   assert.match(relay, /RECRUITMENT_INLINE_FOLLOW_UP_LIMIT = 2/);
@@ -265,6 +266,13 @@ test("OpRun recruitment relay caps follow-ups across the entire interview", () =
   assert.match(openAiRelay, /recruitmentMustAdvanceAfterAnswer/);
   assert.match(openAiRelay, /answer_complete/);
   assert.match(relay, /不是必问的最终动态核验机会/);
+  for (const source of [relay, openAiRelay]) {
+    assert.match(source, /summarizeRecruitmentResumeBudget/);
+    assert.match(source, /\.from\("messages"\)/);
+    assert.match(source, /\.eq\("sessionId", ctx\.sessionId\)/);
+    assert.match(source, /failClosedRecruitmentResumeBudget/);
+  }
+  assert.match(voiceHook, /sessionId\?: string/);
   assert.doesNotMatch(relay, /必须执行的最终动态核验/);
   assert.doesNotMatch(relay, /请再补充一个最能体现你能力的具体结果/);
   assert.doesNotMatch(openAiRelay, /needsFinalVerification/);

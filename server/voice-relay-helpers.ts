@@ -184,6 +184,121 @@ export function isRecruitmentConversationControl(text: string): boolean {
   return controlSignals.some((pattern) => pattern.test(normalized));
 }
 
+export interface PersistedRecruitmentMessage {
+  role: string;
+  questionId?: string | null;
+  content?: string | null;
+}
+
+export interface RecruitmentResumeBudget {
+  answersByQuestion: Array<[number, number]>;
+  followUpsByQuestion: Array<[number, number]>;
+  inlineFollowUpsUsed: number;
+  finalFollowUpsUsed: number;
+}
+
+/**
+ * If persisted progress cannot be loaded for an interview that is already past
+ * Q1, exhaust the verification budget instead of treating a reconnect as a new
+ * interview. This deliberately prefers fewer probes over exceeding the frozen
+ * whole-interview follow-up limit.
+ */
+export function failClosedRecruitmentResumeBudget(
+  startQuestionIndex: number,
+): RecruitmentResumeBudget {
+  const isResumedInterview = startQuestionIndex > 0;
+  return {
+    answersByQuestion: [],
+    followUpsByQuestion: [],
+    inlineFollowUpsUsed: isResumedInterview ? 2 : 0,
+    finalFollowUpsUsed: isResumedInterview ? 1 : 0,
+  };
+}
+
+/**
+ * Rebuild the server-side recruitment verification budget after a browser
+ * refresh or relay reconnect. The first substantive USER turn on a scored
+ * question is its main answer. A follow-up is consumed only when a later
+ * assistant turn is followed by another substantive USER turn on that same
+ * question. This avoids mistaking split ASR finals for extra probes. Persisted
+ * data is authoritative so a new WebSocket cannot reset the whole-interview
+ * budget.
+ */
+export function summarizeRecruitmentResumeBudget(
+  orderedQuestionIds: readonly (string | undefined)[],
+  messages: readonly PersistedRecruitmentMessage[],
+): RecruitmentResumeBudget {
+  const indexByQuestionId = new Map<string, number>();
+  orderedQuestionIds.forEach((id, index) => {
+    if (id) indexByQuestionId.set(id, index);
+  });
+
+  const states = new Map<number, {
+    answerCount: number;
+    awaitingFollowUpAnswer: boolean;
+    followUpAnswered: boolean;
+    lastUserWasControl: boolean;
+  }>();
+  for (const message of messages) {
+    if (!message.questionId) continue;
+    const questionIndex = indexByQuestionId.get(message.questionId);
+    if (questionIndex === undefined || questionIndex < 0 || questionIndex > 7) continue;
+    const content = String(message.content || "").trim();
+    if (!content) continue;
+    const state = states.get(questionIndex) ?? {
+      answerCount: 0,
+      awaitingFollowUpAnswer: false,
+      followUpAnswered: false,
+      lastUserWasControl: false,
+    };
+    const role = message.role.toUpperCase();
+    if (role === "USER") {
+      if (isRecruitmentConversationControl(content) || isUserSkipRequest(content)) {
+        state.lastUserWasControl = true;
+        states.set(questionIndex, state);
+        continue;
+      }
+      state.answerCount += 1;
+      if (state.awaitingFollowUpAnswer && state.answerCount > 1) {
+        state.followUpAnswered = true;
+        state.awaitingFollowUpAnswer = false;
+      }
+      state.lastUserWasControl = false;
+      states.set(questionIndex, state);
+      continue;
+    }
+    if (
+      role === "ASSISTANT"
+      && state.answerCount > 0
+      && !state.followUpAnswered
+      && !state.lastUserWasControl
+    ) {
+      state.awaitingFollowUpAnswer = true;
+      states.set(questionIndex, state);
+    }
+  }
+
+  const answers = new Map<number, number>();
+  const followUps = new Map<number, number>();
+  states.forEach((state, questionIndex) => {
+    if (state.answerCount > 0) answers.set(questionIndex, state.answerCount);
+    if (questionIndex > 0 && state.followUpAnswered) followUps.set(questionIndex, 1);
+  });
+
+  let inlineFollowUpsUsed = 0;
+  for (let questionIndex = 1; questionIndex <= 6; questionIndex++) {
+    inlineFollowUpsUsed += followUps.get(questionIndex) || 0;
+  }
+  const finalFollowUpsUsed = followUps.get(7) || 0;
+
+  return {
+    answersByQuestion: Array.from(answers.entries()),
+    followUpsByQuestion: Array.from(followUps.entries()),
+    inlineFollowUpsUsed: Math.min(2, inlineFollowUpsUsed),
+    finalFollowUpsUsed: Math.min(1, finalFollowUpsUsed),
+  };
+}
+
 /**
  * Q4 is the scored result-authenticity question. If a candidate gives a
  * numeric claim but explicitly cannot supply its population, source, or

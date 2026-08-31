@@ -24,9 +24,11 @@ import {
     shouldAllowTtsBargeIn,
 } from "./openai-voice-relay-helpers";
 import {
+    failClosedRecruitmentResumeBudget,
     isRecruitmentConversationControl,
     isUserSkipRequest,
     recruitmentMetricEvidenceFollowUp,
+    summarizeRecruitmentResumeBudget,
 } from "./voice-relay-helpers";
 import {
     type BigModelAsrConfig,
@@ -202,6 +204,7 @@ function isCodingDoneSignal(text: string): boolean {
 
 interface InterviewContext {
   interviewId?: string;
+  sessionId?: string;
   title: string;
   objective?: string | null;
   aiName: string;
@@ -2232,6 +2235,54 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   }
 
   // ── Initial connection ────────────────────────────────────────────
+
+  async function hydrateRecruitmentResumeBudget() {
+    if (!isOprunRecruitmentInterview) return;
+    const applyFailClosedBudget = (reason: string) => {
+      const fallback = failClosedRecruitmentResumeBudget(currentQuestionIndex);
+      recruitmentInlineFollowUpsUsed = fallback.inlineFollowUpsUsed;
+      recruitmentFinalFollowUpsUsed = fallback.finalFollowUpsUsed;
+      log.warn(
+        `Recruitment resume budget hydration unavailable (${reason}); `
+        + `fail-closed inline=${recruitmentInlineFollowUpsUsed}/2 `
+        + `final=${recruitmentFinalFollowUpsUsed}/1`,
+      );
+    };
+    if (!ctx.sessionId || !dynamicQuestionClient) {
+      applyFailClosedBudget(!ctx.sessionId ? "missing session id" : "missing database client");
+      return;
+    }
+    const { data, error } = await dynamicQuestionClient
+      .from("messages")
+      .select("role,questionId,content,timestamp")
+      .eq("sessionId", ctx.sessionId)
+      .order("timestamp", { ascending: true });
+    if (error) {
+      applyFailClosedBudget(`database error: ${error.message}`);
+      return;
+    }
+
+    const summary = summarizeRecruitmentResumeBudget(
+      sortedQuestions.map((question) => question.id),
+      data ?? [],
+    );
+    recruitmentAnswersByQuestion.clear();
+    recruitmentFollowUpsByQuestion.clear();
+    for (const [questionIndex, answerCount] of summary.answersByQuestion) {
+      recruitmentAnswersByQuestion.set(questionIndex, answerCount);
+    }
+    for (const [questionIndex, followUpCount] of summary.followUpsByQuestion) {
+      recruitmentFollowUpsByQuestion.set(questionIndex, followUpCount);
+    }
+    recruitmentInlineFollowUpsUsed = summary.inlineFollowUpsUsed;
+    recruitmentFinalFollowUpsUsed = summary.finalFollowUpsUsed;
+    log.info(
+      `Hydrated recruitment resume budget: inline=${recruitmentInlineFollowUpsUsed}/2 `
+      + `final=${recruitmentFinalFollowUpsUsed}/1`,
+    );
+  }
+
+  await hydrateRecruitmentResumeBudget();
 
   try {
     oaiWs = await connectOai();
