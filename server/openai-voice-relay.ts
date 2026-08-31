@@ -27,6 +27,8 @@ import {
     failClosedRecruitmentResumeBudget,
     isRecruitmentConversationControl,
     isUserSkipRequest,
+    mergePersistedRecruitmentFollowUpBudget,
+    readPersistedRecruitmentFollowUpBudget,
     recruitmentMetricEvidenceFollowUp,
     summarizeRecruitmentResumeBudget,
 } from "./voice-relay-helpers";
@@ -775,7 +777,37 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   const recruitmentFollowUpsByQuestion = new Map<number, number>();
   let recruitmentInlineFollowUpsUsed = 0;
   let recruitmentFinalFollowUpsUsed = 0;
+  let recruitmentParticipantMetadata: unknown = null;
+  let recruitmentParticipantMetadataLoaded = false;
   let activeResponseQuestionIndex = currentQuestionIndex;
+
+  async function persistRecruitmentFollowUpBudget(): Promise<boolean> {
+    if (
+      !isOprunRecruitmentInterview
+      || !ctx.sessionId
+      || !dynamicQuestionClient
+      || !recruitmentParticipantMetadataLoaded
+    ) {
+      return false;
+    }
+    const nextMetadata = mergePersistedRecruitmentFollowUpBudget(
+      recruitmentParticipantMetadata,
+      {
+        inlineFollowUpsUsed: recruitmentInlineFollowUpsUsed,
+        finalFollowUpsUsed: recruitmentFinalFollowUpsUsed,
+      },
+    );
+    const { error } = await dynamicQuestionClient
+      .from("sessions")
+      .update({ participantMetadata: nextMetadata })
+      .eq("id", ctx.sessionId);
+    if (error) {
+      log.error(`Recruitment follow-up budget persistence failed: ${error.message}`);
+      return false;
+    }
+    recruitmentParticipantMetadata = nextMetadata;
+    return true;
+  }
 
   function normalizeDynamicQuestions(rows: unknown): typeof sortedQuestions {
     if (!Array.isArray(rows)) return [];
@@ -1234,6 +1266,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       `Recruitment verification budget: inline=${recruitmentInlineFollowUpsUsed}/2 `
       + `final=${recruitmentFinalFollowUpsUsed}/1`,
     );
+    void persistRecruitmentFollowUpBudget();
   }
 
   function clearSpeechFinalizeTimer() {
@@ -2252,12 +2285,26 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       applyFailClosedBudget(!ctx.sessionId ? "missing session id" : "missing database client");
       return;
     }
+    const { data: sessionData, error: sessionError } = await dynamicQuestionClient
+      .from("sessions")
+      .select("participantMetadata")
+      .eq("id", ctx.sessionId)
+      .single();
+    if (!sessionError) {
+      recruitmentParticipantMetadata = sessionData?.participantMetadata ?? null;
+      recruitmentParticipantMetadataLoaded = true;
+    } else {
+      log.warn(`Recruitment follow-up metadata hydration failed: ${sessionError.message}`);
+    }
+    const persistedBudget = readPersistedRecruitmentFollowUpBudget(
+      recruitmentParticipantMetadata,
+    );
     const { data, error } = await dynamicQuestionClient
       .from("messages")
       .select("role,questionId,content,timestamp")
       .eq("sessionId", ctx.sessionId)
       .order("timestamp", { ascending: true });
-    if (error) {
+    if (error && !persistedBudget) {
       applyFailClosedBudget(`database error: ${error.message}`);
       return;
     }
@@ -2274,12 +2321,25 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     for (const [questionIndex, followUpCount] of summary.followUpsByQuestion) {
       recruitmentFollowUpsByQuestion.set(questionIndex, followUpCount);
     }
-    recruitmentInlineFollowUpsUsed = summary.inlineFollowUpsUsed;
-    recruitmentFinalFollowUpsUsed = summary.finalFollowUpsUsed;
+    recruitmentInlineFollowUpsUsed = Math.max(
+      summary.inlineFollowUpsUsed,
+      persistedBudget?.inlineFollowUpsUsed ?? 0,
+    );
+    recruitmentFinalFollowUpsUsed = Math.max(
+      summary.finalFollowUpsUsed,
+      persistedBudget?.finalFollowUpsUsed ?? 0,
+    );
     log.info(
       `Hydrated recruitment resume budget: inline=${recruitmentInlineFollowUpsUsed}/2 `
       + `final=${recruitmentFinalFollowUpsUsed}/1`,
     );
+    if (
+      !persistedBudget
+      || persistedBudget.inlineFollowUpsUsed < recruitmentInlineFollowUpsUsed
+      || persistedBudget.finalFollowUpsUsed < recruitmentFinalFollowUpsUsed
+    ) {
+      await persistRecruitmentFollowUpBudget();
+    }
   }
 
   await hydrateRecruitmentResumeBudget();

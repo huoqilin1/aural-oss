@@ -30,6 +30,17 @@ export function requireVoiceStorageResult<T>(
 const ACTIVITY_GAP_CAP_MS = 5 * 60 * 1000;
 const STALE_SESSION_GRACE_MS = 10 * 60 * 1000;
 
+/** Preserve transcript order when a progress batch is inserted in one query. */
+export function orderedVoiceMessageTimestamp(
+  batchStartedAtMs: number,
+  messageIndex: number,
+): string {
+  const safeIndex = Number.isInteger(messageIndex) && messageIndex > 0
+    ? messageIndex
+    : 0;
+  return new Date(batchStartedAtMs + safeIndex).toISOString();
+}
+
 /**
  * For IN_PROGRESS sessions, caps the effective "now" so that abandoned
  * sessions don't accumulate unbounded duration. If the session's last

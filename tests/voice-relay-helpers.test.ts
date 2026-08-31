@@ -13,6 +13,8 @@ import {
     isUserSkipRequest,
     mergeAsrSegments,
     mergePendingAsrInterim,
+    mergePersistedRecruitmentFollowUpBudget,
+    readPersistedRecruitmentFollowUpBudget,
     recruitmentMetricEvidenceFollowUp,
     responseInvitesUserReply,
     shouldConsumeFollowUpBudget,
@@ -56,6 +58,47 @@ test("recruitment resume budget survives a relay reconnect", () => {
   assert.deepEqual(summary.followUpsByQuestion, [[1, 1], [2, 1]]);
   assert.equal(summary.inlineFollowUpsUsed, 2);
   assert.equal(summary.finalFollowUpsUsed, 0);
+});
+
+test("legacy same-timestamp batches fail closed instead of reopening the follow-up budget", () => {
+  const timestamp = "2026-08-31T01:11:16.000Z";
+  const summary = summarizeRecruitmentResumeBudget(
+    ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"],
+    [
+      { role: "ASSISTANT", questionId: "q2", content: "请介绍这个项目。", timestamp },
+      { role: "USER", questionId: "q2", content: "我负责招聘流程设计。", timestamp },
+      { role: "ASSISTANT", questionId: "q2", content: "请补充本人职责边界。", timestamp },
+      { role: "USER", questionId: "q2", content: "补充职责边界和审批人。", timestamp },
+      { role: "USER", questionId: "q3", content: "我把周期缩短了20%。", timestamp },
+      { role: "USER", questionId: "q3", content: "补充样本量和统计周期。", timestamp },
+      // Same timestamps make this database return order legal even though it
+      // is not the original conversational order.
+      { role: "ASSISTANT", questionId: "q3", content: "请补充数据口径。", timestamp },
+      { role: "ASSISTANT", questionId: "q3", content: "请说明结果。", timestamp },
+    ],
+  );
+
+  assert.equal(summary.inlineFollowUpsUsed, 2);
+  assert.deepEqual(summary.followUpsByQuestion, [[1, 1], [2, 1]]);
+});
+
+test("persisted recruitment budget is capped and preserves unrelated metadata", () => {
+  const metadata = mergePersistedRecruitmentFollowUpBudget(
+    { source: "hr", nested: { keep: true } },
+    { inlineFollowUpsUsed: 99, finalFollowUpsUsed: 7 },
+  );
+  assert.deepEqual(readPersistedRecruitmentFollowUpBudget(metadata), {
+    inlineFollowUpsUsed: 2,
+    finalFollowUpsUsed: 1,
+  });
+  assert.equal(metadata.source, "hr");
+  assert.deepEqual(metadata.nested, { keep: true });
+  assert.equal(readPersistedRecruitmentFollowUpBudget({
+    oprunRecruitmentFollowUpBudget: {
+      inlineFollowUpsUsed: "2",
+      finalFollowUpsUsed: 0,
+    },
+  }), null);
 });
 
 test("resume budget ignores greetings and caps persisted over-limit turns", () => {

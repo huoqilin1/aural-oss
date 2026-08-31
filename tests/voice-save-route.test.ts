@@ -5,9 +5,21 @@ import {
   computeMessageBasedDuration,
   computeSegmentDuration,
   handleVoiceSave,
+  orderedVoiceMessageTimestamp,
   requireVoiceStorageResult,
   type ActivitySegment,
 } from "@/app/api/voice/save/logic";
+
+test("voice save assigns stable increasing timestamps inside one insert batch", () => {
+  assert.equal(
+    orderedVoiceMessageTimestamp(Date.parse("2026-08-31T01:11:16.000Z"), 0),
+    "2026-08-31T01:11:16.000Z",
+  );
+  assert.equal(
+    orderedVoiceMessageTimestamp(Date.parse("2026-08-31T01:11:16.000Z"), 3),
+    "2026-08-31T01:11:16.003Z",
+  );
+});
 
 test("voice storage failures throw so progress messages can be requeued", () => {
   assert.throws(

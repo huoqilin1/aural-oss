@@ -7,6 +7,7 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
 import {
   handleVoiceSave,
+  orderedVoiceMessageTimestamp,
   requireVoiceStorageResult,
   type ActivitySegment,
   type CompletionSession,
@@ -18,8 +19,9 @@ import {
 const log = createLogger("api/voice/save");
 const voiceSaveOps: VoiceSaveOps = {
   async insertMessages(sessionId, messages) {
+    const batchStartedAtMs = Date.now();
     const result = await supabaseAdmin.from("messages").insert(
-      messages.map((m) => ({
+      messages.map((m, messageIndex) => ({
         sessionId,
         role: m.role === "user" ? ("USER" as const) : ("ASSISTANT" as const),
         content: m.content,
@@ -27,6 +29,10 @@ const voiceSaveOps: VoiceSaveOps = {
         questionId: m.questionId || null,
         wordCount: m.content.split(/\s+/).length,
         transcription: m.source === "chat" ? "chat" : null,
+        // PostgreSQL's default now() is identical for an entire INSERT. Give
+        // each turn a stable millisecond so reconnect hydration can reproduce
+        // USER -> ASSISTANT -> USER ordering exactly.
+        timestamp: orderedVoiceMessageTimestamp(batchStartedAtMs, messageIndex),
       })),
     );
     requireVoiceStorageResult("insert voice messages", result);

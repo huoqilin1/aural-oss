@@ -188,6 +188,7 @@ export interface PersistedRecruitmentMessage {
   role: string;
   questionId?: string | null;
   content?: string | null;
+  timestamp?: string | null;
 }
 
 export interface RecruitmentResumeBudget {
@@ -195,6 +196,63 @@ export interface RecruitmentResumeBudget {
   followUpsByQuestion: Array<[number, number]>;
   inlineFollowUpsUsed: number;
   finalFollowUpsUsed: number;
+}
+
+export const RECRUITMENT_FOLLOW_UP_BUDGET_METADATA_KEY =
+  "oprunRecruitmentFollowUpBudget";
+
+export interface PersistedRecruitmentFollowUpBudget {
+  inlineFollowUpsUsed: number;
+  finalFollowUpsUsed: number;
+}
+
+function cappedBudgetCounter(value: unknown, maximum: number): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) return 0;
+  return Math.min(maximum, parsed);
+}
+
+/**
+ * Read the relay-owned counters without trusting candidate-controlled values or
+ * disturbing any unrelated participant metadata stored by HR integrations.
+ */
+export function readPersistedRecruitmentFollowUpBudget(
+  metadata: unknown,
+): PersistedRecruitmentFollowUpBudget | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+  const raw = (metadata as Record<string, unknown>)[
+    RECRUITMENT_FOLLOW_UP_BUDGET_METADATA_KEY
+  ];
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const row = raw as Record<string, unknown>;
+  if (
+    typeof row.inlineFollowUpsUsed !== "number"
+    || !Number.isInteger(row.inlineFollowUpsUsed)
+    || row.inlineFollowUpsUsed < 0
+    || typeof row.finalFollowUpsUsed !== "number"
+    || !Number.isInteger(row.finalFollowUpsUsed)
+    || row.finalFollowUpsUsed < 0
+  ) {
+    return null;
+  }
+  return {
+    inlineFollowUpsUsed: cappedBudgetCounter(row.inlineFollowUpsUsed, 2),
+    finalFollowUpsUsed: cappedBudgetCounter(row.finalFollowUpsUsed, 1),
+  };
+}
+
+export function mergePersistedRecruitmentFollowUpBudget(
+  metadata: unknown,
+  budget: PersistedRecruitmentFollowUpBudget,
+): Record<string, unknown> {
+  const base = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? { ...(metadata as Record<string, unknown>) }
+    : {};
+  base[RECRUITMENT_FOLLOW_UP_BUDGET_METADATA_KEY] = {
+    inlineFollowUpsUsed: cappedBudgetCounter(budget.inlineFollowUpsUsed, 2),
+    finalFollowUpsUsed: cappedBudgetCounter(budget.finalFollowUpsUsed, 1),
+  };
+  return base;
 }
 
 /**
@@ -238,6 +296,8 @@ export function summarizeRecruitmentResumeBudget(
     awaitingFollowUpAnswer: boolean;
     followUpAnswered: boolean;
     lastUserWasControl: boolean;
+    assistantCount: number;
+    timestamps: Set<string>;
   }>();
   for (const message of messages) {
     if (!message.questionId) continue;
@@ -250,7 +310,10 @@ export function summarizeRecruitmentResumeBudget(
       awaitingFollowUpAnswer: false,
       followUpAnswered: false,
       lastUserWasControl: false,
+      assistantCount: 0,
+      timestamps: new Set<string>(),
     };
+    if (message.timestamp) state.timestamps.add(message.timestamp);
     const role = message.role.toUpperCase();
     if (role === "USER") {
       if (isRecruitmentConversationControl(content) || isUserSkipRequest(content)) {
@@ -273,7 +336,13 @@ export function summarizeRecruitmentResumeBudget(
       && !state.followUpAnswered
       && !state.lastUserWasControl
     ) {
+      state.assistantCount += 1;
       state.awaitingFollowUpAnswer = true;
+      states.set(questionIndex, state);
+      continue;
+    }
+    if (role === "ASSISTANT") {
+      state.assistantCount += 1;
       states.set(questionIndex, state);
     }
   }
@@ -282,7 +351,18 @@ export function summarizeRecruitmentResumeBudget(
   const followUps = new Map<number, number>();
   states.forEach((state, questionIndex) => {
     if (state.answerCount > 0) answers.set(questionIndex, state.answerCount);
-    if (questionIndex > 0 && state.followUpAnswered) followUps.set(questionIndex, 1);
+    // Older /api/voice/save batches assigned one database timestamp to every
+    // message. PostgreSQL therefore cannot reproduce the original USER ->
+    // ASSISTANT -> USER order after a reconnect. When such a legacy batch has
+    // multiple substantive user turns plus assistant turns, treat one probe as
+    // consumed. This intentionally fails closed: an old split-ASR batch may
+    // forfeit a probe, but it can never create an illegal third probe.
+    const ambiguousLegacyBatch = state.answerCount > 1
+      && state.assistantCount > 0
+      && state.timestamps.size === 1;
+    if (questionIndex > 0 && (state.followUpAnswered || ambiguousLegacyBatch)) {
+      followUps.set(questionIndex, 1);
+    }
   });
 
   let inlineFollowUpsUsed = 0;

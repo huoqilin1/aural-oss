@@ -268,10 +268,16 @@ test("OpRun recruitment relay caps follow-ups across the entire interview", () =
   assert.match(relay, /不是必问的最终动态核验机会/);
   for (const source of [relay, openAiRelay]) {
     assert.match(source, /summarizeRecruitmentResumeBudget/);
+    assert.match(source, /readPersistedRecruitmentFollowUpBudget/);
+    assert.match(source, /mergePersistedRecruitmentFollowUpBudget/);
     assert.match(source, /\.from\("messages"\)/);
+    assert.match(source, /\.from\("sessions"\)/);
+    assert.match(source, /\.update\(\{ participantMetadata: nextMetadata \}\)/);
     assert.match(source, /\.eq\("sessionId", ctx\.sessionId\)/);
     assert.match(source, /failClosedRecruitmentResumeBudget/);
   }
+  const voiceSaveRoute = readFileSync("src/app/api/voice/save/route.ts", "utf8");
+  assert.match(voiceSaveRoute, /orderedVoiceMessageTimestamp\(batchStartedAtMs, messageIndex\)/);
   assert.match(voiceHook, /sessionId\?: string/);
   assert.doesNotMatch(relay, /必须执行的最终动态核验/);
   assert.doesNotMatch(relay, /请再补充一个最能体现你能力的具体结果/);

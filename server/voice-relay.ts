@@ -41,6 +41,8 @@ import {
     evaluateTranscriptManualAdvance,
     failClosedRecruitmentResumeBudget,
     finalizeTurnBudgetResponse,
+    mergePersistedRecruitmentFollowUpBudget,
+    readPersistedRecruitmentFollowUpBudget,
     shouldConsumeFollowUpBudget,
     isRecruitmentConversationControl,
     recruitmentMetricEvidenceFollowUp,
@@ -1252,6 +1254,8 @@ async function handleBrowserConnection(
   let totalFollowUpsUsed = 0;
   let recruitmentInlineFollowUpsUsed = 0;
   let recruitmentFinalFollowUpsUsed = 0;
+  let recruitmentParticipantMetadata: unknown = null;
+  let recruitmentParticipantMetadataLoaded = false;
   // Preserve the upstream 15-turn allowance for non-recruitment interviews;
   // OpRun recruitment uses the stricter evidence-verification budget below.
   const GLOBAL_FOLLOW_UP_LIMIT = 15;
@@ -1455,6 +1459,34 @@ async function handleBrowserConnection(
     currentQuestionIndex = startIdx;
   }
 
+  async function persistRecruitmentFollowUpBudget(): Promise<boolean> {
+    if (
+      !isOprunRecruitmentInterview
+      || !ctx.sessionId
+      || !dynamicQuestionClient
+      || !recruitmentParticipantMetadataLoaded
+    ) {
+      return false;
+    }
+    const nextMetadata = mergePersistedRecruitmentFollowUpBudget(
+      recruitmentParticipantMetadata,
+      {
+        inlineFollowUpsUsed: recruitmentInlineFollowUpsUsed,
+        finalFollowUpsUsed: recruitmentFinalFollowUpsUsed,
+      },
+    );
+    const { error } = await dynamicQuestionClient
+      .from("sessions")
+      .update({ participantMetadata: nextMetadata })
+      .eq("id", ctx.sessionId);
+    if (error) {
+      log.error(`Recruitment follow-up budget persistence failed: ${error.message}`);
+      return false;
+    }
+    recruitmentParticipantMetadata = nextMetadata;
+    return true;
+  }
+
   async function hydrateRecruitmentResumeBudget() {
     if (!isOprunRecruitmentInterview) return;
     const applyFailClosedBudget = (reason: string) => {
@@ -1472,12 +1504,26 @@ async function handleBrowserConnection(
       applyFailClosedBudget(!ctx.sessionId ? "missing session id" : "missing database client");
       return;
     }
+    const { data: sessionData, error: sessionError } = await dynamicQuestionClient
+      .from("sessions")
+      .select("participantMetadata")
+      .eq("id", ctx.sessionId)
+      .single();
+    if (!sessionError) {
+      recruitmentParticipantMetadata = sessionData?.participantMetadata ?? null;
+      recruitmentParticipantMetadataLoaded = true;
+    } else {
+      log.warn(`Recruitment follow-up metadata hydration failed: ${sessionError.message}`);
+    }
+    const persistedBudget = readPersistedRecruitmentFollowUpBudget(
+      recruitmentParticipantMetadata,
+    );
     const { data, error } = await dynamicQuestionClient
       .from("messages")
       .select("role,questionId,content,timestamp")
       .eq("sessionId", ctx.sessionId)
       .order("timestamp", { ascending: true });
-    if (error) {
+    if (error && !persistedBudget) {
       applyFailClosedBudget(`database error: ${error.message}`);
       return;
     }
@@ -1486,14 +1532,27 @@ async function handleBrowserConnection(
       sortedQuestions.map((question) => question.id),
       data ?? [],
     );
-    recruitmentInlineFollowUpsUsed = summary.inlineFollowUpsUsed;
-    recruitmentFinalFollowUpsUsed = summary.finalFollowUpsUsed;
+    recruitmentInlineFollowUpsUsed = Math.max(
+      summary.inlineFollowUpsUsed,
+      persistedBudget?.inlineFollowUpsUsed ?? 0,
+    );
+    recruitmentFinalFollowUpsUsed = Math.max(
+      summary.finalFollowUpsUsed,
+      persistedBudget?.finalFollowUpsUsed ?? 0,
+    );
     totalFollowUpsUsed = recruitmentInlineFollowUpsUsed + recruitmentFinalFollowUpsUsed;
     userTurnsOnCurrentQ = new Map(summary.answersByQuestion).get(currentQuestionIndex) || 0;
     log.info(
       `Hydrated recruitment resume budget: inline=${recruitmentInlineFollowUpsUsed}/2 `
       + `final=${recruitmentFinalFollowUpsUsed}/1 current_turns=${userTurnsOnCurrentQ}`,
     );
+    if (
+      !persistedBudget
+      || persistedBudget.inlineFollowUpsUsed < recruitmentInlineFollowUpsUsed
+      || persistedBudget.finalFollowUpsUsed < recruitmentFinalFollowUpsUsed
+    ) {
+      await persistRecruitmentFollowUpBudget();
+    }
   }
 
   await hydrateRecruitmentResumeBudget();
@@ -2380,6 +2439,7 @@ async function handleBrowserConnection(
             : GLOBAL_FOLLOW_UP_LIMIT
         }`,
       );
+      await persistRecruitmentFollowUpBudget();
     }
     if (spokenResponse) {
       recentAgentResponses.push(spokenResponse);
