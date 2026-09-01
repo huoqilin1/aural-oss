@@ -371,12 +371,15 @@ async function clickNext(page: Page) {
 
       let followUps = 0;
       let answered = false;
-      // 基线取本题题干;答后 AI 的新话术(追问)以此为参照,
-      // 且题干回显不算追问(TTS 渲染晚于页面标题属正常时序)。
+      // 基线取本题题干;答后 AI 的新话术(追问)以此为参照。
       let lastAiSeen = qText;
+      // 回答必须逐题唯一:中继会丢弃与前一轮完全相同的文本(生产实测
+      // Q2/Q3 命中同一回答模板导致"答后静默 90s"),追加题号后缀防去重。
+      const answerSuffix = `（第 ${q + 1} 题作答）`;
       while (!answered) {
         if (followUps > 2) throw new Error(`第 ${q + 1} 题追问超过 2 次`);
-        const answer = followUps === 0 ? answerFor(qText) : "我再补充一点：" + answerFor(qText).slice(0, 120);
+        const base = followUps === 0 ? answerFor(qText) : "我再补充一点：" + answerFor(qText).slice(0, 120);
+        const answer = base + answerSuffix;
         await chatAnswer(page, answer);
         log(`  已作答(第 ${followUps + 1} 轮)…`);
         // 最后一题：CTA 按设计不出现，答完即进入自然收尾等待。
@@ -405,12 +408,22 @@ async function clickNext(page: Page) {
           const isUiHint = !last || /本题答完了|下一题/.test(last);
           // AI 口播题干常带前缀(如"接下来第3个问题:"),用包含关系判回显;
           // last 与题干都做同样的引号/空白归一化后再比较。
-          const qNorm = qText.replace(/[\s\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f'"]/g, "");
+          const normRe = /[\s\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f'"]/g;
+          const qNorm = qText.replace(normRe, "");
           const isQuestionEcho =
             !!last
             && (last.includes(qNorm.slice(0, 12)) || qNorm.includes(last.slice(0, 12)));
+          // 下一题题干可能先于页头出现(切题 TTS 早于 question_change 渲染):
+          // 命中下一题文本时等待页头切题,不算当前题的追问。
+          // 渐进出题会在此轮询期间补齐下一题,须实时重算。
+          const nextRow = mainsOf(questions)[q + 1];
+          const nextSeeded = nextRow ? nextRow.text.replace(normRe, "") : "";
+          const isNextQuestionText =
+            !!last
+            && !!nextSeeded
+            && (last.includes(nextSeeded.slice(0, 12)) || nextSeeded.includes(last.slice(0, 12)));
           const asksSomething = !!last && /(？|\?|请|说说|讲讲|讲一|聊聊|谈谈|展开|补充|具体|如何|为什么|什么|确认|举例|提到|讲到|描述)/.test(last);
-          if (last && last !== lastAiSeen && !isUiHint && !isQuestionEcho && asksSomething && last.length > 15) {
+          if (last && last !== lastAiSeen && !isUiHint && !isQuestionEcho && !isNextQuestionText && asksSomething && last.length > 15) {
             lastAiSeen = last;
             followUps += 1;
             log(`  AI 追问: ${last.slice(0, 60)}… 继续回答`);
