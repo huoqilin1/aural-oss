@@ -164,6 +164,20 @@ function answerFor(qText: string): string {
  *  注意:ui/Input 未显式传 type,渲染出的 input 没有 type 属性,
  *  不能用 input[type="text"] 选择器(会永远匹配为空导致假超时)。 */
 async function chatAnswer(page: Page, text: string) {
+  // 像真实候选人一样等 AI 说完再作答:AI 播题(TTS)期间发出的 chat 消息
+  // 会被中继记录但不处理(生产实测"答后静默 90s"),状态标签回到
+  // "正在听取回答"再发送。面试已结束/已断开时直接失败。
+  await page.waitForFunction(
+    () => {
+      const t = document.body.innerText;
+      if (t.includes("面试已结束")) return false;
+      return t.includes("正在听取回答");
+    },
+    undefined,
+    { timeout: 60_000 },
+  ).catch(() => {
+    throw new Error("60s 内未进入可作答状态(未出现\"正在听取回答\")");
+  });
   await page.locator('[data-tour="voice-chat"] button').click();
   const input = page.getByRole("textbox");
   await input.waitFor({ state: "visible", timeout: 15_000 });
