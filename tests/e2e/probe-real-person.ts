@@ -253,8 +253,10 @@ async function clickNext(page: Page) {
     if (!capOk) throw new Error("浏览器能力探测失败(前置门禁)");
     log(`浏览器就绪,启动≈${Date.now() - tLaunch}ms`);
 
-    // 拦截 getByToken,拿到全部题目文本与类型(用于 8 题与追问预算双核验)
-    let questions: Array<{ text: string; type: string }> = [];
+    // 拦截 getByToken,拿到全部题目文本与类型(用于 8 题与追问预算双核验)。
+    // 持久化计划含 8 道计分主问题 + 1 道候选人收尾行(oprun_dimension:
+    // candidate_questions),主问题断言只针对主问题行。
+    let questions: Array<{ text: string; type: string; desc: string }> = [];
     page.on("response", async (resp) => {
       if (!resp.url().includes("candidate.getByToken")) return;
       try {
@@ -265,7 +267,10 @@ async function clickNext(page: Page) {
             questions = data
               .map((it) => ({
                 text: String(dig(it, ["text"]) ?? ""),
-                type: String(dig(it, ["type"]) ?? dig(it, ["kind"]) ?? "main"),
+                type: String(
+                  dig(it, ["questionType"]) ?? dig(it, ["type"]) ?? dig(it, ["kind"]) ?? "main",
+                ).toLowerCase(),
+                desc: String(dig(it, ["description"]) ?? ""),
                 order: Number(dig(it, ["order"]) ?? 0),
               }))
               .filter((it) => it.text)
@@ -274,6 +279,10 @@ async function clickNext(page: Page) {
         }
       } catch { /* ignore */ }
     });
+    const isClosingRow = (row: { type: string; desc: string; text?: string }) =>
+      row.type === "closing"
+      || /candidate_questions/.test(row.desc)
+      || /候选人提问|反问|你有什么.{0,6}(问题|想问)/.test(row.text || "");
 
     saveState({ phase: "opening", opened_at: new Date().toISOString() });
     await page.goto(inviteUrl, { waitUntil: "domcontentloaded" });
@@ -298,16 +307,23 @@ async function clickNext(page: Page) {
       );
       await page.waitForTimeout(2500);
       await waitQuestionLoaded(questions, q);
-      const qText = questions[q].text;
-      const qType = questions[q].type;
-      if (questions.length > 8) throw new Error(`题目超过 8 道，实际为 ${questions.length}`);
+      // 主问题断言:过滤收尾/追问行后必须恰好 8 道计分主问题。
+      const mains = questions.filter(
+        (row) => !isClosingRow(row) && row.type !== "follow_up",
+      );
+      if (mains.length !== 8) {
+        throw new Error(`计分主问题必须恰好 8 道,实际 ${mains.length}(原始行 ${questions.length})`);
+      }
+      const qText = mains[q].text;
+      const qType = mains[q].type;
       if (qType === "follow_up") throw new Error(`主问题位出现追问行(第 ${q + 1} 道, 类型 ${qType})`);
       log(`\n── 第 ${q + 1} 题: ${qText.slice(0, 110)}`);
 
       let followUps = 0;
       let answered = false;
-      // 基线取本题题干;答后 AI 的新话术(追问)以此为参照。
-      let lastAiSeen = await lastAiText(page);
+      // 基线取本题题干;答后 AI 的新话术(追问)以此为参照,
+      // 且题干回显不算追问(TTS 渲染晚于页面标题属正常时序)。
+      let lastAiSeen = qText;
       while (!answered) {
         if (followUps > 2) throw new Error(`第 ${q + 1} 题追问超过 2 次`);
         const answer = followUps === 0 ? answerFor(qText) : "我再补充一点：" + answerFor(qText).slice(0, 120);
@@ -337,8 +353,10 @@ async function clickNext(page: Page) {
           }
           const last = await lastAiText(page);
           const isUiHint = /本题答完了|下一题/.test(last);
+          const isQuestionEcho =
+            last.startsWith(qText.slice(0, 10)) || qText.startsWith(last.slice(0, 10));
           const asksSomething = /(？|\?|请|说说|讲讲|展开|补充|具体|如何|为什么|什么)/.test(last);
-          if (last && last !== lastAiSeen && !isUiHint && asksSomething && last.length > 15) {
+          if (last && last !== lastAiSeen && !isUiHint && !isQuestionEcho && asksSomething && last.length > 15) {
             lastAiSeen = last;
             followUps += 1;
             log(`  AI 追问: ${last.slice(0, 60)}… 继续回答`);
@@ -378,18 +396,33 @@ async function clickNext(page: Page) {
       if (q < 7) {
         await page.screenshot({ path: join(SHOT_DIR, `sim-q${q + 1}.png`) });
       } else {
-        if (questions.length !== 8) {
-          throw new Error(`最终题目数量必须恰好为 8，实际为 ${questions.length}`);
+        const mains = questions.filter(
+          (row) => !isClosingRow(row) && row.type !== "follow_up",
+        );
+        if (mains.length !== 8) {
+          throw new Error(`最终核验:计分主问题必须恰好 8 道,实际 ${mains.length}`);
         }
         // 追问预算双核验:逐题计数 ≤3(0-2 正常 + 0-1 最终核验)
         if (totalFollowUps > 3) {
           throw new Error(`最终追问预算核验失败: ${totalFollowUps} > 3`);
         }
-        log("第 8 题答完，等待最终核验或自然收尾…");
+        log("第 8 题答完，等待收尾提问(候选人反问环节)…");
+        // 收尾提问属设计环节:AI 问"你有什么想问的"需作答一次才能自然收尾。
+        try {
+          await page.waitForFunction(
+            () => /你有什么.{0,8}(想问|问题)|有什么想问|提问/.test(document.body.innerText),
+            undefined,
+            { timeout: 40_000 },
+          );
+          await chatAnswer(page, answerFor("提问"));
+          log("  已回答收尾提问");
+        } catch {
+          log("  40s 未出现收尾提问,按自然收尾处理");
+        }
         await page.waitForFunction(
           () => document.body.innerText.includes("测试已完成"),
           undefined,
-          { timeout: 60_000 },
+          { timeout: 90_000 },
         );
         log(`✅ 面试自然收尾,出现完成页(全程追问 ${totalFollowUps} 次)`);
         await page.screenshot({ path: join(SHOT_DIR, "sim-q8-completed.png"), fullPage: true });
