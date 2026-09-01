@@ -177,27 +177,31 @@ async function chatAnswer(page: Page, text: string) {
   await input.fill(text);
   await input.press("Enter");
   // 回执:我们的消息以气泡出现在页面(前端只在确认送达后展示)。
-  // 切题过渡期的发送会被拦截并提示"正在切换题目"(设计行为,输入框
-  // 保留原文);看到拦截提示时等待后重按 Enter 重发。
+  // 切题过渡期/中继短暂重连中的发送会被拦截,提示"正在切换题目"/
+  // "连接尚未就绪"/"消息未能送达"且输入框保留原文(设计行为);
+  // 看到拦截提示即等待后重按 Enter;横幅被 5s 自动清除后按较长间隔兜底重发。
   const needle = text.slice(0, 10);
-  const deadline = Date.now() + 30_000;
-  let lastSend = Date.now();
+  const deadline = Date.now() + 45_000;
+  let lastTry = Date.now();
   for (;;) {
-    const visible = await page.evaluate(
-      (n) => (document.body.textContent || "").includes(n),
-      needle,
-    );
+    const { visible, blocked } = await page.evaluate((n) => {
+      const t = document.body.textContent || "";
+      return {
+        visible: t.includes(n),
+        blocked:
+          t.includes("正在切换题目")
+          || t.includes("连接尚未就绪")
+          || t.includes("消息未能送达"),
+      };
+    }, needle);
     if (visible) break;
     if (Date.now() > deadline) {
-      throw new Error("消息未在 30 秒内出现(回执缺失):发送被吞或未送达");
+      throw new Error("消息未在 45 秒内出现(回执缺失):发送被吞或未送达");
     }
-    const blocked = await page.evaluate(() => {
-      const t = document.body.textContent || "";
-      return t.includes("正在切换题目") || t.includes("连接尚未就绪");
-    });
-    if (blocked && Date.now() - lastSend > 3_000) {
+    const sinceTry = Date.now() - lastTry;
+    if ((blocked && sinceTry > 2_500) || sinceTry > 8_000) {
       await input.press("Enter").catch(() => {});
-      lastSend = Date.now();
+      lastTry = Date.now();
     }
     await page.waitForTimeout(500);
   }
