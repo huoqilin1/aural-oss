@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { trpc } from "@/lib/trpc/client";
 import { Card, CardContent } from "@/components/ui/card";
-import { Link2Off, CheckCircle2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, Link2Off } from "lucide-react";
 import { PreparingScreen } from "@/components/session/preparing-screen";
 
 export default function InvitePage() {
@@ -13,6 +13,7 @@ export default function InvitePage() {
   const router = useRouter();
 
   const [completed, setCompleted] = useState(false);
+  const [terminalEnded, setTerminalEnded] = useState(false);
   const sessionCreationAttempted = useRef(false);
 
   const candidate = trpc.candidate.getByToken.useQuery(
@@ -44,6 +45,9 @@ export default function InvitePage() {
     if (session) {
       if (session.status === "COMPLETED") {
         setCompleted(true);
+      } else if (session.status === "ABANDONED") {
+        // 终态会话不得重新进入面试流程(刷新/重访/URL 直转都不重开一场)。
+        setTerminalEnded(true);
       } else {
         goToSession();
       }
@@ -90,6 +94,23 @@ export default function InvitePage() {
             <h2 className="mt-4 text-2xl font-bold">测试已完成</h2>
             <p className="mt-2 text-muted-foreground">
               面试已顺利完成，感谢你的时间和用心的回答，你的每一题都已被完整记录。HR 会尽快查看结果，通常在一个工作日内与你联系。
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  // Terminal without completion (abandoned/cancelled)
+  if (terminalEnded) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
+        <Card className="w-full max-w-md">
+          <CardContent className="py-12 text-center">
+            <AlertCircle className="mx-auto h-16 w-16 text-muted-foreground" />
+            <h2 className="mt-4 text-2xl font-bold">面试已结束</h2>
+            <p className="mt-2 text-muted-foreground">
+              该场面试已经结束且未生成完成结果，无法重新开始。请联系招聘负责人重新安排。
             </p>
           </CardContent>
         </Card>

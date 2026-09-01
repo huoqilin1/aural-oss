@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   planSessionFinalization,
+  isTerminalSessionStatus,
+  shouldPersistSessionStatus,
   type LiveSessionRecord,
 } from "../server/session-finalization";
 import {
@@ -237,4 +239,32 @@ test("planSessionFinalization keeps a disconnected session live within grace", (
     planSessionFinalization(record({ lastActiveAtMs: 0 }), now, GRACE),
     null,
   );
+});
+
+test("isTerminalSessionStatus recognizes enum end states case-insensitively", () => {
+  assert.equal(isTerminalSessionStatus("COMPLETED"), true);
+  assert.equal(isTerminalSessionStatus("abandoned"), true);
+  assert.equal(isTerminalSessionStatus("IN_PROGRESS"), false);
+  assert.equal(isTerminalSessionStatus(null), false);
+  assert.equal(isTerminalSessionStatus(undefined), false);
+  assert.equal(isTerminalSessionStatus(""), false);
+});
+
+test("shouldPersistSessionStatus allows a terminal transition from a live session", () => {
+  assert.equal(shouldPersistSessionStatus("ABANDONED", "IN_PROGRESS"), true);
+  assert.equal(shouldPersistSessionStatus("COMPLETED", "IN_PROGRESS"), true);
+});
+
+test("shouldPersistSessionStatus blocks redundant or degrading terminal writes", () => {
+  // 生产故障:浏览器断开后的 10 分钟宽限清扫对已 ABANDONED 会话再次写
+  // ABANDONED(candidate_disconnected),并刷 new lastActivityAt。已终态必须跳过。
+  assert.equal(shouldPersistSessionStatus("ABANDONED", "ABANDONED"), false);
+  assert.equal(shouldPersistSessionStatus("ABANDONED", "COMPLETED"), false);
+  assert.equal(shouldPersistSessionStatus("COMPLETED", "COMPLETED"), false);
+  assert.equal(shouldPersistSessionStatus("COMPLETED", "ABANDONED"), false);
+});
+
+test("shouldPersistSessionStatus only governs terminal finalizations", () => {
+  assert.equal(shouldPersistSessionStatus("IN_PROGRESS", "IN_PROGRESS"), false);
+  assert.equal(shouldPersistSessionStatus("IN_PROGRESS", "COMPLETED"), false);
 });

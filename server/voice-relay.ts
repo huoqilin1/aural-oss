@@ -77,6 +77,8 @@ import {
 } from "./volcengine-tts";
 import {
   planSessionFinalization,
+  isTerminalSessionStatus,
+  shouldPersistSessionStatus,
   type LiveSessionRecord,
 } from "./session-finalization";
 import { SessionConnectionRegistry } from "./session-connection-registry";
@@ -806,9 +808,11 @@ wss.on("connection", (browserWs) => {
         void loadInterviewRelayLlmRoute(dynamicQuestionClient, context.interviewId)
           .then(async (llmRoute) => {
             await assertRelayLlmReady({ route: llmRoute });
-            if (browserWs.readyState === WebSocket.OPEN) {
-              await handleBrowserConnection(browserWs, context, llmRoute);
-            }
+            if (browserWs.readyState !== WebSocket.OPEN) return;
+            // 终态会话(COMPLETED/ABANDONED)拒绝重新 init:不能因为刷新或
+            // interview_incomplete 后的自动重连,从 Q1 重播一场已结束的面试。
+            if (await rejectInitForTerminalSession(browserWs, context)) return;
+            await handleBrowserConnection(browserWs, context, llmRoute);
           })
           .catch((error) => {
             log.error(
@@ -859,10 +863,29 @@ async function persistSessionStatus(
     updatedAt: nowIso,
   };
   if (status === "COMPLETED") patch.completedAt = nowIso;
+  // 终态写入门:先取当前状态裁决(纯函数可单测),再带旧状态条件更新。
+  // 已终态(COMPLETED/ABANDONED)的会话不得被重复放弃/迟到完成/重连清扫改写。
+  const { data: currentRow, error: readError } = await dynamicQuestionClient
+    .from("sessions")
+    .select("status")
+    .eq("id", sessionId)
+    .maybeSingle();
+  if (readError) {
+    log.error(`session persist status read failed (${sessionId}): ${readError.message}`);
+    return;
+  }
+  const currentStatus = currentRow?.status as string | null | undefined;
+  if (!shouldPersistSessionStatus(status, currentStatus)) {
+    log.info(`Session ${sessionId} finalize ${status} skipped (current=${currentStatus ?? "unknown"})`);
+    return;
+  }
   const { error } = await dynamicQuestionClient
     .from("sessions")
     .update(patch)
-    .eq("id", sessionId);
+    .eq("id", sessionId)
+    .neq("status", "COMPLETED")
+    .neq("status", "ABANDONED")
+    .select("id");
   if (error) {
     log.error(`session persist failed (${sessionId} -> ${status}):`, error.message);
     return;
@@ -870,10 +893,56 @@ async function persistSessionStatus(
   log.info(`Session ${sessionId} -> ${status} (${reason})`);
 }
 
+async function rejectInitForTerminalSession(
+  browserWs: WebSocket,
+  ctx: InterviewContext,
+): Promise<boolean> {
+  const sessionId = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
+  if (!sessionId) return false;
+  const locallyEnded = liveSessions.get(sessionId)?.status === "ended";
+  if (locallyEnded) {
+    log.info(`Relay init refused: session ${sessionId} ended in this relay instance`);
+    sendTerminalRejection(browserWs);
+    return true;
+  }
+  if (!dynamicQuestionClient) return false;
+  const { data, error } = await dynamicQuestionClient
+    .from("sessions")
+    .select("status")
+    .eq("id", sessionId)
+    .maybeSingle();
+  if (error) {
+    log.warn(`Relay init session status read failed (${sessionId}): ${error.message}`);
+    // 读不到状态不阻断 init(保持既有行为),终态写入仍有 CAS 兜底。
+    return false;
+  }
+  if (data && isTerminalSessionStatus(data.status as string)) {
+    log.info(`Relay init refused: session ${sessionId} is already ${data.status}`);
+    sendTerminalRejection(browserWs);
+    return true;
+  }
+  return false;
+}
+
+function sendTerminalRejection(browserWs: WebSocket): void {
+  if (browserWs.readyState !== WebSocket.OPEN) return;
+  browserWs.send(JSON.stringify({
+    type: "interview_incomplete",
+    reason: "session_terminal",
+    message: "该场面试已结束，请查看结果或联系招聘负责人重新安排。",
+  }));
+  browserWs.close(1013, "session_terminal");
+}
+
 function registerLiveSession(ctx: InterviewContext): void {
   const sessionId = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
   if (!sessionId) return;
   const nowMs = Date.now();
+  // 同一中继进程已判定终态(abandonForInactivity/收尾落库)的会话不得被
+  // 重连复活:否则断线宽限定时器会对已终态会话再写一次 ABANDONED,并让
+  // init 重播开场词。真正合法的短断线记录仍是 "live",不受影响。
+  const previous = liveSessions.get(sessionId);
+  const wasEnded = Boolean(previous && previous.status === "ended");
   liveSessions.set(sessionId, {
     sessionId,
     startedAtMs: nowMs,
@@ -883,7 +952,7 @@ function registerLiveSession(ctx: InterviewContext): void {
         ? ctx.timeLimitMinutes
         : null,
     isRecruitmentInterview: ctx.title.includes("数君招聘"),
-    status: "live",
+    status: wasEnded ? "ended" : "live",
   });
   if (dynamicQuestionClient) {
     dynamicQuestionClient
@@ -2876,8 +2945,9 @@ async function handleBrowserConnection(
 
     // A second final can arrive while we're still in handleUserUtterance (LLM/TTS).
     // The client has already received asr_ended — queue and run after this cycle finishes.
-    // 候选人开口:取消"询问后确认切题",留在本题继续听,重置 AFK 计数
+    // 候选人开口:取消"询问后确认切题",留在本题继续听,重置 AFK 计数与静默询问计数
     clearSilenceAutoSkip();
+    silenceAskCount = 0;
     silenceConfirmPending = false;
     unansweredQuestionsStreak = 0;
 

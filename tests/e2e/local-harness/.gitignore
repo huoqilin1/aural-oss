@@ -1,0 +1,8 @@
+# 本地验收产物:由 esbuild 重新生成,不入库
+bundle.js
+bundle.css
+*.woff2
+relay.log
+serve.log
+boot-log.txt
+state/

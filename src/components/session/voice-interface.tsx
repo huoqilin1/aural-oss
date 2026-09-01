@@ -482,6 +482,8 @@ export function VoiceInterface({
       })) ?? [],
   );
   const [error, setError] = useState<string>("");
+  // 服务端终态错误(已结束/不完整)必须持续可见,不能像瞬时连接错误那样 5 秒后消失。
+  const terminalRef = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
   const [locallyCompleted, setLocallyCompleted] = useState(false);
   const [advancePending, setAdvancePending] = useState(false);
@@ -732,7 +734,11 @@ export function VoiceInterface({
 
   const handleError = useCallback((err: string) => {
     setError(err);
-    setTimeout(() => setError(""), 5000);
+    // 服务端终态错误必须持续可见。回调触发早于终端状态的渲染提交,
+    // 因此把判断放进延时回调里(此时 terminalRef 一定已同步)。
+    setTimeout(() => {
+      setError((prev) => (terminalRef.current ? prev : ""));
+    }, 5000);
   }, []);
 
   const voice = useVoice({
@@ -745,6 +751,9 @@ export function VoiceInterface({
     onTtsChunk: videoMode ? recording.addTtsChunk : undefined,
     onInterrupt: videoMode ? recording.cancelTts : undefined,
   });
+  useEffect(() => {
+    terminalRef.current = voice.isSessionTerminal;
+  }, [voice.isSessionTerminal]);
   const latestAssistantRequiresAnswer =
     !!voice.aiTranscript.trim() && looksLikeInterviewQuestion(voice.aiTranscript);
   const canAdvanceCurrentQuestion =
@@ -782,10 +791,12 @@ export function VoiceInterface({
   useEffect(() => {
     // 招聘铁律:须知页的「开始面试」是唯一站内点击。进入本组件后自动
     // 连接麦克风，并由 videoMode 自动启动摄像头录制；不得再显示测试/开始按钮。
+    // 服务端判定终态(completed/incomplete)后禁止任何自动重连。
     if (
       !autoStart
       || preview
       || voice.isConnected
+      || voice.isSessionTerminal
       || autoStartInFlightRef.current
       || autoStartAttemptsRef.current >= 3
     ) return;
@@ -805,7 +816,7 @@ export function VoiceInterface({
         setAutoStartRetryNonce((value) => value + 1);
       }, 500 * autoStartAttemptsRef.current);
     });
-  }, [autoStart, preview, voice.isConnected, voice.connect, autoStartRetryNonce]);
+  }, [autoStart, preview, voice.isConnected, voice.connect, voice.isSessionTerminal, autoStartRetryNonce]);
 
   // ── Start recording when voice connects (video mode) ───────────
   const recordingStartedRef = useRef(false);
@@ -1466,19 +1477,34 @@ export function VoiceInterface({
   }, [messages, chatMessages]);
 
   // ── Send chat message helper ──────────────────────────────────
+  // 打字回答是候选人打断 AI 的一种方式(中继 text_input 处理 TTS 取消)。
+  // 仅在未连接或正在切题时拦截;播报/思考中允许输入,否则问候 TTS 期间的回车
+  // 会被静默丢弃(生产故障根因:输入消失在 isSpeaking 门控里)。
   const chatSendBlocked =
     !voice.isConnected
-    || voice.isSpeaking
-    || voice.isProcessing
     || voice.isTransitioning;
   const handleSendChat = useCallback((text: string) => {
     const trimmed = text.trim();
-    if (!trimmed || chatSendBlocked) return false;
+    if (!trimmed) return false;
+    if (chatSendBlocked) {
+      setError(
+        voice.isSessionTerminal
+          ? "该场面试已结束，无法继续发送消息。"
+          : voice.isTransitioning
+            ? "正在切换题目，请稍候再发送。"
+            : "连接尚未就绪，请稍候再发送。"
+      );
+      return false;
+    }
+    const delivered = voice.sendTextMessage(trimmed);
+    if (!delivered) {
+      setError("消息未能送达，请检查连接后重试。");
+      return false;
+    }
     const msg: Message = { id: crypto.randomUUID(), role: "user", content: trimmed, source: "chat" };
     setAnsweredCurrentQuestion(true);
     setMessages((prev) => [...prev, msg]);
     setChatMessages((prev) => [...prev, msg]);
-    voice.sendTextMessage(trimmed);
     return true;
   }, [chatSendBlocked, voice]);
 
@@ -1552,17 +1578,19 @@ export function VoiceInterface({
     : null;
   const interviewActivityLabel = preview
     ? "预览"
-    : !voice.isConnected
-      ? "正在连接"
-      : voice.isSpeaking
-        ? `${aiName} 正在提问`
-        : voice.isProcessing
-          ? `${aiName} 正在思考…`
-          : voice.isTransitioning
-            ? `${aiName} 正在准备下一题`
-            : voice.isListening
-              ? "正在听取回答，慢慢来"
-              : "面试进行中";
+    : voice.isSessionTerminal
+      ? "面试已结束"
+      : !voice.isConnected
+        ? "正在连接"
+        : voice.isSpeaking
+          ? `${aiName} 正在提问`
+          : voice.isProcessing
+            ? `${aiName} 正在思考…`
+            : voice.isTransitioning
+              ? `${aiName} 正在准备下一题`
+              : voice.isListening
+                ? "正在听取回答，慢慢来"
+                : "面试进行中";
 
   useEffect(() => {
     if (!farewellReadyToClose || locallyCompleted) return;

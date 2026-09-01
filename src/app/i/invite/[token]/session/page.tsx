@@ -12,7 +12,7 @@ import {
   isProgressiveOpeningOnly,
 } from "@/lib/voice/dynamic-question-sync";
 import { buildInviteResumeState } from "@/lib/voice/invite-resume-state";
-import { CheckCircle2 } from "lucide-react";
+import { AlertCircle, CheckCircle2 } from "lucide-react";
 import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -128,6 +128,22 @@ export default function InviteSessionPage() {
       label: (message.whiteboardData as Record<string, unknown>)?.label as string ?? "Drawing",
       snapshotData: JSON.stringify(message.whiteboardData),
     }));
+
+  if (session.status === "ABANDONED") {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-muted/30 p-4">
+        <Card className="w-full max-w-md">
+          <CardContent className="py-12 text-center">
+            <AlertCircle className="mx-auto h-16 w-16 text-muted-foreground" />
+            <h2 className="mt-4 text-2xl font-bold">面试已结束</h2>
+            <p className="mt-2 text-muted-foreground">
+              该场面试已经结束且未生成完成结果，无法重新开始。请联系招聘负责人重新安排。
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   if (completed || session.status === "COMPLETED") {
     return (

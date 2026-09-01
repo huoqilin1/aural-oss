@@ -72,6 +72,8 @@ interface VoiceState {
   transitionDirection: "next" | "previous" | null;
   isSaving: boolean;
   isInterviewComplete: boolean;
+  /** Server declared the session finished (completed/incomplete): no reconnect. */
+  isSessionTerminal: boolean;
   userTranscript: string;
   aiTranscript: string;
   lastAssistantUtteranceEndedAt: number;
@@ -122,6 +124,7 @@ export function useVoice({
     transitionDirection: null,
     isSaving: false,
     isInterviewComplete: false,
+    isSessionTerminal: false,
     userTranscript: "",
     aiTranscript: "",
     lastAssistantUtteranceEndedAt: 0,
@@ -132,6 +135,8 @@ export function useVoice({
   });
 
   const relayConnectorRef = useRef<RelayConnector<Record<string, unknown>> | null>(null);
+  /** 服务端已判定终态(interview_incomplete/COMPLETED):此后禁止自动重连与重播。 */
+  const sessionTerminalRef = useRef(false);
   const lastQuestionSetFingerprintRef = useRef("");
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
@@ -464,6 +469,7 @@ export function useVoice({
 
   /** Connect to the voice relay server */
   const connect = useCallback(async (): Promise<boolean> => {
+    if (sessionTerminalRef.current) return false;
     try {
       // Request microphone permission
       await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -957,10 +963,17 @@ export function useVoice({
             ? msg.message
             : "本次面试尚未完整完成，不会生成完成结果。";
           log.warn(`Interview incomplete: ${String(msg.reason || "unknown")}`);
+          // 终态:关闭中继连接并阻止自动重连,页面保持"已结束"状态。
+          // 短断线(可恢复)不会走这里;走到这里说明服务端已把会话置为终态。
+          sessionTerminalRef.current = true;
+          relayConnectorRef.current?.close();
+          relayConnectorRef.current = null;
           interruptPlayback();
+          stopListening();
           setState((s) => ({
             ...s,
             isInterviewComplete: false,
+            isSessionTerminal: true,
             isConnected: false,
             isListening: false,
             isSpeaking: false,
@@ -986,7 +999,7 @@ export function useVoice({
 
         case "disconnected":
           setState((s) => ({ ...s, isConnected: false }));
-          if (relayConnectorRef.current?.canFailover) {
+          if (!sessionTerminalRef.current && relayConnectorRef.current?.canFailover) {
             void relayConnectorRef.current.failover("relay disconnected message");
           }
           break;
@@ -1123,21 +1136,30 @@ export function useVoice({
 
   /** Send a text message through the relay (treated like a voice utterance).
    *  The caller is responsible for adding the message to the UI display;
-   *  this method only tracks it for server persistence and sends it to the relay. */
+   *  this method only tracks it for server persistence and sends it to the relay.
+   *  Returns false when the message was not delivered (connector not ready or
+   *  socket closed) so the UI can surface the failure instead of showing a
+   *  bubble that will never be saved. */
   const sendTextMessage = useCallback(
-    (text: string) => {
+    (text: string): boolean => {
       const trimmed = text.trim();
-      if (!trimmed) return;
+      if (!trimmed) return false;
       const connector = relayConnectorRef.current;
-      if (!connector?.isReady) return;
+      if (!connector?.isReady) return false;
 
+      const delivered = connector.sendJson({
+        type: "text_input",
+        content: trimmed,
+        source: "chat",
+      });
+      if (!delivered) return false;
       trackedMessagesRef.current.push({
         role: "user",
         content: trimmed,
         questionId: questionIdAt(currentQuestionIndexRef.current),
         source: "chat",
       });
-      connector.sendJson({ type: "text_input", content: trimmed, source: "chat" });
+      return true;
     },
     [questionIdAt],
   );

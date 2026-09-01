@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>local harness</title>
+<link rel="stylesheet" href="/bundle.css"></head>
+<body>
+<div id="root"></div>
+<div id="boot-log" style="position:fixed;left:4px;top:4px;z-index:99999;max-width:70vw;font:12px/1.4 monospace;white-space:pre-wrap;color:#c00;background:#fff;padding:4px;border:1px solid #c00;"></div>
+<script>
+  const boot = document.getElementById("boot-log");
+  const log = (m) => { boot.textContent += m + "\n"; };
+  window.addEventListener("error", (e) => {
+    log("[error] " + (e.message || e.type) + " @ " + (e.filename || "") + ":" + (e.lineno || ""));
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    log("[rejection] " + (e.reason && (e.reason.stack || e.reason.message) || String(e.reason)));
+  });
+  // Bundle code reads process.env at module init (src/lib/logger.ts); browser
+  // build shim mirrors what Next.js inlines.
+  window.process = { env: {} };
+</script>
+<script src="/bundle.js"></script>
+<script>
+  log("[boot] bundle executed; root children: " + document.getElementById("root").childElementCount);
+</script>
+</body>
+</html>
