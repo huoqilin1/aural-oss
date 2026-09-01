@@ -323,9 +323,36 @@ async function clickNext(page: Page) {
         try {
           await cta.waitFor({ state: "visible", timeout: 30_000 });
         } catch {
-          log("  ⚠️ 30s 未出现下一题按钮,尝试底部按钮推进");
-          await page.locator('[data-tour="voice-progress"] button').nth(1).click();
-          followUps += 1;
+          // CTA 未出现 ≠ 卡死:AI 可能正在播报追问,此间推进按钮禁用是设计行为。
+          // 先轮询分辨"有新追问"还是"按钮已可用",两者都没有才判停滞;
+          // 绝不对禁用按钮发起点击(否则 30s 必然超时)。
+          const deadline = Date.now() + 45_000;
+          let handled: "followup" | "advanced" | null = null;
+          while (Date.now() < deadline && !handled) {
+            const last = await lastAiText(page);
+            if (last && last !== lastAiSeen && /？|\?/.test(last) && !/下一题|进入下一题/.test(last)) {
+              lastAiSeen = last;
+              followUps += 1;
+              log(`  CTA 未现但 AI 有新追问: ${last.slice(0, 60)}… 继续回答`);
+              handled = "followup";
+              break;
+            }
+            const bottom = page.locator('[data-tour="voice-progress"] button').nth(1);
+            if (await bottom.isEnabled().catch(() => false)) {
+              await bottom.click();
+              log("  底部推进按钮已可用,进入下一题");
+              handled = "advanced";
+              break;
+            }
+            await page.waitForTimeout(1_000);
+          }
+          if (!handled) {
+            throw new Error("45s 内既无 AI 追问回应,推进按钮也保持禁用(界面停滞)");
+          }
+          if (handled === "advanced") {
+            answered = true;
+            break;
+          }
           continue;
         }
         // 判断 AI 是否又追问
@@ -383,16 +410,19 @@ async function clickNext(page: Page) {
     }
 
     throw new Error("八题完成后未进入完成页");
+  } catch (err) {
+    // 失败截图必须在浏览器关闭前拍摄(finally 会先关浏览器)。
+    try {
+      const page = (globalThis as { __probePage?: Page }).__probePage;
+      if (page) {
+        await page.screenshot({ path: join(SHOT_DIR, `fail-${RUN_ID}.png`), fullPage: true });
+      }
+    } catch { /* 截图失败不影响失败上报 */ }
+    throw err;
   } finally {
     try { await browser?.close(); } catch { /* ignore */ }
   }
-})().catch(async (e) => {
-  try {
-    const page = await (globalThis as { __probePage?: Page }).__probePage;
-    if (page) {
-      await page.screenshot({ path: join(SHOT_DIR, `fail-${RUN_ID}.png`), fullPage: true });
-    }
-  } catch { /* 截图失败不影响失败上报 */ }
+})().catch((e) => {
   saveState({ phase: "failed", error: e.message, failed_at: new Date().toISOString() });
   console.error(`SIM_FAIL: ${e.message}`);
   process.exit(1);
