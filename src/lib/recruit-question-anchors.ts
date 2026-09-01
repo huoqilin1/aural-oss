@@ -1,6 +1,7 @@
 const SENSITIVE_ANCHOR_PATTERN = /(?:姓名|名字|电话|手机|邮箱|email|微信|wechat|身份证|住址|地址|籍贯|出生|年龄|求职意向)\s*[:：]/i;
 const PHONE_OR_EMAIL_PATTERN = /(?:1[3-9]\d{9}|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|https?:\/\/|\d{1,2}岁)/i;
 const INCOMPLETE_ANCHOR_PATTERN = /^(?:年以上|年经验|及以上|以上学历|相关经验)/;
+const EXPLICIT_RECRUIT_ANCHOR_PATTERN = /(?:简历中|你的简历|你在简历|你提到|你写到|你曾在|你负责的|你参与的|你过往的|你已有的|你目前的|简历尚未|材料中)/i;
 
 function stripRecruitAnchorBullet(value: string): string {
   return value
@@ -74,4 +75,13 @@ export function questionReferencesRecruitAnchor(question: string, anchor: string
     }
     return false;
   });
+}
+
+export function ensureExplicitRecruitAnchorLead(question: string, anchorLead: string): string {
+  const trimmedQuestion = question.trim();
+  const trimmedLead = anchorLead.trim();
+  if (!trimmedQuestion || !trimmedLead || EXPLICIT_RECRUIT_ANCHOR_PATTERN.test(trimmedQuestion)) {
+    return trimmedQuestion;
+  }
+  return `${trimmedLead}${trimmedQuestion}`;
 }

@@ -8,6 +8,7 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { getProvider } from "@/lib/ai/registry";
 import { createLogger } from "@/lib/logger";
 import {
+  ensureExplicitRecruitAnchorLead,
   questionReferencesRecruitAnchor,
   recruitAnchorTerms,
   recruitQuestionFitsRoleType,
@@ -551,7 +552,9 @@ export async function POST(
         && (!generatedText || !/自我介绍|介绍一下/.test(generatedText))
         ? item.fallback
         : evidenceAnchoredGenerated && generatedText
-          ? generatedText
+          ? evidenceV11
+            ? ensureExplicitRecruitAnchorLead(generatedText, anchorLead(item.key))
+            : generatedText
           : item.fallback;
     const normalized = text.toLocaleLowerCase().replace(/[\s，。！？、；：,.!?;:()（）【】\[\]"“”'‘’]/g, "");
     if (usedQuestionTexts.has(normalized)) text = item.fallback;

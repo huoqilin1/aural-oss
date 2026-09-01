@@ -179,6 +179,7 @@ test("evidence v12 generator uses the scored self-intro and seven evidence dimen
   assert.match(generationRoute, /selectRecruitAnchor\(\s*resumeText/);
   assert.match(generationRoute, /questionReferencesRecruitAnchor\(generatedText, selectedAnchors\.resume\)/);
   assert.match(generationRoute, /questionReferencesRecruitAnchor\(generatedText, selectedAnchors\.job\)/);
+  assert.match(generationRoute, /ensureExplicitRecruitAnchorLead\(generatedText, anchorLead\(item\.key\)\)/);
   assert.match(generationRoute, /const isTechnicalRole = roleType === "technical"/);
   assert.match(generationRoute, /必要的伪代码、SQL或配置/);
   assert.match(generationRoute, /一页可执行交付方案/);

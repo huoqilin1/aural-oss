@@ -2,12 +2,30 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ensureExplicitRecruitAnchorLead,
   questionReferencesRecruitAnchor,
   recruitAnchorTerms,
   recruitQuestionFitsRoleType,
   safeRecruitAnchorLines,
   selectRecruitAnchor,
 } from "../src/lib/recruit-question-anchors";
+
+test("generated evidence questions receive the exact explicit resume and job lead", () => {
+  const lead = "你在简历中写到“负责政府客户项目”，而岗位要求中强调“推进项目交付”。";
+  const generated = "请说明政府客户项目中推进交付的具体行动和验收结果。";
+
+  assert.equal(
+    ensureExplicitRecruitAnchorLead(generated, lead),
+    `${lead}${generated}`,
+  );
+});
+
+test("already explicit evidence questions are not prefixed twice", () => {
+  const lead = "你在简历中写到“负责客户项目”，而岗位要求中强调“推进交付”。";
+  const generated = "你提到负责客户项目，请说明推进交付时的本人贡献。";
+
+  assert.equal(ensureExplicitRecruitAnchorLead(generated, lead), generated);
+});
 
 test("recruit anchors select concrete evidence while excluding contact fields", () => {
   const resume = [
