@@ -195,7 +195,7 @@ async function lastAiText(page: Page): Promise<string> {
   });
 }
 
-async function waitQuestionLoaded(questions: string[], q: number) {
+async function waitQuestionLoaded(questions: Array<{ text: string }>, q: number) {
   const deadline = Date.now() + 30_000; // 单题就绪 ≤30s(进度生成;Q2 在 Q1 结束前)
   while (questions.length <= q && Date.now() < deadline) {
     await pageWaitTimeout(500);
