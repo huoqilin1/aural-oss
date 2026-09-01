@@ -177,16 +177,29 @@ async function chatAnswer(page: Page, text: string) {
   await input.fill(text);
   await input.press("Enter");
   // 回执:我们的消息以气泡出现在页面(前端只在确认送达后展示)。
-  const t0 = Date.now();
+  // 切题过渡期的发送会被拦截并提示"正在切换题目"(设计行为,输入框
+  // 保留原文);看到拦截提示时等待后重按 Enter 重发。
+  const needle = text.slice(0, 10);
+  const deadline = Date.now() + 30_000;
+  let lastSend = Date.now();
   for (;;) {
-    const visible = await page.evaluate((needle) => {
-      return (document.body.textContent || "").includes(needle);
-    }, text.slice(0, 10));
+    const visible = await page.evaluate(
+      (n) => (document.body.textContent || "").includes(n),
+      needle,
+    );
     if (visible) break;
-    if (Date.now() - t0 > 10_000) {
-      throw new Error("消息未在 10 秒内出现(回执缺失):发送被吞或未送达");
+    if (Date.now() > deadline) {
+      throw new Error("消息未在 30 秒内出现(回执缺失):发送被吞或未送达");
     }
-    await page.waitForTimeout(300);
+    const blocked = await page.evaluate(() => {
+      const t = document.body.textContent || "";
+      return t.includes("正在切换题目") || t.includes("连接尚未就绪");
+    });
+    if (blocked && Date.now() - lastSend > 3_000) {
+      await input.press("Enter").catch(() => {});
+      lastSend = Date.now();
+    }
+    await page.waitForTimeout(500);
   }
   await page.waitForTimeout(500);
   await page.locator('[data-tour="voice-chat"] button').click(); // 收起聊天,露出中央按钮
