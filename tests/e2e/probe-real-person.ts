@@ -205,16 +205,26 @@ async function chatAnswer(page: Page, text: string) {
     }
     await page.waitForTimeout(500);
   }
+  sentTexts.push(text.slice(0, 24));
   await page.waitForTimeout(500);
   await page.locator('[data-tour="voice-chat"] button').click(); // 收起聊天,露出中央按钮
 }
 
+/** 我们已发送并确认送达的回答前缀(用于把候选人自己的气泡从 AI 话术中排除)。 */
+const sentTexts: string[] = [];
+
 async function lastAiText(page: Page): Promise<string> {
-  return page.evaluate(() => {
+  return page.evaluate((mine) => {
     const nodes = Array.from(document.querySelectorAll("p"));
-    const texts = nodes.map((n) => n.textContent || "").filter((s) => s.length > 20);
+    const texts = nodes
+      .map((n) => n.textContent || "")
+      .filter((s) => s.length > 20)
+      .filter((s) => !mine.some((m) => s.startsWith(m)));
     return texts.length ? texts[texts.length - 1] : "";
-  });
+  }, mineSafe());
+}
+function mineSafe(): string[] {
+  return sentTexts.map((s) => s.slice(0, 12));
 }
 
 async function waitQuestionLoaded(
@@ -384,7 +394,7 @@ async function clickNext(page: Page) {
           // AI 口播题干常带前缀(如"接下来第3个问题:"),用包含关系判回显。
           const isQuestionEcho =
             last.includes(qText.slice(0, 12)) || qText.includes(last.slice(0, 12));
-          const asksSomething = /(？|\?|请|说说|讲讲|展开|补充|具体|如何|为什么|什么|确认|举例|提到|讲到)/.test(last);
+          const asksSomething = /(？|\?|请|说说|讲讲|讲一|聊聊|谈谈|展开|补充|具体|如何|为什么|什么|确认|举例|提到|讲到|描述)/.test(last);
           if (last && last !== lastAiSeen && !isUiHint && !isQuestionEcho && asksSomething && last.length > 15) {
             lastAiSeen = last;
             followUps += 1;
