@@ -221,22 +221,19 @@ async function countNeedle(page: Page, needle: string): Promise<number> {
 const sentTexts: string[] = [];
 
 async function lastAiText(page: Page): Promise<string> {
-  // 用字符串形式传页面函数:tsx(esbuild keepNames)会给命名箭头函数
-  // 注入 __name 助手,浏览器上下文没有该标识符会直接 ReferenceError。
-  // 页面函数一律 ASCII(弯引号作为定界符在浏览器里是非法 token),
-  // 引号类字符用 \u 转义放进字符类。
-  const pageFn = [
-    "(mine) => {",
-    "  const norm = (x) => x.replace(/[\\s\\u201c\\u201d\\u2018\\u2019\\u300c\\u300d\\u300e\\u300f'\"]/g, '');",
-    "  const mineNorm = mine.map((m) => norm(m));",
-    "  const nodes = Array.from(document.querySelectorAll('p'));",
-    "  const texts = nodes.map((n) => n.textContent || '')",
-    "    .filter((s) => s.length > 20)",
-    "    .filter((s) => { const n = norm(s); return !mineNorm.some((m) => n.startsWith(m)); });",
-    "  return texts.length ? texts[texts.length - 1] : '';",
-    "}",
-  ].join("\n");
-  return page.evaluate(pageFn, mineSafe());
+  // 注意:回调内不得出现"具名箭头绑定"(const f = (x) => …)——tsx 的
+  // keepNames 会注入浏览器不存在的 __name 助手;只用内联匿名回调。
+  // 引号/空白归一化:AI 复述我们的回答时常包裹引号。
+  return page.evaluate((mine) => {
+    const strip = /[\s\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f'"]/g;
+    const mineNorm = mine.map((m) => m.replace(strip, ""));
+    const nodes = Array.from(document.querySelectorAll("p"));
+    const texts = nodes
+      .map((n) => (n.textContent || "").replace(strip, ""))
+      .filter((s) => s.length > 20)
+      .filter((s) => !mineNorm.some((m) => s.startsWith(m)));
+    return texts.length ? texts[texts.length - 1] : "";
+  }, mineSafe());
 }
 function mineSafe(): string[] {
   return sentTexts.map((s) => s.slice(0, 12));
@@ -405,11 +402,14 @@ async function clickNext(page: Page) {
             break;
           }
           const last = await lastAiText(page);
-          const isUiHint = /本题答完了|下一题/.test(last);
-          // AI 口播题干常带前缀(如"接下来第3个问题:"),用包含关系判回显。
+          const isUiHint = !last || /本题答完了|下一题/.test(last);
+          // AI 口播题干常带前缀(如"接下来第3个问题:"),用包含关系判回显;
+          // last 与题干都做同样的引号/空白归一化后再比较。
+          const qNorm = qText.replace(/[\s\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f'"]/g, "");
           const isQuestionEcho =
-            last.includes(qText.slice(0, 12)) || qText.includes(last.slice(0, 12));
-          const asksSomething = /(？|\?|请|说说|讲讲|讲一|聊聊|谈谈|展开|补充|具体|如何|为什么|什么|确认|举例|提到|讲到|描述)/.test(last);
+            !!last
+            && (last.includes(qNorm.slice(0, 12)) || qNorm.includes(last.slice(0, 12)));
+          const asksSomething = !!last && /(？|\?|请|说说|讲讲|讲一|聊聊|谈谈|展开|补充|具体|如何|为什么|什么|确认|举例|提到|讲到|描述)/.test(last);
           if (last && last !== lastAiSeen && !isUiHint && !isQuestionEcho && asksSomething && last.length > 15) {
             lastAiSeen = last;
             followUps += 1;
