@@ -175,26 +175,29 @@ async function chatAnswer(page: Page, text: string) {
     return !!el && !el.disabled && el.getAttribute("aria-disabled") !== "true";
   }, undefined, { timeout: 15_000 });
   await input.fill(text);
+  // 回执判定必须用"出现次数递增":同一开头的回答会重复出现(如追问轮的
+  // "我再补充一点:…"前缀),只查 includes 会把旧气泡误当本次回执,
+  // 导致发送实际被吞却以为已送达(生产实测踩过)。
+  const needle = text.slice(0, 10);
+  const before = await countNeedle(page, needle);
   await input.press("Enter");
-  // 回执:我们的消息以气泡出现在页面(前端只在确认送达后展示)。
   // 切题过渡期/中继短暂重连中的发送会被拦截,提示"正在切换题目"/
   // "连接尚未就绪"/"消息未能送达"且输入框保留原文(设计行为);
   // 看到拦截提示即等待后重按 Enter;横幅被 5s 自动清除后按较长间隔兜底重发。
-  const needle = text.slice(0, 10);
   const deadline = Date.now() + 45_000;
   let lastTry = Date.now();
   for (;;) {
-    const { visible, blocked } = await page.evaluate((n) => {
+    const { seen, blocked } = await page.evaluate((n) => {
       const t = document.body.textContent || "";
       return {
-        visible: t.includes(n),
+        seen: t.split(n).length - 1,
         blocked:
           t.includes("正在切换题目")
           || t.includes("连接尚未就绪")
           || t.includes("消息未能送达"),
       };
     }, needle);
-    if (visible) break;
+    if (seen > before) break;
     if (Date.now() > deadline) {
       throw new Error("消息未在 45 秒内出现(回执缺失):发送被吞或未送达");
     }
@@ -210,16 +213,26 @@ async function chatAnswer(page: Page, text: string) {
   await page.locator('[data-tour="voice-chat"] button').click(); // 收起聊天,露出中央按钮
 }
 
+async function countNeedle(page: Page, needle: string): Promise<number> {
+  return page.evaluate((n) => (document.body.textContent || "").split(n).length - 1, needle);
+}
+
 /** 我们已发送并确认送达的回答前缀(用于把候选人自己的气泡从 AI 话术中排除)。 */
 const sentTexts: string[] = [];
 
 async function lastAiText(page: Page): Promise<string> {
   return page.evaluate((mine) => {
+    // 归一化引号/空白:AI 复述我们的回答时常包裹“”,纯 startsWith 会漏判。
+    const norm = (x: string) => x.replace(/[\s“”"'『』「」]/g, "");
+    const mineNorm = mine.map((m) => norm(m));
     const nodes = Array.from(document.querySelectorAll("p"));
     const texts = nodes
       .map((n) => n.textContent || "")
       .filter((s) => s.length > 20)
-      .filter((s) => !mine.some((m) => s.startsWith(m)));
+      .filter((s) => {
+        const n = norm(s);
+        return !mineNorm.some((m) => n.startsWith(m));
+      });
     return texts.length ? texts[texts.length - 1] : "";
   }, mineSafe());
 }
