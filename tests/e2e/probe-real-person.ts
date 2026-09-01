@@ -306,8 +306,10 @@ async function clickNext(page: Page) {
 
       let followUps = 0;
       let answered = false;
-      let lastAiSeen = "";
-      while (!answered && followUps <= 2) {
+      // 基线取本题题干;答后 AI 的新话术(追问)以此为参照。
+      let lastAiSeen = await lastAiText(page);
+      while (!answered) {
+        if (followUps > 2) throw new Error(`第 ${q + 1} 题追问超过 2 次`);
         const answer = followUps === 0 ? answerFor(qText) : "我再补充一点：" + answerFor(qText).slice(0, 120);
         await chatAnswer(page, answer);
         log(`  已作答(第 ${followUps + 1} 轮)…`);
@@ -316,57 +318,50 @@ async function clickNext(page: Page) {
           answered = true;
           break;
         }
-        // 等 AI 回应完(中央下一题按钮出现,30s)
+        // 答后三选一(生产实测:完整回答后 AI 常自动切题,CTA 只是可选加速器,
+        // 且追问/下一题题干不一定带问号,不能靠"？"识别):
+        //   1) 页面进入 第 q+2/8 题 → 已推进;
+        //   2) AI 出现新话术(非按钮提示) → 追问,继续作答;
+        //   3) CTA 可见 → 点击推进并等待切题。
+        const nextIdxText = `第 ${q + 2} / 8 题`;
         const cta = page.locator(
           '[data-tour="voice-status"]:has-text("本题答完了就点这里") button:has-text("下一题")',
         );
-        try {
-          await cta.waitFor({ state: "visible", timeout: 30_000 });
-        } catch {
-          // CTA 未出现 ≠ 卡死:AI 可能正在播报追问,此间推进按钮禁用是设计行为。
-          // 先轮询分辨"有新追问"还是"按钮已可用",两者都没有才判停滞;
-          // 绝不对禁用按钮发起点击(否则 30s 必然超时)。
-          const deadline = Date.now() + 45_000;
-          let handled: "followup" | "advanced" | null = null;
-          while (Date.now() < deadline && !handled) {
-            const last = await lastAiText(page);
-            if (last && last !== lastAiSeen && /？|\?/.test(last) && !/下一题|进入下一题/.test(last)) {
-              lastAiSeen = last;
-              followUps += 1;
-              log(`  CTA 未现但 AI 有新追问: ${last.slice(0, 60)}… 继续回答`);
-              handled = "followup";
-              break;
-            }
-            const bottom = page.locator('[data-tour="voice-progress"] button').nth(1);
-            if (await bottom.isEnabled().catch(() => false)) {
-              await bottom.click();
-              log("  底部推进按钮已可用,进入下一题");
-              handled = "advanced";
-              break;
-            }
-            await page.waitForTimeout(1_000);
-          }
-          if (!handled) {
-            throw new Error("45s 内既无 AI 追问回应,推进按钮也保持禁用(界面停滞)");
-          }
-          if (handled === "advanced") {
-            answered = true;
+        const deadline = Date.now() + 75_000;
+        let moved: "advanced" | "followup" | null = null;
+        while (Date.now() < deadline && !moved) {
+          const body = await page.evaluate(() => document.body.innerText);
+          if (body.includes(nextIdxText)) {
+            moved = "advanced";
             break;
           }
-          continue;
+          const last = await lastAiText(page);
+          const isUiHint = /本题答完了|下一题/.test(last);
+          const asksSomething = /(？|\?|请|说说|讲讲|展开|补充|具体|如何|为什么|什么)/.test(last);
+          if (last && last !== lastAiSeen && !isUiHint && asksSomething && last.length > 15) {
+            lastAiSeen = last;
+            followUps += 1;
+            log(`  AI 追问: ${last.slice(0, 60)}… 继续回答`);
+            moved = "followup";
+            break;
+          }
+          if (await cta.isVisible().catch(() => false)) {
+            try {
+              await clickNext(page);
+            } catch { /* CTA 消失则回到轮询等自动切题 */ }
+            const t2 = Date.now() + 20_000;
+            while (Date.now() < t2) {
+              const b2 = await page.evaluate(() => document.body.innerText);
+              if (b2.includes(nextIdxText)) break;
+              await page.waitForTimeout(800);
+            }
+          }
+          if (!moved) await page.waitForTimeout(1_000);
         }
-        // 判断 AI 是否又追问
-        const last = await lastAiText(page);
-        if (last === lastAiSeen) {
-          answered = true;
-          break;
+        if (!moved) {
+          throw new Error(`第 ${q + 1} 题答后 75s 未推进(无自动切题、无 CTA、无追问)`);
         }
-        if (followUps < 2 && /？|\?/.test(last) && !/下一题|进入下一题/.test(last)) {
-          lastAiSeen = last;
-          followUps += 1;
-          log(`  AI 追问: ${last.slice(0, 60)}… 继续回答`);
-          continue;
-        }
+        if (moved === "followup") continue;
         answered = true;
       }
       totalFollowUps += followUps;
@@ -381,7 +376,6 @@ async function clickNext(page: Page) {
       });
 
       if (q < 7) {
-        await clickNext(page);
         await page.screenshot({ path: join(SHOT_DIR, `sim-q${q + 1}.png`) });
       } else {
         if (questions.length !== 8) {
