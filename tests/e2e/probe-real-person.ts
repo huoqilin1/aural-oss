@@ -160,14 +160,19 @@ function answerFor(qText: string): string {
 }
 
 /** 发送前先等输入就绪;发出后必须看到消息气泡(即回执),否则算失败。
- *  复现过生产故障:连接未就绪时 Enter 被静默吞掉,消息永远没有送达。 */
+ *  复现过生产故障:连接未就绪时 Enter 被静默吞掉,消息永远没有送达。
+ *  注意:ui/Input 未显式传 type,渲染出的 input 没有 type 属性,
+ *  不能用 input[type="text"] 选择器(会永远匹配为空导致假超时)。 */
 async function chatAnswer(page: Page, text: string) {
   await page.locator('[data-tour="voice-chat"] button').click();
   const input = page.getByRole("textbox");
   await input.waitFor({ state: "visible", timeout: 15_000 });
   await page.waitForFunction(() => {
-    const el = document.querySelector('input[type="text"], textarea');
-    return !!el && !el.hasAttribute("disabled") && el.getAttribute("aria-disabled") !== "true";
+    const els = Array.from(
+      document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>("input, textarea"),
+    );
+    const el = els.find((e) => e.offsetParent !== null);
+    return !!el && !el.disabled && el.getAttribute("aria-disabled") !== "true";
   }, undefined, { timeout: 15_000 });
   await input.fill(text);
   await input.press("Enter");
@@ -240,6 +245,7 @@ async function clickNext(page: Page) {
       ],
     });
     const page = await browser.newPage();
+    (globalThis as { __probePage?: Page }).__probePage = page;
 
     // 浏览器能力探测(15 秒内失败):页面脚本与 DOM 查询可用。
     await page.setContent("<p id='cap'>ok</p>");
@@ -380,7 +386,13 @@ async function clickNext(page: Page) {
   } finally {
     try { await browser?.close(); } catch { /* ignore */ }
   }
-})().catch((e) => {
+})().catch(async (e) => {
+  try {
+    const page = await (globalThis as { __probePage?: Page }).__probePage;
+    if (page) {
+      await page.screenshot({ path: join(SHOT_DIR, `fail-${RUN_ID}.png`), fullPage: true });
+    }
+  } catch { /* 截图失败不影响失败上报 */ }
   saveState({ phase: "failed", error: e.message, failed_at: new Date().toISOString() });
   console.error(`SIM_FAIL: ${e.message}`);
   process.exit(1);
