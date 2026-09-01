@@ -223,19 +223,19 @@ const sentTexts: string[] = [];
 async function lastAiText(page: Page): Promise<string> {
   // 用字符串形式传页面函数:tsx(esbuild keepNames)会给命名箭头函数
   // 注入 __name 助手,浏览器上下文没有该标识符会直接 ReferenceError。
-  const pageFn = `(mine) => {
-    const norm = (x) => x.replace(/[\\s“””'『』「」]/g, “”);
-    const mineNorm = mine.map((m) => norm(m));
-    const nodes = Array.from(document.querySelectorAll(“p”));
-    const texts = nodes
-      .map((n) => n.textContent || “”)
-      .filter((s) => s.length > 20)
-      .filter((s) => {
-        const n = norm(s);
-        return !mineNorm.some((m) => n.startsWith(m));
-      });
-    return texts.length ? texts[texts.length - 1] : “”;
-  }`;
+  // 页面函数一律 ASCII(弯引号作为定界符在浏览器里是非法 token),
+  // 引号类字符用 \u 转义放进字符类。
+  const pageFn = [
+    "(mine) => {",
+    "  const norm = (x) => x.replace(/[\\s\\u201c\\u201d\\u2018\\u2019\\u300c\\u300d\\u300e\\u300f'\"]/g, '');",
+    "  const mineNorm = mine.map((m) => norm(m));",
+    "  const nodes = Array.from(document.querySelectorAll('p'));",
+    "  const texts = nodes.map((n) => n.textContent || '')",
+    "    .filter((s) => s.length > 20)",
+    "    .filter((s) => { const n = norm(s); return !mineNorm.some((m) => n.startsWith(m)); });",
+    "  return texts.length ? texts[texts.length - 1] : '';",
+    "}",
+  ].join("\n");
   return page.evaluate(pageFn, mineSafe());
 }
 function mineSafe(): string[] {
