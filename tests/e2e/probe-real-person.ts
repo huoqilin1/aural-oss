@@ -200,12 +200,28 @@ async function lastAiText(page: Page): Promise<string> {
   });
 }
 
-async function waitQuestionLoaded(questions: Array<{ text: string }>, q: number) {
+async function waitQuestionLoaded(
+  questions: Array<{ text: string; type: string; desc: string }>,
+  q: number,
+) {
   const deadline = Date.now() + 30_000; // 单题就绪 ≤30s(进度生成;Q2 在 Q1 结束前)
-  while (questions.length <= q && Date.now() < deadline) {
+  while (mainsOf(questions).length <= q && Date.now() < deadline) {
     await pageWaitTimeout(500);
   }
-  if (!questions[q]) throw new Error(`第 ${q + 1} 题在 30 秒内未生成`);
+  if (mainsOf(questions).length <= q) throw new Error(`第 ${q + 1} 题在 30 秒内未生成`);
+}
+
+/** 收尾行(候选人反问环节)与追问行不计入计分主问题。 */
+function isClosingRow(row: { type: string; desc: string; text?: string }): boolean {
+  return (
+    row.type === "closing"
+    || /candidate_questions/.test(row.desc)
+    || /候选人提问|反问|你有什么.{0,6}(问题|想问)/.test(row.text || "")
+  );
+}
+
+function mainsOf(questions: Array<{ text: string; type: string; desc: string }>) {
+  return questions.filter((row) => !isClosingRow(row) && row.type !== "follow_up");
 }
 
 function pageWaitTimeout(ms: number) {
@@ -279,10 +295,6 @@ async function clickNext(page: Page) {
         }
       } catch { /* ignore */ }
     });
-    const isClosingRow = (row: { type: string; desc: string; text?: string }) =>
-      row.type === "closing"
-      || /candidate_questions/.test(row.desc)
-      || /候选人提问|反问|你有什么.{0,6}(问题|想问)/.test(row.text || "");
 
     saveState({ phase: "opening", opened_at: new Date().toISOString() });
     await page.goto(inviteUrl, { waitUntil: "domcontentloaded" });
@@ -307,12 +319,11 @@ async function clickNext(page: Page) {
       );
       await page.waitForTimeout(2500);
       await waitQuestionLoaded(questions, q);
-      // 主问题断言:过滤收尾/追问行后必须恰好 8 道计分主问题。
-      const mains = questions.filter(
-        (row) => !isClosingRow(row) && row.type !== "follow_up",
-      );
-      if (mains.length !== 8) {
-        throw new Error(`计分主问题必须恰好 8 道,实际 ${mains.length}(原始行 ${questions.length})`);
+      // 渐进出题:开场仅持久化 Q1+Q2,后续行随面试推进补齐;
+      // 逐题只要求"当前题已就绪",恰好 8 道的断言留到最终核验。
+      const mains = mainsOf(questions);
+      if (mains.length < q + 1) {
+        throw new Error(`第 ${q + 1} 题未就绪(主问题 ${mains.length} 道)`);
       }
       const qText = mains[q].text;
       const qType = mains[q].type;
@@ -396,11 +407,11 @@ async function clickNext(page: Page) {
       if (q < 7) {
         await page.screenshot({ path: join(SHOT_DIR, `sim-q${q + 1}.png`) });
       } else {
-        const mains = questions.filter(
-          (row) => !isClosingRow(row) && row.type !== "follow_up",
-        );
-        if (mains.length !== 8) {
-          throw new Error(`最终核验:计分主问题必须恰好 8 道,实际 ${mains.length}`);
+        // 最终核验:全部行就位后,计分主问题必须恰好 8 道。
+        if (mainsOf(questions).length !== 8) {
+          throw new Error(
+            `最终核验:计分主问题必须恰好 8 道,实际 ${mainsOf(questions).length}(原始行 ${questions.length})`,
+          );
         }
         // 追问预算双核验:逐题计数 ≤3(0-2 正常 + 0-1 最终核验)
         if (totalFollowUps > 3) {
