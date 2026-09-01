@@ -508,8 +508,16 @@ async function clickNext(page: Page) {
         } catch {
           log("  40s 未出现收尾提问,按自然收尾处理");
         }
+        // 静默确认("答完了吗?")出现时,像真实候选人一样显式说"没有了",
+        // 命中中继的结束请求模式 → 告别 → 完成页。
         await page.waitForFunction(
-          () => document.body.innerText.includes("测试已完成"),
+          () => /答完了吗|还想补充|进入下一题/.test(document.body.innerText),
+          undefined,
+          { timeout: 60_000 },
+        ).catch(() => { /* 未出现静默确认则直接尝试结束 */ });
+        await chatAnswer(page, "没有了，我答完了，谢谢！");
+        await page.waitForFunction(
+          () => document.body.innerText.includes("面试已顺利完成"),
           undefined,
           { timeout: 90_000 },
         );
