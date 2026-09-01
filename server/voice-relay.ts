@@ -1271,6 +1271,7 @@ async function handleBrowserConnection(
   let pendingUserUtteranceWhileSuppressed = "";
   /** User final arrived while handleUserUtterance was already running (asr_ended already sent to client). */
   let queuedUserUtteranceWhileGenerating = "";
+  let queuedUserUtteranceIsChat = false;
 
   // ── Per-question state ──────────────────────────────────────────
   let currentQuestionIndex = 0;
@@ -2911,7 +2912,7 @@ async function handleBrowserConnection(
 
   async function handleUserUtterance(
     userText: string,
-    options?: { allowRecentReplay?: boolean },
+    options?: { allowRecentReplay?: boolean; isChatInput?: boolean },
   ) {
     if (!userText || isTransitioning || interviewDone) return;
 
@@ -2931,8 +2932,12 @@ async function handleBrowserConnection(
       return;
     }
 
+    // chat 输入是候选人的一次性主动发送,不存在 ASR"滚动重放"问题;
+    // 让它走 ASR 抑制启发式会把共享长前缀的连发消息(追问补充、相似
+    // 措辞的回答)静默吞掉 90s(生产实测:答后静默、切题被拒)。
     const retryingPendingUserTurnCandidate = isSameAsPendingUserTurn(userText);
     if (
+      !options?.isChatInput &&
       !options?.allowRecentReplay &&
       !retryingPendingUserTurnCandidate &&
       isDuplicateUserFinal(userText)
@@ -2953,8 +2958,9 @@ async function handleBrowserConnection(
 
     if (generatingResponse) {
       const duplicateWhileGenerating =
-        isReplayOfPendingUserTurn(userText) ||
-        (!options?.allowRecentReplay && isDuplicateUserFinal(userText));
+        !options?.isChatInput &&
+        (isReplayOfPendingUserTurn(userText) ||
+          (!options?.allowRecentReplay && isDuplicateUserFinal(userText)));
       if (duplicateWhileGenerating) {
         log.info(
           `Skipping duplicate USER final while response is generating: "${userText.slice(0, 72)}..."`,
@@ -2962,6 +2968,7 @@ async function handleBrowserConnection(
         return;
       }
       queuedUserUtteranceWhileGenerating = userText;
+      queuedUserUtteranceIsChat = Boolean(options?.isChatInput);
       log.info(`Queueing user utterance until current response cycle completes: "${userText.slice(0, 60)}"`);
       return;
     }
@@ -3092,9 +3099,14 @@ async function handleBrowserConnection(
           try {
             await reopenAsr();
             const followUp = queuedUserUtteranceWhileGenerating.trim();
+            const followUpIsChat = queuedUserUtteranceIsChat;
             queuedUserUtteranceWhileGenerating = "";
-            if (followUp && !isDuplicateUserFinal(followUp)) {
-              await handleUserUtterance(followUp);
+            queuedUserUtteranceIsChat = false;
+            if (followUp && (followUpIsChat || !isDuplicateUserFinal(followUp))) {
+              await handleUserUtterance(
+                followUp,
+                followUpIsChat ? { isChatInput: true } : undefined,
+              );
             } else if (followUp) {
               log.info(
                 `Skipping queued user utterance — duplicate of answered turn: "${followUp.slice(0, 60)}..."`,
@@ -3734,7 +3746,10 @@ async function handleBrowserConnection(
             text: userText,
             ...(source === "chat" ? { source: "chat" } : {}),
           }));
-          handleUserUtterance(userText).catch(log.error);
+          handleUserUtterance(
+            userText,
+            source === "chat" ? { isChatInput: true } : undefined,
+          ).catch(log.error);
           log.info(`Text input${source ? ` (${source})` : ""}: "${userText.slice(0, 60)}..."`);
         }
       } else if (msg.type === "question_set_update") {

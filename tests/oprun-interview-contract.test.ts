@@ -128,8 +128,8 @@ test("release gates execute browser behavior and production E2E fails closed", (
   assert.match(productionE2eHelper, /获批岗位 ID/);
   assert.match(productionE2eHelper, /raw\.runId !== runId/);
   assert.match(productionE2eSimulation, /for \(let q = 0; q < 8; q\+\+\)/);
-  assert.match(productionE2eSimulation, /while \(questions\.length <= q/);
-  assert.match(productionE2eSimulation, /最终题目数量必须恰好为 8/);
+  assert.match(productionE2eSimulation, /while \(mainsOf\(questions\)\.length <= q/);
+  assert.match(productionE2eSimulation, /计分主问题必须恰好 8 道/);
   assert.match(productionE2eReadme, /恰好 8 道计分题/);
   assert.match(productionE2ePipeline, /\.toBe\(8\)/);
   assert.match(productionE2eFlow, /八题未完成时结束请求必须被拒绝/);
