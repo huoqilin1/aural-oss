@@ -127,7 +127,35 @@ async function applyResume(positionId: number, positionName: string) {
 }
 
 // ── 按题目关键词组织候选人式回答(基于简历真实经历,不泄露脱敏字段) ──
+/** 多样本质量验收(质量手册 §预设疑点):按 ANSWER_MODE 变换基线回答。
+ *  baseline  严格按简历可知事实回答(不夸大)。
+ *  vague_we  本人贡献模糊:贡献句一律改"我们",直到 AI 核验本人角色。
+ *  timeline  时间线矛盾:自述中植入一段与简历冲突的日期(预录盲底)。
+ * 预设内容只写入本地 state 文件(解盲用),不进系统。 */
+const ANSWER_MODE = process.env.ANSWER_MODE || "baseline";
+const PLANTED_FAW_RECORD: Record<string, string> = {
+  baseline: "无预设疑点(一致基线)",
+  vague_we: "本人贡献模糊:所有贡献表述用\"我们\",不主动区分本人角色",
+  timeline: "时间线矛盾:自述称商汤经历为 2018-2020 年(与简历时间线冲突)",
+};
+function applyAnswerMode(text: string): string {
+  if (ANSWER_MODE === "vague_we") {
+    return text
+      .replace(/我本人/g, "我们")
+      .replace(/我(?=负责|参与|搭建|做了|完成|独立|重点保障|自学)/g, "我们")
+      .replace(/我把/g, "我们把");
+  }
+  if (ANSWER_MODE === "timeline") {
+    return text.replace("最近在商汤科技", "2018到2020年间我在商汤科技");
+  }
+  return text;
+}
+
 function answerFor(qText: string): string {
+  return applyAnswerMode(answerForBaseline(qText));
+}
+
+function answerForBaseline(qText: string): string {
   const t = qText;
   if (/自我介绍/.test(t)) {
     return "您好，我是一名测试开发工程师，有十六年的软件测试经验。最近在商汤科技负责智能遥感解译平台 SenseRemote Layers 的测试开发，包括接口测试、功能测试和自动化框架的搭建维护；之前分别在联想做过商用客户中台 UCP 项目的接口自动化框架从零搭建，在爱奇艺负责大播放 SDK 的手工与自动化测试。技术栈上熟练 Python、Selenium、Pytest、Requests 接口自动化、Jenkins 持续集成和 Docker，也熟悉 SQL 和 Linux。";
@@ -349,7 +377,12 @@ async function clickNext(page: Page) {
       } catch { /* ignore */ }
     });
 
-    saveState({ phase: "opening", opened_at: new Date().toISOString() });
+    saveState({
+      phase: "opening",
+      opened_at: new Date().toISOString(),
+      answer_mode: ANSWER_MODE,
+      planted_flaw: PLANTED_FAW_RECORD[ANSWER_MODE] || "unknown",
+    });
     await page.goto(inviteUrl, { waitUntil: "domcontentloaded" });
     await page.locator('[role="checkbox"]').click();
     await page.locator('button:has-text("开始面试")').click();
