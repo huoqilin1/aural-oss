@@ -371,7 +371,7 @@ async function clickNext(page: Page) {
         const cta = page.locator(
           '[data-tour="voice-status"]:has-text("本题答完了就点这里") button:has-text("下一题")',
         );
-        const deadline = Date.now() + 75_000;
+        const deadline = Date.now() + 90_000;
         let moved: "advanced" | "followup" | null = null;
         while (Date.now() < deadline && !moved) {
           const body = await page.evaluate(() => document.body.innerText);
@@ -381,9 +381,10 @@ async function clickNext(page: Page) {
           }
           const last = await lastAiText(page);
           const isUiHint = /本题答完了|下一题/.test(last);
+          // AI 口播题干常带前缀(如"接下来第3个问题:"),用包含关系判回显。
           const isQuestionEcho =
-            last.startsWith(qText.slice(0, 10)) || qText.startsWith(last.slice(0, 10));
-          const asksSomething = /(？|\?|请|说说|讲讲|展开|补充|具体|如何|为什么|什么)/.test(last);
+            last.includes(qText.slice(0, 12)) || qText.includes(last.slice(0, 12));
+          const asksSomething = /(？|\?|请|说说|讲讲|展开|补充|具体|如何|为什么|什么|确认|举例|提到|讲到)/.test(last);
           if (last && last !== lastAiSeen && !isUiHint && !isQuestionEcho && asksSomething && last.length > 15) {
             lastAiSeen = last;
             followUps += 1;
@@ -405,7 +406,15 @@ async function clickNext(page: Page) {
           if (!moved) await page.waitForTimeout(1_000);
         }
         if (!moved) {
-          throw new Error(`第 ${q + 1} 题答后 75s 未推进(无自动切题、无 CTA、无追问)`);
+          // 停滞不一定是死局:可能是未识别的追问话术。预算内先补答一轮,
+          // 仍然停滞才判失败。
+          if (followUps < 2) {
+            followUps += 1;
+            log(`  ⚠️ 第 ${q + 1} 题 ${90}000ms 无推进,按未识别追问补答一轮`);
+            moved = "followup";
+          } else {
+            throw new Error(`第 ${q + 1} 题答后 90s 未推进(无自动切题、无 CTA、无追问)`);
+          }
         }
         if (moved === "followup") continue;
         answered = true;
