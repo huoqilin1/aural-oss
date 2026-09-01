@@ -221,20 +221,22 @@ async function countNeedle(page: Page, needle: string): Promise<number> {
 const sentTexts: string[] = [];
 
 async function lastAiText(page: Page): Promise<string> {
-  return page.evaluate((mine) => {
-    // 归一化引号/空白:AI 复述我们的回答时常包裹“”,纯 startsWith 会漏判。
-    const norm = (x: string) => x.replace(/[\s“”"'『』「」]/g, "");
+  // 用字符串形式传页面函数:tsx(esbuild keepNames)会给命名箭头函数
+  // 注入 __name 助手,浏览器上下文没有该标识符会直接 ReferenceError。
+  const pageFn = `(mine) => {
+    const norm = (x) => x.replace(/[\\s“””'『』「」]/g, “”);
     const mineNorm = mine.map((m) => norm(m));
-    const nodes = Array.from(document.querySelectorAll("p"));
+    const nodes = Array.from(document.querySelectorAll(“p”));
     const texts = nodes
-      .map((n) => n.textContent || "")
+      .map((n) => n.textContent || “”)
       .filter((s) => s.length > 20)
       .filter((s) => {
         const n = norm(s);
         return !mineNorm.some((m) => n.startsWith(m));
       });
-    return texts.length ? texts[texts.length - 1] : "";
-  }, mineSafe());
+    return texts.length ? texts[texts.length - 1] : “”;
+  }`;
+  return page.evaluate(pageFn, mineSafe());
 }
 function mineSafe(): string[] {
   return sentTexts.map((s) => s.slice(0, 12));
