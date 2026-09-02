@@ -33,15 +33,24 @@ if (hrOrigin !== "https://hr.yifx.vip") {
 const resumeIndex = Number(process.env.RESUME_INDEX);
 const positionId = Number(process.env.PRODUCTION_POSITION_ID);
 const resumeHash = process.env.PRODUCTION_RESUME_TEXT_SHA256 || "";
+// 官网 UI 真实简历投递(自动识别岗位)有独立的授权组合:
+// RESUME_FILE + 文件字节指纹 + PRODUCTION_AUTO_MATCH_APPROVED,
+// 此时岗位 ID 与简历库哈希由该组合替代(仍失败关闭)。
+const careersAutoMatch =
+  process.env.APPLY_VIA === "careers_ui"
+  && process.env.PRODUCTION_AUTO_MATCH_APPROVED === "YES"
+  && Boolean(process.env.RESUME_FILE)
+  && process.env.PRODUCTION_RESUME_FILE_APPROVED === "YES"
+  && /^[0-9a-f]{64}$/i.test(process.env.PRODUCTION_RESUME_FILE_SHA256 || "");
 if (!Number.isInteger(resumeIndex) || resumeIndex < 0) {
   console.error("Production E2E blocked: RESUME_INDEX must be an explicitly approved index.");
   process.exit(2);
 }
-if (!Number.isInteger(positionId) || positionId <= 0) {
+if (!careersAutoMatch && (!Number.isInteger(positionId) || positionId <= 0)) {
   console.error("Production E2E blocked: PRODUCTION_POSITION_ID must be explicitly approved.");
   process.exit(2);
 }
-if (!/^[0-9a-f]{64}$/i.test(resumeHash)) {
+if (!careersAutoMatch && !/^[0-9a-f]{64}$/i.test(resumeHash)) {
   console.error(
     "Production E2E blocked: PRODUCTION_RESUME_TEXT_SHA256 must identify the approved deidentified resume content.",
   );
