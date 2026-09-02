@@ -1977,30 +1977,66 @@ async function handleBrowserConnection(
       sentTranscriptText = true;
       browserWs.send(JSON.stringify({ type: "tts_text", data: { text } }));
     };
-    try {
-      for await (const event of synthesizeSpeech(text, auth, ttsOpts, abortController.signal)) {
-        if (abortController.signal.aborted) break;
-        if (browserWs.readyState !== WebSocket.OPEN) break;
 
-        if (event.type === "audio" && event.audio) {
-          sendTranscriptTextOnce();
-          browserWs.send(event.audio, { binary: true });
-          totalAudioBytes += event.audio.length;
-        } else if (event.type === "sentence_start") {
-          // The full response text is sent once the first audio chunk is ready.
-        } else if (event.type === "sentence_end") {
-          browserWs.send(JSON.stringify({ type: "tts_sentence_end", data: { text: event.text } }));
-        } else if (event.type === "error") {
-          log.error(`TTS error: ${event.error}`);
-          break;
-        } else if (event.type === "done") {
-          completed = true;
+    // 单次合成尝试。返回 ok=收到完整 done;audioBytes 用于判断能否安全重试
+    // (已推送过音频再重试会导致浏览器端音频重复)。
+    const attempt = async (): Promise<{ ok: boolean; audioBytes: number }> => {
+      let ok = false;
+      let audioBytes = 0;
+      try {
+        for await (const event of synthesizeSpeech(text, auth, ttsOpts, abortController.signal)) {
+          if (abortController.signal.aborted) break;
+          if (browserWs.readyState !== WebSocket.OPEN) break;
+
+          if (event.type === "audio" && event.audio) {
+            sendTranscriptTextOnce();
+            browserWs.send(event.audio, { binary: true });
+            audioBytes += event.audio.length;
+          } else if (event.type === "sentence_start") {
+            // The full response text is sent once the first audio chunk is ready.
+          } else if (event.type === "sentence_end") {
+            browserWs.send(JSON.stringify({ type: "tts_sentence_end", data: { text: event.text } }));
+          } else if (event.type === "error") {
+            log.error(`TTS error: ${event.error}`);
+            return { ok: false, audioBytes };
+          } else if (event.type === "done") {
+            ok = true;
+          }
         }
+      } catch (err) {
+        if (!abortController.signal.aborted) {
+          log.error("TTS streaming error:", err);
+        }
+        return { ok: false, audioBytes };
       }
-    } catch (err) {
-      if (!abortController.signal.aborted) {
-        log.error("TTS streaming error:", err);
+      return { ok, audioBytes };
+    };
+
+    let result = await attempt();
+    if (
+      !result.ok && result.audioBytes === 0
+      && !abortController.signal.aborted && browserWs.readyState === WebSocket.OPEN
+    ) {
+      // 生产缺陷(2026-09-02 取证):供应商 TTS 流挂起曾把面试永久冻结。
+      // 未推送任何音频时安全重试一次。
+      log.warn("TTS attempt 1 failed without audio — retrying once");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (!abortController.signal.aborted && browserWs.readyState === WebSocket.OPEN) {
+        result = await attempt();
       }
+    }
+    if (result.ok) {
+      completed = true;
+      totalAudioBytes = result.audioBytes;
+    }
+
+    // 双重失败(且未被抢占)时以纯文本兜底送达:tts_text + tts_ended 让前端
+    // 回到可作答状态、题目切换/收尾流程照常走,绝不永久卡死。
+    const degradedTextOnly = !completed
+      && !abortController.signal.aborted
+      && browserWs.readyState === WebSocket.OPEN;
+    if (degradedTextOnly) {
+      log.error("TTS unavailable after retry — delivering text-only fallback");
     }
 
     // Wait for client-side playback to finish before declaring TTS done.
@@ -2023,12 +2059,13 @@ async function handleBrowserConnection(
       ttsAbortController = null;
     }
 
-    if (completed && !abortController.signal.aborted && browserWs.readyState === WebSocket.OPEN) {
+    const delivered = (completed || degradedTextOnly) && !abortController.signal.aborted;
+    if (delivered && browserWs.readyState === WebSocket.OPEN) {
       sendTranscriptTextOnce();
       browserWs.send(JSON.stringify({ type: "tts_ended" }));
     }
 
-    return completed && !abortController.signal.aborted;
+    return delivered;
   }
 
   /**

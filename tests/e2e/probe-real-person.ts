@@ -214,6 +214,8 @@ async function chatAnswer(page: Page, text: string) {
   // 像真实候选人一样等 AI 说完再作答:AI 播题(TTS)期间发出的 chat 消息
   // 会被中继记录但不处理(生产实测"答后静默 90s"),状态标签回到
   // "正在听取回答"再发送。面试已结束/已断开时直接失败。
+  // 150s:覆盖生产观测到的单次 LLM 延迟尖峰(2026-09-02 66s),期间
+  // UI 停在"思考中",并非冻结。
   await page.waitForFunction(
     () => {
       const t = document.body.innerText;
@@ -221,9 +223,9 @@ async function chatAnswer(page: Page, text: string) {
       return t.includes("正在听取回答");
     },
     undefined,
-    { timeout: 60_000 },
+    { timeout: 150_000 },
   ).catch(() => {
-    throw new Error("60s 内未进入可作答状态(未出现\"正在听取回答\")");
+    throw new Error("150s 内未进入可作答状态(未出现\"正在听取回答\")");
   });
   await page.locator('[data-tour="voice-chat"] button').click();
   const input = page.getByRole("textbox");
@@ -358,14 +360,39 @@ function assertResumeFileApproval(fileBytes: Buffer) {
   }
 }
 
-async function applyViaCareersUi(page: Page, positionName: string | null) {
+/** 官网投递结果:notice=新投递进须知页;resumed=同简历已有未完成面试,
+ *  官网提供"继续上次未完成的面试",直达面试 UI(无须知页)。 */
+async function applyViaCareersUi(page: Page, positionName: string): Promise<"notice" | "resumed"> {
   const fileBytes = readFileSync(RESUME_FILE);
   assertResumeFileApproval(fileBytes);
   await page.goto("https://ai.yifx.vip/careers", { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForTimeout(1500);
-  if (positionName) {
-    await page.locator("select").first().selectOption({ label: positionName });
+  // 官网下拉没有“自动匹配”选项,岗位必选:未选择会被前端拦下(请先选择岗位再提交简历)。
+  // 按去空白后的包含关系匹配 POSITION_LABEL,再用真实 option 文本精确选中。
+  const exactLabel = await page.evaluate(
+    (needle) => {
+      const sel = document.querySelector("select");
+      if (!sel) return null;
+      for (const opt of Array.from(sel.options)) {
+        if (opt.disabled || !opt.value) continue;
+        if ((opt.textContent || "").replace(/\s+/g, "").includes(needle)) {
+          return opt.textContent || "";
+        }
+      }
+      return null;
+    },
+    positionName.replace(/\s+/g, ""),
+  );
+  if (!exactLabel) {
+    const labels = await page.evaluate(() =>
+      Array.from(document.querySelector("select")?.options ?? [])
+        .map((opt) => opt.textContent || "")
+        .filter(Boolean),
+    );
+    throw new Error(`官网岗位下拉未找到含“${positionName}”的选项;可选: ${labels.join(" | ")}`);
   }
+  await page.locator("select").first().selectOption({ label: exactLabel });
+  log(`官网岗位选择: ${exactLabel}`);
   await page.locator("input[type=file]").first().setInputFiles(RESUME_FILE);
   await page.waitForTimeout(2000);
   const continueExisting = page.getByRole("button", { name: /继续上次未完成的面试/ }).first();
@@ -380,28 +407,64 @@ async function applyViaCareersUi(page: Page, positionName: string | null) {
   const tClick = Date.now();
   await submit.click();
   // 官网投递后直达须知页;P95≤15s、单次≤30s 为申请→邀请契约。
-  await page.getByText(/我已阅读并同意以上面试须知/).waitFor({ state: "visible", timeout: 120_000 });
+  // 同简历重复投递时官网提供"继续上次未完成的面试",跳过须知页直达面试。
+  // 提交被拒(校验/解析/上传失败)时立即失败,不空等 120s。
+  const outcome = await page
+    .waitForFunction(
+      () => {
+        const text = document.body.innerText || "";
+        if (text.includes("我已阅读并同意以上面试须知")) return "notice";
+        if (/第 [1-8] \/ 8 题/.test(text)) return "resumed";
+        if (/请先选择岗位|提交失败|投递失败|上传失败|解析失败|稍后再试|文件格式/.test(text)) {
+          return "error";
+        }
+        return false;
+      },
+      undefined,
+      { timeout: 120_000 },
+    )
+    .then((handle) => handle.jsonValue());
+  if (outcome !== "notice" && outcome !== "resumed") {
+    const errText = await page.evaluate(() => {
+      const text = document.body.innerText || "";
+      const m = text.match(
+        /[^\n]*(请先选择岗位|提交失败|投递失败|上传失败|解析失败|稍后再试|文件格式)[^\n]*/,
+      );
+      return m ? m[0] : String(text.slice(0, 200));
+    });
+    throw new Error(`官网投递被拒绝: ${errText}`);
+  }
   const readyMs = Date.now() - tClick;
   saveState({
-    phase: "careers_applied",
+    phase: outcome === "resumed" ? "careers_resumed" : "careers_applied",
     resume_file_hash: createHash("sha256").update(fileBytes).digest("hex").slice(0, 16),
     careers_ready_ms: readyMs,
     applied_at: new Date().toISOString(),
   });
-  log(`官网投递成功 → 须知页就绪(${(readyMs / 1000).toFixed(1)}s)`);
+  if (outcome === "resumed") {
+    log(`官网识别到同简历未完成面试 → 直接续面(${(readyMs / 1000).toFixed(1)}s,跳过须知页)`);
+  } else {
+    log(`官网投递成功 → 须知页就绪(${(readyMs / 1000).toFixed(1)}s)`);
+  }
+  return outcome;
 }
 
 (async () => {
   await preflight();
   assertProductionWriteApproval();
   const useCareersUi = APPLY_VIA === "careers_ui";
-  if (useCareersUi && !RESUME_FILE) throw new Error("careers_ui 投递必须设置 RESUME_FILE");
-  const autoMatch = useCareersUi && !process.env.POSITION_LABEL;
-  if (autoMatch && process.env.PRODUCTION_AUTO_MATCH_APPROVED !== "YES") {
-    throw new Error("自动识别岗位投递缺少 PRODUCTION_AUTO_MATCH_APPROVED=YES 明确授权");
+  if (useCareersUi) {
+    if (!RESUME_FILE) throw new Error("careers_ui 投递必须设置 RESUME_FILE");
+    // 官网下拉没有自动匹配,岗位必选(POSITION_LABEL)。
+    if (!process.env.POSITION_LABEL) {
+      throw new Error("careers_ui 投递必须设置 POSITION_LABEL(官网必须手动选择岗位)");
+    }
+    if (process.env.PRODUCTION_AUTO_MATCH_APPROVED !== "YES") {
+      throw new Error("careers_ui 投递缺少 PRODUCTION_AUTO_MATCH_APPROVED=YES 明确授权");
+    }
   }
-  const chosen = autoMatch
-    ? { id: 0, name: "AI 自动识别" }
+  const chosen = useCareersUi
+    ? { id: 0, name: process.env.POSITION_LABEL as string }
     : await getApprovedPosition();
   log(`选择岗位: ${chosen.name}${useCareersUi ? "(官网 UI 投递)" : ""}`);
   const inviteUrl = useCareersUi ? null : await applyResume(chosen.id, chosen.name);
@@ -459,24 +522,43 @@ async function applyViaCareersUi(page: Page, positionName: string | null) {
       answer_mode: ANSWER_MODE,
       planted_flaw: PLANTED_FAW_RECORD[ANSWER_MODE] || "unknown",
     });
+    let entry: "notice" | "resumed" = "notice";
     if (useCareersUi) {
-      await applyViaCareersUi(page, process.env.POSITION_LABEL || null);
+      entry = await applyViaCareersUi(page, process.env.POSITION_LABEL as string);
     } else {
       await page.goto(inviteUrl as string, { waitUntil: "domcontentloaded" });
     }
-    await page.locator('[role="checkbox"]').click();
-    await page.locator('button:has-text("开始面试")').click();
-    // 快速失败:AI 问候 + Q1 到达 ≤15s(契约 start→问候 ≤10s)
-    await page.waitForFunction(
-      () => document.body.innerText.includes("第 1 / 8 题"),
-      undefined,
-      { timeout: 15_000 },
+    if (entry === "notice") {
+      await page.locator('[role="checkbox"]').click();
+      await page.locator('button:has-text("开始面试")').click();
+    }
+    // 快速失败:新面要求 AI 问候 + Q1 到达 ≤15s(契约 start→问候 ≤10s);
+    // 续面(继续上次未完成的面试)无须知页,可能在任意题,放宽到 45s。
+    const startIdxRaw = await page
+      .waitForFunction(
+        () => {
+          const m = (document.body.innerText || "").match(/第 ([1-8]) \/ 8 题/);
+          return m ? Number(m[1]) : false;
+        },
+        undefined,
+        { timeout: entry === "notice" ? 15_000 : 45_000 },
+      )
+      .then((handle) => handle.jsonValue());
+    const startIdx = Number(startIdxRaw) || 1;
+    log(
+      entry === "resumed"
+        ? `续面进入,当前第 ${startIdx} 题,继续作答…`
+        : "面试已开始,开始逐题作答…",
     );
-    log("面试已开始,开始逐题作答…");
-    saveState({ phase: "started", started_at: new Date().toISOString() });
+    saveState({
+      phase: "started",
+      started_at: new Date().toISOString(),
+      entry_mode: entry,
+      start_question_index: startIdx,
+    });
 
     let totalFollowUps = 0;
-    for (let q = 0; q < 8; q++) {
+    for (let q = startIdx - 1; q < 8; q++) {
       // 等本题出现(切题后,Q2 必须在 Q1 结束前就绪)
       await page.waitForFunction(
         ({ n }) => document.body.innerText.includes(`第 ${n} / 8 题`),

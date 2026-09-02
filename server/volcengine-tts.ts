@@ -24,6 +24,15 @@ export const TTS_API_URL =
 const TTS_SPEECH_RATE_MULTIPLIER_MIN = 0.5;
 const TTS_SPEECH_RATE_MULTIPLIER_MAX = 2;
 
+/** 生产观测(2026-09-02 候选人 25ca153b):HTTP 200 后供应商可能永远不吐
+ *  首个数据块,read() 无超时 → 面试永久冻结。读循环必须有看门狗。 */
+function readEnvInt(name: string, fallback: number): number {
+  const raw = process.env[name]?.trim();
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1000 ? Math.floor(parsed) : fallback;
+}
+
 export type TtsPcmSampleLayout = "int16le" | "float32le";
 
 /** How provider bytes are encoded before we wrap them for the browser. */
@@ -327,11 +336,15 @@ export async function* synthesizeSpeech(
   const startMs = Date.now();
   let loggedJsonMeta = false;
   let audioStarted = false;
+  const firstChunkTimeoutMs = readEnvInt("DOUBAO_TTS_FIRST_CHUNK_TIMEOUT_MS", 10_000);
+  const streamIdleTimeoutMs = readEnvInt("DOUBAO_TTS_STREAM_IDLE_TIMEOUT_MS", 10_000);
 
   const controller = new AbortController();
   let timeoutId: NodeJS.Timeout | undefined;
   const fetchSignal = controller.signal;
   let inFlight = true;
+  let readWatchdogId: NodeJS.Timeout | undefined;
+  let stalledByWatchdog = false;
 
   const clearAbortTimeout = () => {
     if (timeoutId !== undefined) {
@@ -340,8 +353,25 @@ export async function* synthesizeSpeech(
     }
   };
 
+  const clearReadWatchdog = () => {
+    if (readWatchdogId !== undefined) {
+      clearTimeout(readWatchdogId);
+      readWatchdogId = undefined;
+    }
+  };
+
+  const armReadWatchdog = (ms: number, phase: "first-chunk" | "idle") => {
+    clearReadWatchdog();
+    readWatchdogId = setTimeout(() => {
+      stalledByWatchdog = true;
+      log.error(`TTS read watchdog fired (${phase}, ${ms}ms) — aborting stalled stream`);
+      controller.abort();
+    }, ms);
+  };
+
   const onParentAbort = () => {
     clearAbortTimeout();
+    clearReadWatchdog();
     if (inFlight) controller.abort();
   };
 
@@ -371,6 +401,7 @@ export async function* synthesizeSpeech(
       return;
     }
     clearAbortTimeout();
+    armReadWatchdog(firstChunkTimeoutMs, "first-chunk");
 
     log.info(`TTS HTTP response: ${res.status} ${res.statusText}`);
 
@@ -472,9 +503,18 @@ export async function* synthesizeSpeech(
       try {
         ({ done, value } = await reader.read());
       } catch (err) {
+        if (stalledByWatchdog) {
+          yield {
+            type: "error",
+            error: `TTS stream stalled: no data within ${firstChunkTimeoutMs}ms after HTTP 200`,
+          };
+          return;
+        }
         if (signal?.aborted || fetchSignal.aborted || isAbortError(err)) return;
         throw err;
       }
+      clearReadWatchdog();
+      armReadWatchdog(streamIdleTimeoutMs, "idle");
       if (done) break;
 
       const chunk = decoder.decode(value, { stream: true });
@@ -529,10 +569,15 @@ export async function* synthesizeSpeech(
       yield { type: "done" };
     }
     } catch (err) {
+      if (stalledByWatchdog) {
+        yield { type: "error", error: "TTS stream stalled: watchdog aborted idle read" };
+        return;
+      }
       if (signal?.aborted || fetchSignal.aborted || isAbortError(err)) return;
       const msg = err instanceof Error ? err.message : String(err);
       yield { type: "error", error: `TTS stream error: ${msg}` };
     } finally {
+      clearReadWatchdog();
       try {
         await reader.cancel();
       } catch {
@@ -542,6 +587,7 @@ export async function* synthesizeSpeech(
   } finally {
     inFlight = false;
     clearAbortTimeout();
+    clearReadWatchdog();
   }
 }
 

@@ -33,7 +33,7 @@ if (hrOrigin !== "https://hr.yifx.vip") {
 const resumeIndex = Number(process.env.RESUME_INDEX);
 const positionId = Number(process.env.PRODUCTION_POSITION_ID);
 const resumeHash = process.env.PRODUCTION_RESUME_TEXT_SHA256 || "";
-// 官网 UI 真实简历投递(自动识别岗位)有独立的授权组合:
+// 官网 UI 真实简历投递(POSITION_LABEL 手动选岗)有独立的授权组合:
 // RESUME_FILE + 文件字节指纹 + PRODUCTION_AUTO_MATCH_APPROVED,
 // 此时岗位 ID 与简历库哈希由该组合替代(仍失败关闭)。
 const careersAutoMatch =
