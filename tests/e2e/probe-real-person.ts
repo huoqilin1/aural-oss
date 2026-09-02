@@ -8,7 +8,7 @@
 //  - 输入回执:打字后必须出现消息气泡,未送达即失败(复现"发消息被静默丢弃");
 //  - 追问预算双核验:逐题计数 + 全程 ≤3,收尾时再断言题目恰好 8 道。
 import { mkdirSync, writeFileSync, readFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { chromium, type Browser, type Page } from "@playwright/test";
 import {
@@ -152,7 +152,26 @@ function applyAnswerMode(text: string): string {
 }
 
 function answerFor(qText: string): string {
+  if (ANSWER_MODE === "anchor") return answerFromAnchor(qText);
   return applyAnswerMode(answerForBaseline(qText));
+}
+
+/** 锚点式如实回答(真实简历样本):只确认题干引用的简历锚点并如实说明
+ *  参与方式,不虚构指标与细节——口径与数据"以记录为准"。 */
+function answerFromAnchor(qText: string): string {
+  if (/自我介绍/.test(qText)) {
+    return "我的经历简历里写得更完整，这里简要说明：按简历时间线我先后有几段岗位经历，与应聘岗位最相关的是简历里重点描述的那段。具体项目内容我结合后面每题引用的简历条目来回答，以简历记录为准。";
+  }
+  if (/提问|想问/.test(qText)) {
+    return "我想了解团队目前的工作节奏和这个岗位入职后前三个月的主要目标，谢谢。";
+  }
+  const anchors = [...qText.matchAll(/“([^”]{6,80})”/g)]
+    .map((m) => m[1].trim())
+    .filter(Boolean);
+  if (anchors.length) {
+    return `简历里写的"${anchors[0]}"是我的真实经历。我在其中按分工承担了自己负责的部分，配合团队按期交付；更细的指标口径和数据以当时的记录为准，这里不凭印象报数。`;
+  }
+  return "这一块我以简历记录为准：相关经历在简历里有对应描述，我负责的是分工内的部分，结果按期完成。";
 }
 
 function answerForBaseline(qText: string): string {
@@ -323,12 +342,63 @@ async function clickNext(page: Page) {
   await cta.click();
 }
 
+/** 官网 UI 真实投递模式:APPLY_VIA=careers_ui + RESUME_FILE=<文件路径>。
+ *  与 API 投递互斥;文件必须经 PRODUCTION_RESUME_FILE_APPROVED=YES 且
+ *  PRODUCTION_RESUME_FILE_SHA256 等于文件字节指纹(失败关闭)。 */
+const APPLY_VIA = process.env.APPLY_VIA || "api";
+const RESUME_FILE = process.env.RESUME_FILE || "";
+function assertResumeFileApproval(fileBytes: Buffer) {
+  if (process.env.PRODUCTION_RESUME_FILE_APPROVED !== "YES") {
+    throw new Error("careers_ui 投递缺少 PRODUCTION_RESUME_FILE_APPROVED=YES 明确授权");
+  }
+  const approved = String(process.env.PRODUCTION_RESUME_FILE_SHA256 || "").toLowerCase();
+  const actual = createHash("sha256").update(fileBytes).digest("hex");
+  if (!/^[0-9a-f]{64}$/.test(approved) || approved !== actual) {
+    throw new Error("简历文件指纹与当前批准不一致(失败关闭)");
+  }
+}
+
+async function applyViaCareersUi(page: Page, positionName: string | null) {
+  const fileBytes = readFileSync(RESUME_FILE);
+  assertResumeFileApproval(fileBytes);
+  await page.goto("https://ai.yifx.vip/careers", { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.waitForTimeout(1500);
+  if (positionName) {
+    await page.locator("select").first().selectOption({ label: positionName });
+  }
+  await page.locator("input[type=file]").first().setInputFiles(RESUME_FILE);
+  await page.waitForTimeout(2000);
+  const continueExisting = page.getByRole("button", { name: /继续上次未完成的面试/ }).first();
+  const submitNew = page.getByRole("button", { name: /提交简历并进入面试须知|开始面试/ }).first();
+  await Promise.any([
+    continueExisting.waitFor({ state: "visible", timeout: 45_000 }),
+    submitNew.waitFor({ state: "visible", timeout: 45_000 }),
+  ]);
+  const submit = (await continueExisting.isVisible().catch(() => false))
+    ? continueExisting
+    : submitNew;
+  const tClick = Date.now();
+  await submit.click();
+  // 官网投递后直达须知页;P95≤15s、单次≤30s 为申请→邀请契约。
+  await page.getByText(/我已阅读并同意以上面试须知/).waitFor({ state: "visible", timeout: 120_000 });
+  const readyMs = Date.now() - tClick;
+  saveState({
+    phase: "careers_applied",
+    resume_file_hash: createHash("sha256").update(fileBytes).digest("hex").slice(0, 16),
+    careers_ready_ms: readyMs,
+    applied_at: new Date().toISOString(),
+  });
+  log(`官网投递成功 → 须知页就绪(${(readyMs / 1000).toFixed(1)}s)`);
+}
+
 (async () => {
   await preflight();
   assertProductionWriteApproval();
   const chosen = await getApprovedPosition();
-  log(`选择岗位: ${chosen.name}`);
-  const inviteUrl = await applyResume(chosen.id, chosen.name);
+  const useCareersUi = APPLY_VIA === "careers_ui";
+  if (useCareersUi && !RESUME_FILE) throw new Error("careers_ui 投递必须设置 RESUME_FILE");
+  log(`选择岗位: ${chosen.name}${useCareersUi ? "(官网 UI 投递)" : ""}`);
+  const inviteUrl = useCareersUi ? null : await applyResume(chosen.id, chosen.name);
 
   let browser: Browser | null = null;
   try {
@@ -383,7 +453,11 @@ async function clickNext(page: Page) {
       answer_mode: ANSWER_MODE,
       planted_flaw: PLANTED_FAW_RECORD[ANSWER_MODE] || "unknown",
     });
-    await page.goto(inviteUrl, { waitUntil: "domcontentloaded" });
+    if (useCareersUi) {
+      await applyViaCareersUi(page, process.env.POSITION_LABEL || null);
+    } else {
+      await page.goto(inviteUrl as string, { waitUntil: "domcontentloaded" });
+    }
     await page.locator('[role="checkbox"]').click();
     await page.locator('button:has-text("开始面试")').click();
     // 快速失败:AI 问候 + Q1 到达 ≤15s(契约 start→问候 ≤10s)
