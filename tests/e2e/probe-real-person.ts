@@ -495,7 +495,7 @@ async function clickNext(page: Page) {
           // 仍然停滞才判失败。
           if (followUps < 2) {
             followUps += 1;
-            log(`  ⚠️ 第 ${q + 1} 题 ${90}000ms 无推进,按未识别追问补答一轮`);
+            log(`  ⚠️ 第 ${q + 1} 题 90s 无推进,按未识别追问补答一轮`);
             moved = "followup";
           } else {
             throw new Error(`第 ${q + 1} 题答后 90s 未推进(无自动切题、无 CTA、无追问)`);
