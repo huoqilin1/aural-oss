@@ -394,9 +394,15 @@ async function applyViaCareersUi(page: Page, positionName: string | null) {
 (async () => {
   await preflight();
   assertProductionWriteApproval();
-  const chosen = await getApprovedPosition();
   const useCareersUi = APPLY_VIA === "careers_ui";
   if (useCareersUi && !RESUME_FILE) throw new Error("careers_ui 投递必须设置 RESUME_FILE");
+  const autoMatch = useCareersUi && !process.env.POSITION_LABEL;
+  if (autoMatch && process.env.PRODUCTION_AUTO_MATCH_APPROVED !== "YES") {
+    throw new Error("自动识别岗位投递缺少 PRODUCTION_AUTO_MATCH_APPROVED=YES 明确授权");
+  }
+  const chosen = autoMatch
+    ? { id: 0, name: "AI 自动识别" }
+    : await getApprovedPosition();
   log(`选择岗位: ${chosen.name}${useCareersUi ? "(官网 UI 投递)" : ""}`);
   const inviteUrl = useCareersUi ? null : await applyResume(chosen.id, chosen.name);
 
