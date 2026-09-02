@@ -127,7 +127,9 @@ test("release gates execute browser behavior and production E2E fails closed", (
   assert.match(productionE2eHelper, /actualHash !== approvedHash\.toLowerCase\(\)/);
   assert.match(productionE2eHelper, /获批岗位 ID/);
   assert.match(productionE2eHelper, /raw\.runId !== runId/);
-  assert.match(productionE2eSimulation, /for \(let q = 0; q < 8; q\+\+\)/);
+  // startIdx=1 为新面(等价于从 Q1 起);续面从当前题续答,两路径都必须答满 8 题。
+  assert.match(productionE2eSimulation, /for \(let q = startIdx - 1; q < 8; q\+\+\)/);
+  assert.match(productionE2eSimulation, /const startIdx = Number\(startIdxRaw\) \|\| 1;/);
   assert.match(productionE2eSimulation, /while \(mainsOf\(questions\)\.length <= q/);
   assert.match(productionE2eSimulation, /计分主问题必须恰好 8 道/);
   assert.match(productionE2eReadme, /恰好 8 道计分题/);
