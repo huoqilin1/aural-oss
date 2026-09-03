@@ -281,7 +281,7 @@ test("Chinese interviews also try the voice relay first and fail over to OpenAI"
   await context.close();
 });
 
-test("voice interview shows Thinking after user speech finalizes", async () => {
+test("voice interview does not show Thinking from speech finalization alone", async () => {
   const context = await browser.newContext({ locale: "en-US" });
   const page = await context.newPage();
 
@@ -296,7 +296,15 @@ test("voice interview shows Thinking after user speech finalizes", async () => {
   );
   await startVoiceInterview(page);
 
-  await waitForText(page, "Thinking...", 8_000);
+  // 王总 2026-09-03：asr_ended 只代表"这句已提交"，不再点亮"思考中"——
+  // 答题停顿不应让界面闪 Thinking，只有 AI 真正开始生成(response_started)才显示。
+  await waitForText(page, "I led a reporting dashboard project", 8_000);
+  await delay(800);
+  assert.equal(
+    await page.getByText("Thinking...", { exact: true }).first().isVisible(),
+    false,
+    "Expected no Thinking indicator from speech finalization alone",
+  );
   const bodyText = (await page.locator("body").textContent()) ?? "";
   assert.equal(bodyText.includes("I led a reporting dashboard project"), true);
   assert.equal(
