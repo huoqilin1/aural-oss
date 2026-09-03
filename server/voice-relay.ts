@@ -786,8 +786,30 @@ if (VISION_LLM_API_KEY) {
 logRelayLlmStartup();
 log.info(`Listening on ws://localhost:${RELAY_PORT}`);
 
+// 方案B(2026-09-03):ASR 并发连接配额有限(生产实测约 20 路)。20 路同场
+// 切题时各会话独立断开/重连,新旧连接短暂叠加会瞬时冲破配额,被拒的会话
+// 卡在重连循环。全局串行化所有 connectAsr 并强制最小间隔,消除叠加窗口。
+let asrConnectChain: Promise<void> = Promise.resolve();
+let asrLastConnectAt = 0;
+const ASR_CONNECT_MIN_INTERVAL_MS = 1500;
+function scheduleAsrConnect(task: () => Promise<void>): Promise<void> {
+  const run = async () => {
+    const waitMs = asrLastConnectAt + ASR_CONNECT_MIN_INTERVAL_MS - Date.now();
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    asrLastConnectAt = Date.now();
+    await task();
+  };
+  asrConnectChain = asrConnectChain.then(run, run);
+  return asrConnectChain;
+}
+
 wss.on("connection", (browserWs) => {
   log.info("Browser connected, waiting for init...");
+
+  const keepBrowserAlive = setInterval(() => {
+    if (browserWs.readyState === WebSocket.OPEN) browserWs.ping();
+  }, 20000);
+  browserWs.on("close", () => clearInterval(keepBrowserAlive));
 
   const timeout = setTimeout(() => {
     log.error("No init message received within 10s");
@@ -3401,6 +3423,10 @@ async function handleBrowserConnection(
   }
 
   async function connectAsr() {
+    await scheduleAsrConnect(connectAsrUngated);
+  }
+
+  async function connectAsrUngated() {
     asrIntentionalClose = false;
     const reqid = randomUUID().replace(/-/g, "");
     asrAudioSeq = 1;
