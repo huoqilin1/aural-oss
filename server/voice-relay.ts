@@ -1834,6 +1834,23 @@ async function handleBrowserConnection(
       if (!finalText.trim()) return;
     }
 
+    // 双保险:无 final 的提升要求 ≥4 字;且与 AI 刚播报内容同源(子串)的
+    // 碎片视为回声丢弃,不进入 LLM 回合。
+    if (reason === "no-final-after-barge-in" && finalText.length < 4) {
+      log.warn(`Barge-in fragment too short (${finalText.length} chars), ignored`);
+      return;
+    }
+    const lastAssistantTurn = [...questionTranscript].reverse().find((e) => e.role === "assistant");
+    const stripPunct = (value: string) => value.replace(/[\s,。.!??、;:????]/g, "");
+    const fragmentNorm = stripPunct(finalText);
+    if (
+      lastAssistantTurn &&
+      fragmentNorm.length >= 2 &&
+      stripPunct(lastAssistantTurn.text).includes(fragmentNorm)
+    ) {
+      log.warn(`Barge-in fragment echoes assistant speech, ignored: "${finalText.slice(0, 40)}"`);
+      return;
+    }
     log.info(`ASR barge-in interim promoted (${reason}): "${finalText.slice(0, 80)}"`);
     if (browserWs.readyState === WebSocket.OPEN) {
       browserWs.send(JSON.stringify({ type: "asr_ended", text: finalText }));

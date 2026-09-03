@@ -955,11 +955,15 @@ export function shouldHoldBargeInInterimForFinal(input: {
   ttsSpeaking: boolean;
   endingInterview: boolean;
 }): boolean {
+  // 2026-09-03 真实候选人事故:外放音箱回声产生 1-3 字 ASR 碎片,每 ~15s
+  // 触发一次假抢话(TTS 被取消→碎片被当成回答→AI 回话→再被回声打断),
+  // 候选人全程"被重复打断"。4 字门槛挡住碎片;真人抢话通常持续出声,
+  // 后续 interim 会累积超过阈值。
   return (
     !input.endingInterview &&
     input.ttsSpeaking &&
     !input.definite &&
-    input.text.trim().length >= 2
+    input.text.trim().length >= 4
   );
 }
 
