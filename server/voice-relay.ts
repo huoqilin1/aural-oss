@@ -1299,6 +1299,10 @@ async function handleBrowserConnection(
   // ── TTS state ──────────────────────────────────────────────────
   let ttsAbortController: AbortController | null = null;
   let ttsSpeaking = false;
+  // Echo rejection must compare against the sentence currently being
+  // spoken, not only the previous turn (incident fragments were echoes
+  // of the in-flight TTS).
+  let currentTtsText = "";
 
   // When true, definite ASR results are dropped (only used for barge-in).
   // Set during LLM generation + TTS playback to prevent echo loops.
@@ -1843,10 +1847,10 @@ async function handleBrowserConnection(
     const lastAssistantTurn = [...questionTranscript].reverse().find((e) => e.role === "assistant");
     const stripPunct = (value: string) => value.replace(/[\s,。.!??、;:????]/g, "");
     const fragmentNorm = stripPunct(finalText);
+    const echoSources = [currentTtsText, lastAssistantTurn ? lastAssistantTurn.text : ""].filter(Boolean);
     if (
-      lastAssistantTurn &&
       fragmentNorm.length >= 2 &&
-      stripPunct(lastAssistantTurn.text).includes(fragmentNorm)
+      echoSources.some((source) => stripPunct(source).includes(fragmentNorm))
     ) {
       log.warn(`Barge-in fragment echoes assistant speech, ignored: "${finalText.slice(0, 40)}"`);
       return;
@@ -2010,6 +2014,7 @@ async function handleBrowserConnection(
    */
   async function speakText(text: string): Promise<boolean> {
     cancelTts();
+    currentTtsText = text;
 
     const abortController = new AbortController();
     ttsAbortController = abortController;
@@ -2110,6 +2115,7 @@ async function handleBrowserConnection(
     }
 
     ttsSpeaking = false;
+    currentTtsText = "";
     if (ttsAbortController === abortController) {
       ttsAbortController = null;
     }
