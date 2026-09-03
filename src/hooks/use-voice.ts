@@ -24,7 +24,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 const log = createLogger("voice");
 const ASR_PROCESSING_ACTIVE_SPEECH_HOLD_MS = 1_600;
-const ASR_PROCESSING_AUDIO_ACTIVITY_RMS_THRESHOLD = 0.018;
+// 王总 2026-09-03：与服务端同步 0.018→0.014，小声说话不再被当沉默而提前亮"思考中"。
+const ASR_PROCESSING_AUDIO_ACTIVITY_RMS_THRESHOLD = 0.014;
 
 export interface InterviewContext {
   interviewId?: string;
@@ -712,21 +713,36 @@ export function useVoice({
             } else {
               lastFinalUserTranscriptRef.current = { text: normalized, at: Date.now() };
               onTranscript?.(finalText, true);
-              trackedMessagesRef.current.push({
-                role: "user",
-                content: finalText,
-                questionId: questionIdAt(eventQuestionIndex),
-              });
-              log.debug(
-                `Tracked USER: "${finalText.slice(0, 60)}..."`
-              );
+              const tracked = trackedMessagesRef.current;
+              const lastTracked = tracked[tracked.length - 1];
+              const lastQId = questionIdAt(eventQuestionIndex);
+              if (lastTracked?.role === "user" && lastTracked.questionId === lastQId) {
+                // 王总 2026-09-03：同一题内相邻 USER 段(中间没有 AI 行)合并成一条完整发言再落库，
+                // 实录不碎、防作弊不把停顿切段误判成重复背稿。
+                lastTracked.content = `${lastTracked.content} ${finalText}`.trim();
+                log.debug(
+                  `Tracked USER (merged): "${lastTracked.content.slice(0, 80)}..."`
+                );
+              } else {
+                tracked.push({
+                  role: "user",
+                  content: finalText,
+                  questionId: lastQId,
+                });
+                log.debug(
+                  `Tracked USER: "${finalText.slice(0, 60)}..."`
+                );
+              }
             }
           }
           asrBufferRef.current = "";
           setState((s) => ({
             ...s,
             userTranscript: finalText && !duplicateSkipped ? finalText : "",
-            isProcessing: Boolean(finalText) && !duplicateSkipped,
+            // 王总 2026-09-03：asr_ended 只代表"这句已提交"，不再点亮"思考中"——
+            // 思考中只在 response_started(服务端真正开始生成回复)时亮，答题停顿不再闪烁。
+            isProcessing:
+              Boolean(finalText) && !duplicateSkipped ? s.isProcessing : false,
           }));
           break;
         }

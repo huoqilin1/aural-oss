@@ -117,7 +117,8 @@ const ASR_RESOURCE_ID = process.env.DOUBAO_ASR_RESOURCE_ID || "volc.seedasr.sauc
 
 /** Volc BigModel endpointing / speech timing bounds (ms). Docs: min 200ms for end window. */
 const ASR_ENDPOINT_MIN_MS = 200;
-const ASR_END_WINDOW_DEFAULT_MS = 2000;
+// 王总 2026-09-03：2000→2800，答题中 2 秒内的想词/断句停顿不再被判"说完"而切段提交。
+const ASR_END_WINDOW_DEFAULT_MS = 2800;
 const ASR_END_WINDOW_MAX_MS = 15_000;
 const ASR_FORCE_SPEECH_DEFAULT_MS = 0;
 const ASR_FORCE_SPEECH_MAX_MS = 60_000;
@@ -160,7 +161,8 @@ const ASR_SHORT_FINAL_COALESCE_MS = Math.max(
   0,
   Math.min(
     ASR_FINAL_COALESCE_MS,
-    Number(process.env.DOUBAO_ASR_SHORT_FINAL_COALESCE_MS) || 500,
+    // 王总 2026-09-03：500→1200，开场短句(≤9 词)停顿后不再 0.5s 就被快速提交成"完整回答"。
+    Number(process.env.DOUBAO_ASR_SHORT_FINAL_COALESCE_MS) || 1_200,
   ),
 );
 const ASR_ACTIVE_SPEECH_HOLD_MS = Math.max(
@@ -188,7 +190,8 @@ const ASR_AUDIO_ACTIVITY_RMS_THRESHOLD = Math.max(
   0,
   Math.min(
     1,
-    Number(process.env.DOUBAO_ASR_AUDIO_ACTIVITY_RMS_THRESHOLD) || 0.018,
+    // 王总 2026-09-03：0.018→0.014，小声/离麦远说话不再被当成沉默而提前切段。
+    Number(process.env.DOUBAO_ASR_AUDIO_ACTIVITY_RMS_THRESHOLD) || 0.014,
   ),
 );
 const ASR_SESSION_MAX_CONTINUOUS_SPEECH_MS = Math.max(
@@ -1720,15 +1723,15 @@ async function handleBrowserConnection(
 
   function shouldHoldPendingAsrFinalForActiveSpeech(finalText: string): boolean {
     if (!finalText || ASR_ACTIVE_SPEECH_HOLD_MS <= 0) return false;
-    const wordCount = finalText.split(/\s+/).filter(Boolean).length;
-    const qualifiesForHold = wordCount >= 12 || finalText.length >= 80;
+    // 王总 2026-09-03：删除"短句(<12词/80字)不受保护"的豁免——答题开头的短段
+    // 停顿后继续讲时最容易被打断；真正答完的人此时麦是静的，不受影响。
     const heldForMs = pendingAsrFinalStartedAt ? Date.now() - pendingAsrFinalStartedAt : 0;
     const recentlyChanged =
       pendingAsrFinalLastChangedAt > 0 &&
       Date.now() - pendingAsrFinalLastChangedAt < ASR_PENDING_FINAL_QUIET_MS;
     const micStillActive = Date.now() - lastUserAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS;
     const holdDecision = decidePendingFinalSpeechHold({
-      qualifiesForHold,
+      qualifiesForHold: true,
       heldForMs,
       maxHoldMs: ASR_MAX_ACTIVE_SPEECH_HOLD_MS,
       recentlyChanged,
