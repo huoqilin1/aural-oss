@@ -117,8 +117,9 @@ const ASR_RESOURCE_ID = process.env.DOUBAO_ASR_RESOURCE_ID || "volc.seedasr.sauc
 
 /** Volc BigModel endpointing / speech timing bounds (ms). Docs: min 200ms for end window. */
 const ASR_ENDPOINT_MIN_MS = 200;
-// 王总 2026-09-03：2000→2800，答题中 2 秒内的想词/断句停顿不再被判"说完"而切段提交。
-const ASR_END_WINDOW_DEFAULT_MS = 2800;
+// 王总 2026-09-03 拍板：说完判定 = 平台上限 15000ms（时间短会打扰候选人说话），
+// 想词/断句停顿 ≤15 秒都不判"说完"；env DOUBAO_ASR_END_WINDOW_MS 可再覆盖。
+const ASR_END_WINDOW_DEFAULT_MS = 15_000;
 const ASR_END_WINDOW_MAX_MS = 15_000;
 const ASR_FORCE_SPEECH_DEFAULT_MS = 0;
 const ASR_FORCE_SPEECH_MAX_MS = 60_000;
@@ -1369,12 +1370,13 @@ async function handleBrowserConnection(
   const RECRUITMENT_INLINE_FOLLOW_UP_LIMIT = 2;
   const RECRUITMENT_FINAL_FOLLOW_UP_LIMIT = 1;
   // 候选人静默处理(王总 2026-08-21):不再"静默即切题"——
-  // 静默 45s 先问"答完了吗?",开口即留在本题;确认后再切题;
+  // 静默先问"答完了吗?",开口即留在本题;确认后再切题;
   // 连续多题零回答(AFK/人已离开)提前诚实收尾,不空转不烧算力。
+  // 2026-09-03 王总拍板:首问从 45s 提前到 30s(env SILENCE_ASK_SECONDS 可覆盖)。
   let silenceAutoSkipTimer: ReturnType<typeof setTimeout> | null = null;
   const SILENCE_ASK_MS = Math.max(
     10_000,
-    (Number(process.env.SILENCE_ASK_SECONDS) || 45) * 1000,
+    (Number(process.env.SILENCE_ASK_SECONDS) || 30) * 1000,
   );
   const SILENCE_CONFIRM_MS = Math.max(
     5_000,
