@@ -210,6 +210,17 @@ const ASR_STUCK_TEXT_ROTATE_MS = Math.max(
 );
 const ASR_RECENT_FINAL_REPLAY_TTL_MS = 90_000;
 const ASR_RECENT_FINAL_REPLAY_MIN_UNITS = 8;
+// 开讲前门控(王总 2026-09-03 第5项):回复已生成但用户仍在说话时,最多等
+// USER_SPEAK_GATE_MAX_WAIT_MS(期间有新内容则放弃本次),确认静默
+// USER_SPEAK_GATE_QUIET_MS 后才开讲,杜绝"AI 抢在候选人答题中开口"。
+const USER_SPEAK_GATE_QUIET_MS = Math.max(
+  0,
+  Number(process.env.VOICE_SPEAK_GATE_QUIET_MS) || 700,
+);
+const USER_SPEAK_GATE_MAX_WAIT_MS = Math.max(
+  0,
+  Number(process.env.VOICE_SPEAK_GATE_MAX_WAIT_MS) || 2_500,
+);
 
 /**
  * Volc split-noise finals often arrive soon after the assistant line is committed; after this much
@@ -2972,6 +2983,28 @@ async function handleBrowserConnection(
     return null;
   }
 
+  /**
+   * 第5项开讲门控:true=用户已静默可开讲;false=用户仍在说或等待期间新内容已进来
+   * (suppressed/queued),调用方应放弃本次预生成回复,由响应周期收尾统一冲刷处理。
+   */
+  async function waitForUserQuietBeforeSpeaking(): Promise<boolean> {
+    const deadline = Date.now() + USER_SPEAK_GATE_MAX_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (
+        queuedUserUtteranceWhileGenerating.trim() ||
+        pendingUserUtteranceWhileSuppressed.trim()
+      ) {
+        return false;
+      }
+      if (Date.now() - lastUserAudioActivityAt >= USER_SPEAK_GATE_QUIET_MS) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    log.info("User still speaking past speak-gate window — deferring prepared response");
+    return false;
+  }
+
   async function handleUserUtterance(
     userText: string,
     options?: { allowRecentReplay?: boolean; isChatInput?: boolean },
@@ -3135,6 +3168,12 @@ async function handleBrowserConnection(
         }
 
         if (spokenText) {
+          if (!(await waitForUserQuietBeforeSpeaking())) {
+            log.info(
+              `Deferring prepared response — candidate still speaking: "${spokenText.slice(0, 60)}..."`,
+            );
+            return;
+          }
           log.info("Sent controlled response via TTS");
           await speakAndHandle(spokenText, {
             pendingTransition: shouldTransition,
