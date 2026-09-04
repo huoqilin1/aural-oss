@@ -25,9 +25,12 @@ const generationInFlight = new Map<string, number>();
 const GENERATION_LOCK_TTL_MS = 180_000;
 
 // 招聘一面出题:深度思考模型,按岗位+简历提前出题。现场追问走 relay-llm,不在这里。
-// 模型策略(王总 2026-08-20):DeepSeek 固定写死"深思考"变体(三档中锁深思考,禁止漂移);
-// 其余模型追最新版。环境变量 RECRUIT_GENERATOR_MODEL 可覆盖,升级改 env 即生效。核查日期 2026-08-20。
-const RECRUIT_GENERATOR_MODEL = process.env.RECRUIT_GENERATOR_MODEL?.trim() || "deepseek-v4-pro";
+// 模型策略(王总 2026-09-05):主线改 GLM-5.3(Coding Plan 包月额度,已付费最省钱);
+// 失败时由 generateWithFallback 秒级切 KIMI → DeepSeek → 豆包。
+// 环境变量 RECRUIT_GENERATOR_MODEL 可覆盖,升级改 env 即生效。核查日期 2026-09-05。
+const RECRUIT_GENERATOR_MODEL =
+  process.env.RECRUIT_GENERATOR_MODEL?.trim() ||
+  (process.env.ZHIPU_API_KEY ? "glm-5.3" : "deepseek-v4-pro");
 // The fixed opening is already usable.  The deep generator (deepseek-v4-pro,
 // up to 6000 tokens) routinely needs 10-20s; an 8s budget made it lose the
 // race by milliseconds and every session fell back to the blueprint

@@ -8,6 +8,33 @@ export interface FallbackGenerationResult extends LLMResponse {
   provider: string;
 }
 
+/** 单次尝试超时(ms):失败或超时立即切下一家,保证秒级切换。 */
+const ATTEMPT_TIMEOUT_MS = (() => {
+  const value = Number(process.env.FALLBACK_ATTEMPT_TIMEOUT_MS);
+  return Number.isFinite(value) && value > 0 ? value : 30_000;
+})();
+
+async function withAttemptTimeout<T>(
+  promise: Promise<T>,
+  model: string,
+  timeoutMs: number
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${model}: attempt timeout after ${timeoutMs}ms`)),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function resolveProvider(model: string): LLMProvider | null {
   // 火山方舟的推理接入点 ID(ep-xxx) 不是模型名，按 provider 解析。
   if (model.startsWith("ep-")) {
@@ -44,7 +71,11 @@ export async function generateWithFallback(
       continue;
     }
     try {
-      const response = await provider.generateResponse({ ...params, model });
+      const response = await withAttemptTimeout(
+        provider.generateResponse({ ...params, model }),
+        model,
+        ATTEMPT_TIMEOUT_MS
+      );
       return { ...response, model, provider: provider.id };
     } catch (err) {
       failures.push(

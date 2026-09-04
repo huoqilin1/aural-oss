@@ -8,7 +8,7 @@ const FIXED_TEMPERATURE_MODELS = new Set(["kimi-k2.5"]);
 export class KimiProvider implements LLMProvider {
   id = "kimi";
   name = "Moonshot Kimi";
-  models = ["kimi-k2.5", "kimi-k2-turbo", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"];
+  models = ["kimi-k2.7-code", "kimi-k2.5", "kimi-k2-turbo", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"];
   defaultModel = "moonshot-v1-8k";
 
   isConfigured(): boolean {

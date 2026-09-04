@@ -44,16 +44,19 @@ export function listProviders(): LLMProvider[] {
   return Array.from(providers.values());
 }
 
-/** Model used for post-interview report generation. */
-export const REPORT_MODEL = process.env.DEEPSEEK_API_KEY
-  ? "deepseek-chat"
-  : process.env.OPENAI_API_KEY
-    ? "gpt-4o"
-    : process.env.GEMINI_API_KEY
-      ? "gemini-3.1-flash-lite"
-      : process.env.KIMI_API_KEY
-        ? "kimi-k2.5"
-        : "MiniMax-M2.1-lightning";
+/** Model used for post-interview report generation.
+ *  王总 2026-09-05:主线 GLM-5.3(Coding Plan 包月额度),失败走 REPORT_FALLBACK_CHAIN。 */
+export const REPORT_MODEL = process.env.ZHIPU_API_KEY
+  ? "glm-5.3"
+  : process.env.DEEPSEEK_API_KEY
+    ? "deepseek-chat"
+    : process.env.OPENAI_API_KEY
+      ? "gpt-4o"
+      : process.env.GEMINI_API_KEY
+        ? "gemini-3.1-flash-lite"
+        : process.env.KIMI_API_KEY
+          ? "kimi-k2.5"
+          : "MiniMax-M2.1-lightning";
 
 /** Model used for interview question generation and refinement. */
 export const GENERATOR_MODEL = process.env.DEEPSEEK_API_KEY
@@ -68,22 +71,20 @@ export const GENERATOR_MODEL = process.env.DEEPSEEK_API_KEY
 
 export const PRIMARY_GENERATOR_MODEL = GENERATOR_MODEL;
 
-const ZHIPU_FALLBACK_MODEL = process.env.ZHIPU_MODEL?.trim() || "glm-4.6";
 const DOUBAO_FALLBACK_MODEL =
   process.env.DOUBAO_LLM_MODEL?.trim() || "doubao-1.5-pro-32k";
 
-/** 招聘出题主模型失败后的备用链：智谱 GLM(Coding Plan 包月额度) → KIMI → 豆包方舟。
- *  GLM 排第一是因为套餐额度已付费,优先消耗包月积分最省钱。
- *  只保留已配置 key 的模型；最终兜底是出题路由内的确定性模板题。 */
+/** 招聘出题主模型(GLM)失败后的备用链:王总 2026-09-05 定 KIMI 2.7 → DeepSeek → 豆包方舟。
+ *  单次尝试 30 秒超时即切下一家(秒级切换);最终兜底是出题路由内的确定性模板题。 */
 export const RECRUIT_GENERATOR_FALLBACK_CHAIN = [
-  ...(process.env.ZHIPU_API_KEY ? [ZHIPU_FALLBACK_MODEL] : []),
-  ...(process.env.KIMI_API_KEY ? ["kimi-k2.5"] : []),
+  ...(process.env.KIMI_API_KEY ? ["kimi-k2.7-code"] : []),
+  ...(process.env.DEEPSEEK_API_KEY ? ["deepseek-v4-pro"] : []),
   ...(process.env.DOUBAO_LLM_API_KEY ? [DOUBAO_FALLBACK_MODEL] : []),
 ];
 
-/** 评分/报告主模型失败后的备用链。 */
+/** 评分/报告主模型(GLM)失败后的备用链。 */
 export const REPORT_FALLBACK_CHAIN = [
-  ...(process.env.ZHIPU_API_KEY ? [ZHIPU_FALLBACK_MODEL] : []),
-  ...(process.env.KIMI_API_KEY ? ["kimi-k2.5"] : []),
+  ...(process.env.KIMI_API_KEY ? ["kimi-k2.7-code"] : []),
+  ...(process.env.DEEPSEEK_API_KEY ? ["deepseek-chat"] : []),
   ...(process.env.DOUBAO_LLM_API_KEY ? [DOUBAO_FALLBACK_MODEL] : []),
 ];
