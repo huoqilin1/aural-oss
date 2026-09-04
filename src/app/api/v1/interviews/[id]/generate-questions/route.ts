@@ -354,10 +354,9 @@ export async function POST(
         {
           messages,
           temperature: 0.5,
-          // 思考型模型会把输出预算全部烧在隐藏思考通道、正文为空（实测
-          // tokens_out=2048/8000 两次打满且无 JSON）。出题的"深度"已编码在
-          // 提示词（维度骨架+专家范例+难度要求），此处显式关思考直出 JSON。
-          maxTokens: 4000,
+          // 思考型模型会把输出预算烧在隐藏思考通道(实测 tokens_out 打满且无 JSON)。
+          // 主线和备选里都有思考型模型:预算提到 8000,给思考通道之外的正文留足空间。
+          maxTokens: 8000,
           disableThinking: true,
         },
       ),

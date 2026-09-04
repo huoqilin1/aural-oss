@@ -2,13 +2,13 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import { type LLMProvider, type GenerationParams, type LLMResponse, type LLMMessage } from "../types";
 
-// kimi-k2.5 does not allow temperature to be set — the API rejects custom values.
-const FIXED_TEMPERATURE_MODELS = new Set(["kimi-k2.5"]);
+// kimi-k2.5 / kimi-k3 是思考型模型 — API 拒绝自定义 temperature。
+const FIXED_TEMPERATURE_MODELS = new Set(["kimi-k2.5", "kimi-k3"]);
 
 export class KimiProvider implements LLMProvider {
   id = "kimi";
   name = "Moonshot Kimi";
-  models = ["kimi-k2.7-code", "kimi-k2.5", "kimi-k2-turbo", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"];
+  models = ["kimi-k3", "kimi-k2.7-code", "kimi-k2.5", "kimi-k2-turbo", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"];
   defaultModel = "moonshot-v1-8k";
 
   isConfigured(): boolean {

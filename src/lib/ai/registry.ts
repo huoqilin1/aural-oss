@@ -74,17 +74,17 @@ export const PRIMARY_GENERATOR_MODEL = GENERATOR_MODEL;
 const DOUBAO_FALLBACK_MODEL =
   process.env.DOUBAO_LLM_MODEL?.trim() || "doubao-1.5-pro-32k";
 
-/** 招聘出题主模型(GLM)失败后的备用链:王总 2026-09-05 定 KIMI 2.7 → DeepSeek → 豆包方舟。
+/** 招聘出题主模型(GLM)失败后的备用链:王总 2026-09-05 定 KIMI k3 → DeepSeek → 豆包方舟。
  *  单次尝试 30 秒超时即切下一家(秒级切换);最终兜底是出题路由内的确定性模板题。 */
 export const RECRUIT_GENERATOR_FALLBACK_CHAIN = [
-  ...(process.env.KIMI_API_KEY ? ["kimi-k2.7-code"] : []),
+  ...(process.env.KIMI_API_KEY ? ["kimi-k3"] : []),
   ...(process.env.DEEPSEEK_API_KEY ? ["deepseek-v4-pro"] : []),
   ...(process.env.DOUBAO_LLM_API_KEY ? [DOUBAO_FALLBACK_MODEL] : []),
 ];
 
 /** 评分/报告主模型(GLM)失败后的备用链。 */
 export const REPORT_FALLBACK_CHAIN = [
-  ...(process.env.KIMI_API_KEY ? ["kimi-k2.7-code"] : []),
+  ...(process.env.KIMI_API_KEY ? ["kimi-k3"] : []),
   ...(process.env.DEEPSEEK_API_KEY ? ["deepseek-chat"] : []),
   ...(process.env.DOUBAO_LLM_API_KEY ? [DOUBAO_FALLBACK_MODEL] : []),
 ];
