@@ -72,17 +72,18 @@ const ZHIPU_FALLBACK_MODEL = process.env.ZHIPU_MODEL?.trim() || "glm-4.6";
 const DOUBAO_FALLBACK_MODEL =
   process.env.DOUBAO_LLM_MODEL?.trim() || "doubao-1.5-pro-32k";
 
-/** 招聘出题主模型失败后的备用链：KIMI → 智谱 GLM → 豆包方舟。
+/** 招聘出题主模型失败后的备用链：智谱 GLM(Coding Plan 包月额度) → KIMI → 豆包方舟。
+ *  GLM 排第一是因为套餐额度已付费,优先消耗包月积分最省钱。
  *  只保留已配置 key 的模型；最终兜底是出题路由内的确定性模板题。 */
 export const RECRUIT_GENERATOR_FALLBACK_CHAIN = [
-  ...(process.env.KIMI_API_KEY ? ["kimi-k2.5"] : []),
   ...(process.env.ZHIPU_API_KEY ? [ZHIPU_FALLBACK_MODEL] : []),
+  ...(process.env.KIMI_API_KEY ? ["kimi-k2.5"] : []),
   ...(process.env.DOUBAO_LLM_API_KEY ? [DOUBAO_FALLBACK_MODEL] : []),
 ];
 
 /** 评分/报告主模型失败后的备用链。 */
 export const REPORT_FALLBACK_CHAIN = [
-  ...(process.env.KIMI_API_KEY ? ["kimi-k2.5"] : []),
   ...(process.env.ZHIPU_API_KEY ? [ZHIPU_FALLBACK_MODEL] : []),
+  ...(process.env.KIMI_API_KEY ? ["kimi-k2.5"] : []),
   ...(process.env.DOUBAO_LLM_API_KEY ? [DOUBAO_FALLBACK_MODEL] : []),
 ];
