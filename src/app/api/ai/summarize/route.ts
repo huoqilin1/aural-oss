@@ -2,7 +2,8 @@ import { svgDataUrlToPng } from "@/lib/ai/convert-svg";
 import { extractJson } from "@/lib/ai/extract-json";
 import { createLogger } from "@/lib/logger";
 import { buildSummaryPrompt } from "@/lib/ai/prompts/summary";
-import { getProvider, REPORT_MODEL } from "@/lib/ai/registry";
+import { generateWithFallback } from "@/lib/ai/fallback";
+import { REPORT_MODEL, REPORT_FALLBACK_CHAIN } from "@/lib/ai/registry";
 import { getAuthUser } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
@@ -80,7 +81,7 @@ export async function POST(req: Request) {
       }))
       .filter((s) => s.code.trim().length > 0);
 
-    const provider = getProvider(REPORT_MODEL);
+    const reportChain = [REPORT_MODEL, ...REPORT_FALLBACK_CHAIN];
     const textMessages = msgs
       .filter((m) => m.contentType === "TEXT")
       .map((m) => ({ role: m.role, content: m.content }));
@@ -101,11 +102,10 @@ export async function POST(req: Request) {
 
     let response;
     try {
-      response = await provider.generateResponse({
+      response = await generateWithFallback(reportChain, {
         messages,
         temperature: 0.3,
         maxTokens: 8192,
-        model: REPORT_MODEL,
       });
     } catch (err) {
       const isVisionError =
@@ -129,11 +129,10 @@ export async function POST(req: Request) {
           textOnlyDrawings,
           codeInput,
         );
-        response = await provider.generateResponse({
+        response = await generateWithFallback(reportChain, {
           messages: fallbackMessages,
           temperature: 0.3,
           maxTokens: 8192,
-          model: REPORT_MODEL,
         });
       } else {
         throw err;

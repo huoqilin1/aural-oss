@@ -5,7 +5,8 @@ import {
   type ApiKeyAuth,
 } from "@/lib/api-key-auth";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { getProvider } from "@/lib/ai/registry";
+import { generateWithFallback } from "@/lib/ai/fallback";
+import { RECRUIT_GENERATOR_FALLBACK_CHAIN } from "@/lib/ai/registry";
 import { createLogger } from "@/lib/logger";
 import {
   ensureExplicitRecruitAnchorLead,
@@ -24,9 +25,12 @@ const generationInFlight = new Map<string, number>();
 const GENERATION_LOCK_TTL_MS = 180_000;
 
 // 招聘一面出题:深度思考模型,按岗位+简历提前出题。现场追问走 relay-llm,不在这里。
-// 模型策略(王总 2026-08-20):DeepSeek 固定写死"深思考"变体(三档中锁深思考,禁止漂移);
-// 其余模型追最新版。环境变量 RECRUIT_GENERATOR_MODEL 可覆盖,升级改 env 即生效。核查日期 2026-08-20。
-const RECRUIT_GENERATOR_MODEL = process.env.RECRUIT_GENERATOR_MODEL?.trim() || "deepseek-v4-pro";
+// 模型策略(王总 2026-09-05):主线改 GLM-5.3(Coding Plan 包月额度,已付费最省钱);
+// 失败时由 generateWithFallback 秒级切 KIMI → DeepSeek → 豆包。
+// 环境变量 RECRUIT_GENERATOR_MODEL 可覆盖,升级改 env 即生效。核查日期 2026-09-05。
+const RECRUIT_GENERATOR_MODEL =
+  process.env.RECRUIT_GENERATOR_MODEL?.trim() ||
+  (process.env.ZHIPU_API_KEY ? "glm-5.3" : "deepseek-v4-pro");
 // The fixed opening is already usable.  The deep generator (deepseek-v4-pro,
 // up to 6000 tokens) routinely needs 10-20s; an 8s budget made it lose the
 // race by milliseconds and every session fell back to the blueprint
@@ -331,7 +335,6 @@ export async function POST(
   try {
   let generated: { questions?: Array<{ text?: unknown; dimension?: unknown }> };
   try {
-    const provider = getProvider(RECRUIT_GENERATOR_MODEL);
     const messages = buildRecruitPrompt({
       jobTitle,
       jobDescription,
@@ -346,19 +349,20 @@ export async function POST(
       roleType,
     });
     const resp = await withGenerationBudget(
-      provider.generateResponse({
-        messages,
-        temperature: 0.5,
-        // 思考型模型会把输出预算全部烧在隐藏思考通道、正文为空（实测
-        // tokens_out=2048/8000 两次打满且无 JSON）。出题的"深度"已编码在
-        // 提示词（维度骨架+专家范例+难度要求），此处显式关思考直出 JSON。
-        maxTokens: 4000,
-        disableThinking: true,
-        model: RECRUIT_GENERATOR_MODEL,
-      }),
+      generateWithFallback(
+        [RECRUIT_GENERATOR_MODEL, ...RECRUIT_GENERATOR_FALLBACK_CHAIN],
+        {
+          messages,
+          temperature: 0.5,
+          // 思考型模型会把输出预算烧在隐藏思考通道(实测 tokens_out 打满且无 JSON)。
+          // 主线和备选里都有思考型模型:预算提到 8000,给思考通道之外的正文留足空间。
+          maxTokens: 8000,
+          disableThinking: true,
+        },
+      ),
     );
     log.info(
-      `generate-questions usage: model=${RECRUIT_GENERATOR_MODEL} ` +
+      `generate-questions usage: model=${resp.model} provider=${resp.provider} ` +
       `tokens_in=${resp.usage?.promptTokens ?? "?"} ` +
       `tokens_out=${resp.usage?.completionTokens ?? "?"} ` +
       `budget_ms=${GENERATION_BUDGET_MS}`,

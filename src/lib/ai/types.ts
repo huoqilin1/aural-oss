@@ -31,6 +31,8 @@ export interface LLMProvider {
   name: string;
   models: string[];
   defaultModel: string;
+  /** 报告该 provider 的 key 是否已配置；未实现的视为已配置。 */
+  isConfigured?(): boolean;
   generateResponse(params: GenerationParams & { model?: string }): Promise<LLMResponse>;
   streamResponse(
     params: GenerationParams & { model?: string }
