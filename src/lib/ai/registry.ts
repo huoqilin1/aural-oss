@@ -4,6 +4,8 @@ import { GeminiProvider } from "./providers/gemini";
 import { KimiProvider } from "./providers/kimi";
 import { MinimaxProvider } from "./providers/minimax";
 import { DeepSeekProvider } from "./providers/deepseek";
+import { ZhipuProvider } from "./providers/zhipu";
+import { DoubaoProvider } from "./providers/doubao";
 
 const providers = new Map<string, LLMProvider>();
 
@@ -16,6 +18,8 @@ registerProvider(new OpenAIProvider());
 registerProvider(new GeminiProvider());
 registerProvider(new KimiProvider());
 registerProvider(new MinimaxProvider());
+registerProvider(new ZhipuProvider());
+registerProvider(new DoubaoProvider());
 
 /** Resolve the right provider for a given model name or provider id. */
 export function getProvider(idOrModel?: string | null): LLMProvider {
@@ -64,8 +68,21 @@ export const GENERATOR_MODEL = process.env.DEEPSEEK_API_KEY
 
 export const PRIMARY_GENERATOR_MODEL = GENERATOR_MODEL;
 
-export const FALLBACK_GENERATOR_MODEL = process.env.KIMI_API_KEY
-  ? "moonshot-v1-8k"
-  : process.env.MINIMAX_API_KEY
-    ? "MiniMax-M2.1-lightning"
-    : GENERATOR_MODEL;
+const ZHIPU_FALLBACK_MODEL = process.env.ZHIPU_MODEL?.trim() || "glm-4.6";
+const DOUBAO_FALLBACK_MODEL =
+  process.env.DOUBAO_LLM_MODEL?.trim() || "doubao-1.5-pro-32k";
+
+/** 招聘出题主模型失败后的备用链：KIMI → 智谱 GLM → 豆包方舟。
+ *  只保留已配置 key 的模型；最终兜底是出题路由内的确定性模板题。 */
+export const RECRUIT_GENERATOR_FALLBACK_CHAIN = [
+  ...(process.env.KIMI_API_KEY ? ["kimi-k2.5"] : []),
+  ...(process.env.ZHIPU_API_KEY ? [ZHIPU_FALLBACK_MODEL] : []),
+  ...(process.env.DOUBAO_LLM_API_KEY ? [DOUBAO_FALLBACK_MODEL] : []),
+];
+
+/** 评分/报告主模型失败后的备用链。 */
+export const REPORT_FALLBACK_CHAIN = [
+  ...(process.env.KIMI_API_KEY ? ["kimi-k2.5"] : []),
+  ...(process.env.ZHIPU_API_KEY ? [ZHIPU_FALLBACK_MODEL] : []),
+  ...(process.env.DOUBAO_LLM_API_KEY ? [DOUBAO_FALLBACK_MODEL] : []),
+];

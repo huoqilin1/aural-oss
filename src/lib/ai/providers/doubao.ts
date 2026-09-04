@@ -1,25 +1,32 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
-import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
-import { type LLMProvider, type GenerationParams, type LLMResponse, type LLMMessage } from "../types";
+import {
+  type LLMProvider,
+  type GenerationParams,
+  type LLMResponse,
+  type LLMMessage,
+} from "../types";
 
-export class DeepSeekProvider implements LLMProvider {
-  id = "deepseek";
-  name = "DeepSeek";
-  models = ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro", "deepseek-v4-flash"];
-  defaultModel = "deepseek-chat";
-
-  isConfigured(): boolean {
-    return Boolean(process.env.DEEPSEEK_API_KEY);
-  }
+export class DoubaoProvider implements LLMProvider {
+  id = "doubao";
+  name = "豆包 (火山方舟)";
+  // 火山方舟既接受推理接入点 ID(ep-xxx)也接受模型名；链上实际使用的
+  // 模型由 DOUBAO_LLM_MODEL 环境变量指定。
+  models = ["doubao-1.5-pro-32k", "doubao-1.5-lite-32k", "doubao-seed-1.6"];
+  defaultModel = "doubao-1.5-pro-32k";
 
   private client: OpenAI;
 
   constructor() {
     this.client = new OpenAI({
-      apiKey: process.env.DEEPSEEK_API_KEY ?? "",
-      baseURL: process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com",
+      apiKey: process.env.DOUBAO_LLM_API_KEY ?? "",
+      baseURL:
+        process.env.DOUBAO_LLM_BASE_URL ?? "https://ark.cn-beijing.volces.com/api/v3",
     });
+  }
+
+  isConfigured(): boolean {
+    return Boolean(process.env.DOUBAO_LLM_API_KEY);
   }
 
   private toOpenAIMessages(messages: LLMMessage[]): ChatCompletionMessageParam[] {
@@ -29,18 +36,16 @@ export class DeepSeekProvider implements LLMProvider {
     })) as ChatCompletionMessageParam[];
   }
 
-  async generateResponse(params: GenerationParams & { model?: string }): Promise<LLMResponse> {
+  async generateResponse(
+    params: GenerationParams & { model?: string }
+  ): Promise<LLMResponse> {
     const model = params.model ?? this.defaultModel;
-    const request = {
+    const response = await this.client.chat.completions.create({
       model,
       messages: this.toOpenAIMessages(params.messages),
       temperature: params.temperature ?? 0.7,
       max_tokens: params.maxTokens ?? 2048,
-      ...(params.disableThinking
-        ? { thinking: { type: "disabled" } }
-        : {}),
-    } as unknown as ChatCompletionCreateParamsNonStreaming;
-    const response = await this.client.chat.completions.create(request);
+    });
     const choice = response.choices[0];
     return {
       content: choice.message.content ?? "",
@@ -55,7 +60,9 @@ export class DeepSeekProvider implements LLMProvider {
     };
   }
 
-  async *streamResponse(params: GenerationParams & { model?: string }): AsyncIterable<string> {
+  async *streamResponse(
+    params: GenerationParams & { model?: string }
+  ): AsyncIterable<string> {
     const model = params.model ?? this.defaultModel;
     const stream = await this.client.chat.completions.create({
       model,

@@ -1,7 +1,8 @@
 import { svgDataUrlToPng } from "@/lib/ai/convert-svg";
 import { extractJson } from "@/lib/ai/extract-json";
 import { buildSummaryPrompt } from "@/lib/ai/prompts/summary";
-import { getProvider, REPORT_MODEL } from "@/lib/ai/registry";
+import { generateWithFallback } from "@/lib/ai/fallback";
+import { REPORT_MODEL, REPORT_FALLBACK_CHAIN } from "@/lib/ai/registry";
 import { createLogger } from "@/lib/logger";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
@@ -198,7 +199,7 @@ async function generateSummary(
       })
       .filter((s) => s.code.trim().length > 0);
 
-    const provider = getProvider(REPORT_MODEL);
+    const reportChain = [REPORT_MODEL, ...REPORT_FALLBACK_CHAIN];
     const textMessages = allMessages
       .filter((m) => m.contentType === "TEXT")
       .map((m) => ({
@@ -222,11 +223,10 @@ async function generateSummary(
 
     let response;
     try {
-      response = await provider.generateResponse({
+      response = await generateWithFallback(reportChain, {
         messages: promptMessages,
         temperature: 0.3,
         maxTokens: 8192,
-        model: REPORT_MODEL,
       });
     } catch (err) {
       const isVisionError =
@@ -250,11 +250,10 @@ async function generateSummary(
           textOnlyDrawings,
           codeInput,
         );
-        response = await provider.generateResponse({
+        response = await generateWithFallback(reportChain, {
           messages: fallbackMessages,
           temperature: 0.3,
           maxTokens: 8192,
-          model: REPORT_MODEL,
         });
       } else {
         throw err;

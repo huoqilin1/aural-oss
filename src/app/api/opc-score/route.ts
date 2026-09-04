@@ -1,5 +1,6 @@
 import { extractJson } from "@/lib/ai/extract-json";
-import { getProvider, REPORT_MODEL } from "@/lib/ai/registry";
+import { generateWithFallback } from "@/lib/ai/fallback";
+import { REPORT_MODEL, REPORT_FALLBACK_CHAIN } from "@/lib/ai/registry";
 import { createLogger } from "@/lib/logger";
 import { NextResponse } from "next/server";
 import * as fs from "fs";
@@ -65,16 +66,17 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "no transcript" }, { status: 400 });
     }
     const convo = transcript.map((m: { role: string; content: string }) => (m.role === "user" ? "OPC：" : "面试官：") + m.content).join("\n");
-    const provider = getProvider(REPORT_MODEL);
-    const response = await provider.generateResponse({
-      messages: [
-        { role: "system", content: SYSTEM },
-        { role: "user", content: "这是完整对话(多元化评测，OPC 可能跨多个领域)。请按四大板块打分，尽量多地抽出具体细技能点(每条带 0-100 分)，输出 JSON：\n\n" + convo },
-      ],
-      temperature: 0.2,
-      maxTokens: 4096,
-      model: REPORT_MODEL,
-    });
+    const response = await generateWithFallback(
+      [REPORT_MODEL, ...REPORT_FALLBACK_CHAIN],
+      {
+        messages: [
+          { role: "system", content: SYSTEM },
+          { role: "user", content: "这是完整对话(多元化评测，OPC 可能跨多个领域)。请按四大板块打分，尽量多地抽出具体细技能点(每条带 0-100 分)，输出 JSON：\n\n" + convo },
+        ],
+        temperature: 0.2,
+        maxTokens: 4096,
+      },
+    );
     let report: any;
     try { report = extractJson(response.content); } catch { return NextResponse.json({ error: "parse-failed", raw: response.content.slice(0, 400) }, { status: 500 }); }
     try {

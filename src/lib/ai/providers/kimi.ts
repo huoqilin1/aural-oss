@@ -11,6 +11,10 @@ export class KimiProvider implements LLMProvider {
   models = ["kimi-k2.5", "kimi-k2-turbo", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"];
   defaultModel = "moonshot-v1-8k";
 
+  isConfigured(): boolean {
+    return Boolean(process.env.KIMI_API_KEY);
+  }
+
   private client: OpenAI;
 
   constructor() {

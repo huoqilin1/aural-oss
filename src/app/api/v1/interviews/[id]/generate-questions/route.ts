@@ -5,7 +5,8 @@ import {
   type ApiKeyAuth,
 } from "@/lib/api-key-auth";
 import { supabaseAdmin } from "@/lib/supabase/admin";
-import { getProvider } from "@/lib/ai/registry";
+import { generateWithFallback } from "@/lib/ai/fallback";
+import { RECRUIT_GENERATOR_FALLBACK_CHAIN } from "@/lib/ai/registry";
 import { createLogger } from "@/lib/logger";
 import {
   ensureExplicitRecruitAnchorLead,
@@ -331,7 +332,6 @@ export async function POST(
   try {
   let generated: { questions?: Array<{ text?: unknown; dimension?: unknown }> };
   try {
-    const provider = getProvider(RECRUIT_GENERATOR_MODEL);
     const messages = buildRecruitPrompt({
       jobTitle,
       jobDescription,
@@ -346,19 +346,21 @@ export async function POST(
       roleType,
     });
     const resp = await withGenerationBudget(
-      provider.generateResponse({
-        messages,
-        temperature: 0.5,
-        // 思考型模型会把输出预算全部烧在隐藏思考通道、正文为空（实测
-        // tokens_out=2048/8000 两次打满且无 JSON）。出题的"深度"已编码在
-        // 提示词（维度骨架+专家范例+难度要求），此处显式关思考直出 JSON。
-        maxTokens: 4000,
-        disableThinking: true,
-        model: RECRUIT_GENERATOR_MODEL,
-      }),
+      generateWithFallback(
+        [RECRUIT_GENERATOR_MODEL, ...RECRUIT_GENERATOR_FALLBACK_CHAIN],
+        {
+          messages,
+          temperature: 0.5,
+          // 思考型模型会把输出预算全部烧在隐藏思考通道、正文为空（实测
+          // tokens_out=2048/8000 两次打满且无 JSON）。出题的"深度"已编码在
+          // 提示词（维度骨架+专家范例+难度要求），此处显式关思考直出 JSON。
+          maxTokens: 4000,
+          disableThinking: true,
+        },
+      ),
     );
     log.info(
-      `generate-questions usage: model=${RECRUIT_GENERATOR_MODEL} ` +
+      `generate-questions usage: model=${resp.model} provider=${resp.provider} ` +
       `tokens_in=${resp.usage?.promptTokens ?? "?"} ` +
       `tokens_out=${resp.usage?.completionTokens ?? "?"} ` +
       `budget_ms=${GENERATION_BUDGET_MS}`,
