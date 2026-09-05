@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
+import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
 import { type LLMProvider, type GenerationParams, type LLMResponse, type LLMMessage } from "../types";
 
 // kimi-k2.5 / kimi-k3 是思考型模型 — API 拒绝自定义 temperature。
@@ -35,14 +36,20 @@ export class KimiProvider implements LLMProvider {
     params: GenerationParams & { model?: string }
   ): Promise<LLMResponse> {
     const model = params.model ?? this.defaultModel;
-    const response = await this.client.chat.completions.create({
+    const request = {
       model,
       messages: this.toOpenAIMessages(params.messages),
       ...(FIXED_TEMPERATURE_MODELS.has(model)
         ? {}
         : { temperature: params.temperature ?? 0.7 }),
       ...(params.maxTokens !== undefined ? { max_tokens: params.maxTokens } : {}),
-    });
+      // kimi-k3 默认深度思考,出题时会烧掉输出预算并超过切换超时上限;
+      // 实测支持 OpenAI 风格关思考,直出 JSON 仅需数秒。
+      ...(params.disableThinking && model === "kimi-k3"
+        ? { thinking: { type: "disabled" } }
+        : {}),
+    } as unknown as ChatCompletionCreateParamsNonStreaming;
+    const response = await this.client.chat.completions.create(request);
 
     const choice = response.choices[0];
     return {
