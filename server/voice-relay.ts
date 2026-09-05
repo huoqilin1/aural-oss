@@ -1310,6 +1310,8 @@ async function handleBrowserConnection(
   let suppressAsrResults = false;
   /** Definite user text captured while suppressAsrResults (flushed after reopenAsr). */
   let pendingUserUtteranceWhileSuppressed = "";
+  /** Deferred text is a longer revision of an already-recorded answer; flush may forward it past the duplicate gate. */
+  let pendingUserUtteranceIsRevision = false;
   /** User final arrived while handleUserUtterance was already running (asr_ended already sent to client). */
   let queuedUserUtteranceWhileGenerating = "";
   let queuedUserUtteranceIsChat = false;
@@ -2930,6 +2932,41 @@ async function handleBrowserConnection(
     return text.replace(/\s+/g, " ").trim().toLowerCase();
   }
 
+  function lastRecordedUserText(transcript: TranscriptEntry[]): string {
+    for (let i = transcript.length - 1; i >= 0; i--) {
+      if (transcript[i].role === "user") return transcript[i].text;
+    }
+    return "";
+  }
+
+  /**
+   * A suppressed final that repeats an already-recorded answer can still be a
+   * more complete revision (the recorded line was often a short early final).
+   * Return the merged text only when it is meaningfully longer, so the flush
+   * can forward the revision to the app instead of dropping the fuller answer.
+   */
+  function longerRevisionOfAnsweredAnswer(
+    recordedBefore: string,
+    incoming: string,
+  ): string | null {
+    const recorded = (recordedBefore || "").trim();
+    const incomingTrimmed = incoming.trim();
+    if (recorded.length < 4 || incomingTrimmed.length <= recorded.length + 4) {
+      return null;
+    }
+    if (!shouldSuppressAnsweredAsrFinal(recorded, incomingTrimmed)) {
+      return null;
+    }
+    const merged = mergeAsrSegments(recorded, incomingTrimmed);
+    if (
+      normalizeUserUtteranceKey(merged).length
+      > normalizeUserUtteranceKey(recorded).length + 4
+    ) {
+      return merged;
+    }
+    return null;
+  }
+
   /**
    * Volcengine sometimes emits a second definite for the same utterance while ASR results are
    * suppressed (or two finals race before generatingResponse is set). If we already stored this
@@ -3405,12 +3442,14 @@ async function handleBrowserConnection(
 
       const flushed = pendingUserUtteranceWhileSuppressed.trim();
       pendingUserUtteranceWhileSuppressed = "";
+      const flushedIsRevision = pendingUserUtteranceIsRevision;
+      pendingUserUtteranceIsRevision = false;
       if (
         flushed &&
         !interviewDone &&
         browserWs.readyState === WebSocket.OPEN &&
         !looksLikeAssistantPlaybackEcho(flushed, questionTranscript) &&
-        !isDuplicateUserFinal(flushed) &&
+        (!isDuplicateUserFinal(flushed) || flushedIsRevision) &&
         !shouldIgnoreVolcContinuationFragment(
           flushed,
           questionTranscript,
@@ -3634,6 +3673,7 @@ async function handleBrowserConnection(
                 ) {
                   continue;
                 }
+                const recordedBefore = lastRecordedUserText(questionTranscript);
                 const prevPending = pendingUserUtteranceWhileSuppressed.trim();
                 const incomingDup = isDuplicateUserFinal(suppressedFinal);
                 const sameAsPending =
@@ -3652,10 +3692,20 @@ async function handleBrowserConnection(
                   );
                 } else if (!incomingDup || sameAsPending) {
                   pendingUserUtteranceWhileSuppressed = suppressedFinal;
+                  pendingUserUtteranceIsRevision = false;
                 } else if (!prevPending) {
-                  log.info(
-                    `Suppressed ASR final skipped (already answered, nothing deferred): "${suppressedFinal.slice(0, 72)}..."`,
-                  );
+                  const revision = longerRevisionOfAnsweredAnswer(recordedBefore, suppressedFinal);
+                  if (revision) {
+                    pendingUserUtteranceWhileSuppressed = revision;
+                    pendingUserUtteranceIsRevision = true;
+                    log.info(
+                      `Deferring longer answer revision (recorded ${(recordedBefore || "").trim().length} -> ${revision.trim().length} chars): "${revision.slice(0, 72)}..."`,
+                    );
+                  } else {
+                    log.info(
+                      `Suppressed ASR final skipped (already answered, nothing deferred): "${suppressedFinal.slice(0, 72)}..."`,
+                    );
+                  }
                 }
               }
             }
