@@ -380,7 +380,14 @@ async function callOpenAICompatible(
       const configured = Number(options?.deep
         ? process.env.FALLBACK_DEEP_ATTEMPT_TIMEOUT_MS
         : process.env.FALLBACK_ATTEMPT_TIMEOUT_MS);
-      return Number.isSafeInteger(configured) && configured > 0 ? configured : (options?.deep ? 180_000 : 30_000);
+      // These routes retain provider-default reasoning. A 30-second deadline
+      // cut off all four providers during a real Q8 turn before any final text
+      // arrived. Keep reasoning and the one-attempt rule; use the same bounded
+      // transport allowance as deep generation unless fast mode is explicit.
+      const reasoningEnabled = process.env.RELAY_LLM_DISABLE_THINKING?.trim() !== "1";
+      return Number.isSafeInteger(configured) && configured > 0
+        ? configured
+        : (options?.deep || reasoningEnabled ? 180_000 : 30_000);
     })()),
   });
 

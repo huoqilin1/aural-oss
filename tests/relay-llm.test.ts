@@ -55,7 +55,7 @@ afterEach(() => {
   relayLlm.resetRelayLlmCacheForTests();
 });
 
-test("background generation receives its own transport deadline while live turns stay bounded", async () => {
+test("reasoning live turns and background generation retain a bounded reasoning deadline", async () => {
   const originalFetch = globalThis.fetch;
   const originalTimeout = AbortSignal.timeout;
   const deadlines: number[] = [];
@@ -63,11 +63,45 @@ test("background generation receives its own transport deadline while live turns
   globalThis.fetch = (async () => Response.json({ choices: [{ message: { content: "valid" } }] })) as typeof fetch;
   try {
     await withEnvAsync({ ZHIPU_API_KEY: "z-test", HR_MODEL_CONTROL_URL: undefined,
-      FALLBACK_ATTEMPT_TIMEOUT_MS: undefined, FALLBACK_DEEP_ATTEMPT_TIMEOUT_MS: undefined }, async () => {
+      FALLBACK_ATTEMPT_TIMEOUT_MS: undefined, FALLBACK_DEEP_ATTEMPT_TIMEOUT_MS: undefined,
+      RELAY_LLM_DISABLE_THINKING: undefined }, async () => {
       const route = { primary: "zhipu" as const, fallbacks: ["kimi", "deepseek", "doubao"] as const };
       await relayLlm.callRelayLLM("synthetic", undefined, { stage: "voice_turn" }, { ...route, fallbacks: [...route.fallbacks] });
       await relayLlm.callRelayLLM("synthetic", undefined, { stage: "interview.generate_questions" }, { ...route, fallbacks: [...route.fallbacks] });
-      assert.deepEqual(deadlines, [30_000, 180_000]);
+      assert.deepEqual(deadlines, [180_000, 180_000]);
+      process.env.RELAY_LLM_DISABLE_THINKING = "1";
+      await relayLlm.callRelayLLM("synthetic", undefined, { stage: "voice_turn" }, { ...route, fallbacks: [...route.fallbacks] });
+      assert.equal(deadlines.at(-1), 30_000);
+      process.env.FALLBACK_ATTEMPT_TIMEOUT_MS = "45000";
+      await relayLlm.callRelayLLM("synthetic", undefined, { stage: "voice_turn" }, { ...route, fallbacks: [...route.fallbacks] });
+      assert.equal(deadlines.at(-1), 45_000);
+    });
+  } finally { globalThis.fetch = originalFetch; AbortSignal.timeout = originalTimeout; }
+});
+
+test("a live reasoning response beyond the old deadline completes without a fallback or token cap", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = AbortSignal.timeout;
+  let calls = 0;
+  // Scale elapsed time, preserving the actual AbortSignal / transport race.
+  AbortSignal.timeout = ms => originalTimeout(Math.max(1, Math.round(ms / 1000)));
+  globalThis.fetch = (async (_input, init) => {
+    calls++;
+    const body = JSON.parse(String(init?.body));
+    assert.equal(body.max_tokens, undefined);
+    assert.equal(body.thinking, undefined);
+    return await new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(Response.json({ choices: [{ message: { content: "valid completed response" } }] })), 60);
+      init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(init.signal?.reason); }, { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    await withEnvAsync({ ZHIPU_API_KEY: "z-test", HR_MODEL_CONTROL_URL: undefined,
+      RELAY_LLM_DISABLE_THINKING: undefined, FALLBACK_ATTEMPT_TIMEOUT_MS: undefined }, async () => {
+      const result = await relayLlm.callRelayLLM("synthetic", undefined, { stage: "voice_turn" },
+        { primary: "zhipu", fallbacks: ["kimi", "deepseek", "doubao"] });
+      assert.equal(result, "valid completed response");
+      assert.equal(calls, 1);
     });
   } finally { globalThis.fetch = originalFetch; AbortSignal.timeout = originalTimeout; }
 });
