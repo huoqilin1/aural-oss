@@ -78,7 +78,12 @@ if (-not $PreflightOnly) {
     $env:OPRUN_USER_APPROVED = "YES"
     $env:OPRUN_APPROVED_ACTION = "deploy"
     $env:OPRUN_APPROVED_SHA = $sha
-    & wsl.exe -d $WslDistribution -- bash -lc "cd $(Convert-ToBashLiteral (Convert-ToWslPath $repoRoot)) && OPRUN_USER_APPROVED=YES OPRUN_APPROVED_ACTION=deploy OPRUN_APPROVED_SHA=$sha bash .githooks/pre-deploy"
+    # Worktree .git files contain Windows paths. Run the unchanged Git gate
+    # with Git for Windows; WSL Git cannot resolve those worktree pointers.
+    $gitExe = (Get-Command git -ErrorAction Stop).Source
+    $gitBash = [System.IO.Path]::GetFullPath((Join-Path (Split-Path $gitExe -Parent) "..\bin\bash.exe"))
+    if (-not (Test-Path -LiteralPath $gitBash)) { throw "需要 Git for Windows Bash 执行仓库 pre-deploy 钩子" }
+    & $gitBash ($hook.Replace('\', '/'))
     if ($LASTEXITCODE -ne 0) { throw "仓库 pre-deploy 钩子未通过" }
     Write-Host "门禁=仓库 pre-deploy 钩子 PASS"
   }
