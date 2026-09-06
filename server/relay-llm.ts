@@ -377,8 +377,10 @@ async function callOpenAICompatible(
     // Abort the actual transport, not just a Promise.race that leaves billing
     // and an in-flight request running while the fallback starts.
     signal: AbortSignal.timeout((() => {
-      const configured = Number(process.env.FALLBACK_ATTEMPT_TIMEOUT_MS);
-      return Number.isSafeInteger(configured) && configured > 0 ? configured : 30_000;
+      const configured = Number(options?.deep
+        ? process.env.FALLBACK_DEEP_ATTEMPT_TIMEOUT_MS
+        : process.env.FALLBACK_ATTEMPT_TIMEOUT_MS);
+      return Number.isSafeInteger(configured) && configured > 0 ? configured : (options?.deep ? 180_000 : 30_000);
     })()),
   });
 
@@ -449,6 +451,7 @@ export async function generateGovernedText(identity: TaskIdentity, messages: Arr
 }
 
 async function callRelayRequest(prompt: string, maxTokens?: number, meta?: RelayLlmCallMeta, route?: RelayLlmRoute, options?: RequestOptions): Promise<string> {
+  options = { ...options, deep: options?.deep || meta?.stage === "interview.generate_questions" };
   const chain = getEndpointChain(route).map(endpoint => options?.deep && endpoint.provider === "deepseek"
     ? { ...endpoint, model: "deepseek-v4-pro" } : endpoint);
   logConfig(chain);

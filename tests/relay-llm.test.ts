@@ -55,6 +55,23 @@ afterEach(() => {
   relayLlm.resetRelayLlmCacheForTests();
 });
 
+test("background generation receives its own transport deadline while live turns stay bounded", async () => {
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = AbortSignal.timeout;
+  const deadlines: number[] = [];
+  AbortSignal.timeout = ms => { deadlines.push(ms); return originalTimeout(ms); };
+  globalThis.fetch = (async () => Response.json({ choices: [{ message: { content: "valid" } }] })) as typeof fetch;
+  try {
+    await withEnvAsync({ ZHIPU_API_KEY: "z-test", HR_MODEL_CONTROL_URL: undefined,
+      FALLBACK_ATTEMPT_TIMEOUT_MS: undefined, FALLBACK_DEEP_ATTEMPT_TIMEOUT_MS: undefined }, async () => {
+      const route = { primary: "zhipu" as const, fallbacks: ["kimi", "deepseek", "doubao"] as const };
+      await relayLlm.callRelayLLM("synthetic", undefined, { stage: "voice_turn" }, { ...route, fallbacks: [...route.fallbacks] });
+      await relayLlm.callRelayLLM("synthetic", undefined, { stage: "interview.generate_questions" }, { ...route, fallbacks: [...route.fallbacks] });
+      assert.deepEqual(deadlines, [30_000, 180_000]);
+    });
+  } finally { globalThis.fetch = originalFetch; AbortSignal.timeout = originalTimeout; }
+});
+
 test("four-provider request counts empty JSON responses once and includes missing configuration", async () => {
   const originalFetch = globalThis.fetch;
   const calls: string[] = [];
