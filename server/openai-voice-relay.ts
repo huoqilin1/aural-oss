@@ -12,6 +12,7 @@ import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
 import { createLogger } from "../src/lib/logger";
+import { hasEightScoredAnswers, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
 import {
   isProgressiveOpeningOnly,
   mergeExpandedQuestionSet,
@@ -26,6 +27,7 @@ import {
 import {
     failClosedRecruitmentResumeBudget,
     isRecruitmentConversationControl,
+    hasRecruitmentAnswer,
     isUserSkipRequest,
     mergePersistedRecruitmentFollowUpBudget,
     readPersistedRecruitmentFollowUpBudget,
@@ -965,7 +967,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       lastCommittedUserAnswerAt = Date.now();
       userCommittedWordsThisQuestion += text.trim().split(/\s+/).length;
       if (isOprunRecruitmentInterview) {
-        if (!isRecruitmentConversationControl(text) && !isUserSkipRequest(text)) {
+        if (hasRecruitmentAnswer(text)) {
           recruitmentAnswersByQuestion.set(
             currentQuestionIndex,
             (recruitmentAnswersByQuestion.get(currentQuestionIndex) || 0) + 1,
@@ -1174,6 +1176,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   function recruitmentMustAdvanceAfterAnswer(committedText: string): boolean {
     if (!isOprunRecruitmentInterview) return false;
     if (isRecruitmentConversationControl(committedText)) return false;
+    if (recruitmentSpeechIntent(committedText) === "answer_done") return true;
     const questionFollowUps = recruitmentFollowUpsByQuestion.get(currentQuestionIndex) || 0;
     if (currentQuestionIndex === 0) return true;
     if (currentQuestionIndex >= 1 && currentQuestionIndex <= 6) {
@@ -1208,6 +1211,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     }
     const metricEvidenceFollowUp = (
       isOprunRecruitmentInterview
+      && recruitmentSpeechIntent(committedText) !== "answer_done"
       && (recruitmentFollowUpsByQuestion.get(currentQuestionIndex) || 0) === 0
       && recruitmentInlineFollowUpsUsed < 2
     )
@@ -1537,12 +1541,23 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     }));
   }
 
+  function recruitmentCanComplete(): boolean {
+    return !isOprunRecruitmentInterview || hasEightScoredAnswers(
+      Array.from(recruitmentAnswersByQuestion).filter(([, count]) => count > 0).map(([index]) => index),
+    );
+  }
+
   function markInterviewComplete(reason: string) {
     if (!pendingInterviewComplete) return;
     pendingInterviewComplete = false;
     if (interviewCompleteTimer) {
       clearTimeout(interviewCompleteTimer);
       interviewCompleteTimer = null;
+    }
+    if (!recruitmentCanComplete()) {
+      interviewDone = false;
+      send({ type: "transition_rejected", reason: "scored_answers_pending", message: "我们还有问题没聊完，请继续回答当前题。" });
+      return;
     }
     send({ type: "interview_complete" });
     log.info(`Interview complete (${reason})`);
@@ -1914,6 +1929,14 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
                 break;
               }
 
+              if (newIdx >= sortedQuestions.length && !recruitmentCanComplete()) {
+                pendingFunctionCalls.push({
+                  callId: msg.call_id, name: msg.name,
+                  args: "Rejected: not all eight scored answers are present. Continue the current question. Do not say farewell.",
+                });
+                break;
+              }
+
               clearPendingTransition();
 
               let result: string;
@@ -1997,6 +2020,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
             modelIsSpeaking = false;
             const inferredFarewell =
               !pendingInterviewComplete &&
+              recruitmentCanComplete() &&
               !isProgressiveOpeningOnly(sortedQuestions) &&
               currentQuestionIndex >= sortedQuestions.length - 1 &&
               !!capturedModelText &&
@@ -2435,6 +2459,10 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       return false;
     }
     pendingProgressiveTransition = null;
+    if (targetIdx >= sortedQuestions.length && !isProgressiveOpeningOnly(sortedQuestions) && !recruitmentCanComplete()) {
+      rejectManualAdvance("answer_required", requestId);
+      return false;
+    }
     clearPendingTransition();
     clearQuestionPrompt();
     cancelOngoingResponse();
@@ -2580,7 +2608,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       return true;
     }
 
-    if (isFastNextRequest(userText) || isUserSkipRequest(userText)) {
+    if ((isFastNextRequest(userText) || isUserSkipRequest(userText, { isRecruitmentInterview: isOprunRecruitmentInterview }))
+      && (!isOprunRecruitmentInterview || !hasRecruitmentAnswer(userText))) {
       if (
         isOprunRecruitmentInterview
         && currentQuestionIndex < 8

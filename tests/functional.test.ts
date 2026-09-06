@@ -634,12 +634,19 @@ test("a late ASR final from the previous question is not saved twice", async () 
   await context.close();
 });
 
-test("recruitment completes only after eight distinct scored answers", async () => {
+for (const scenario of ["recruitment-eight-question", "recruitment-eight-question-premature", "recruitment-eight-question-save-retry"]) {
+test(`recruitment completes only after eight distinct scored answers: ${scenario}`, async () => {
   const context = await browser.newContext({ locale: "zh-CN" });
   const page = await context.newPage();
   const saveBodies: unknown[] = [];
+  let failedCompletion = false;
+  let recordingWrites = 0;
+  await page.route("**/api/session/upload", async (route: Route) => {
+    await route.fulfill({ status:200, contentType:"application/json", body:JSON.stringify({url:`${baseUrl}/functional-recording.webm`}) });
+  });
 
   await page.route("**/api/trpc/session.saveRecording", async (route: Route) => {
+    recordingWrites++;
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -647,7 +654,13 @@ test("recruitment completes only after eight distinct scored answers", async () 
     });
   });
   await page.route("**/api/voice/save", async (route: Route) => {
-    saveBodies.push(JSON.parse(route.request().postData() || "{}"));
+    const body = JSON.parse(route.request().postData() || "{}");
+    saveBodies.push(body);
+    if (scenario.endsWith("save-retry") && body.complete && !failedCompletion) {
+      failedCompletion = true;
+      await route.fulfill({ status:409, contentType:"application/json", body:JSON.stringify({error:"本地故障注入：回答保存尚未同步"}) });
+      return;
+    }
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -656,7 +669,7 @@ test("recruitment completes only after eight distinct scored answers", async () 
   });
 
   await page.goto(
-    `${baseUrl}/functional-tests/voice?language=zh-CN&scenario=recruitment-eight-question`,
+    `${baseUrl}/functional-tests/voice?language=zh-CN&scenario=${scenario}`,
   );
   await waitForCondition(
     async () => (await page.getByTestId("harness-ready").textContent()) === "true",
@@ -679,6 +692,16 @@ test("recruitment completes only after eight distinct scored answers", async () 
     await input.press("Enter");
     await page.getByRole("button", { name: "关闭文字输入", exact: true }).click();
 
+    if (question === 2 && scenario.endsWith("premature")) {
+      await waitForCondition(async () => (await readRelayConnections(page)).length >= 2, 15_000,
+        "Premature completion must reconnect the terminal relay without candidate interaction");
+      assert.equal(await page.getByTestId("parent-complete").textContent(), "false");
+      assert.equal(recordingWrites, 0, "Camera recording must remain active");
+      assert.equal(saveBodies.some((body) => (body as { complete?:boolean }).complete), false);
+      const initMessages=(await readRelaySentMessages(page)).filter((m)=>m.type === "init");
+      assert.equal((initMessages.at(-1)?.context as { startQuestionIndex:number }).startQuestionIndex, 1);
+    }
+
     if (question < 8) {
       const nextButton = page.locator(
         '[data-tour="voice-status"]:has-text("本题答完了就点这里") button:has-text("下一题")',
@@ -692,6 +715,18 @@ test("recruitment completes only after eight distinct scored answers", async () 
     }
   }
 
+  if (scenario.endsWith("save-retry")) {
+    await waitForCondition(async () => failedCompletion && (await readRelayConnections(page)).length >= 2, 15_000);
+    assert.equal(await page.getByTestId("parent-complete").textContent(), "false");
+    assert.equal(recordingWrites, 0, "Failed completion must not stop or upload the recording");
+    assert.equal(await page.locator("video").evaluateAll((videos) => videos.some((video) => {
+      const stream=(video as HTMLVideoElement).srcObject as MediaStream | null;
+      return stream?.getVideoTracks().some((track)=>track.readyState === "live");
+    })), true);
+    await page.locator('[data-tour="voice-progress"] button').nth(2).click();
+    await page.getByRole("button", { name:"结束面试", exact:true }).click();
+  }
+
   await waitForCondition(
     async () => (await page.getByTestId("parent-complete").textContent()) === "true",
     15_000,
@@ -703,10 +738,12 @@ test("recruitment completes only after eight distinct scored answers", async () 
   const completionWrites = saveBodies.filter(
     (body) => (body as { complete?: boolean }).complete === true,
   );
-  assert.equal(completionWrites.length, 1);
+  assert.equal(completionWrites.length, scenario.endsWith("save-retry") ? 2 : 1);
+  assert.equal(recordingWrites, 1);
 
   await context.close();
 });
+}
 
 test("voice completion shows the farewell, waits for final save, and only then notifies the parent", async () => {
   const context = await browser.newContext({ locale: "en-US" });

@@ -1399,14 +1399,15 @@ export function VoiceInterface({
     endingRef.current = true;
     setIsSaving(true);
 
-    voice.stopListening();
-
     try {
       await Promise.allSettled([
         withTimeout(saveAllDrawings(), 5000, "save drawings"),
         withTimeout(saveAllCodeSnippets(), 5000, "save code snippets"),
       ]);
 
+      // Validate and durably save all eight answers before stopping media.
+      // A rejected completion must leave the current interview usable.
+      const completed = await voice.disconnect(async () => {
       try {
         // Stop recording and save artifacts (video mode)
         if (videoMode && recording.isRecording) {
@@ -1431,8 +1432,7 @@ export function VoiceInterface({
       } catch (err) {
         console.error("[voice] Failed to save recording:", err);
       }
-
-      const completed = await withTimeout(voice.disconnect(), 8000, "voice disconnect");
+      });
       if (!completed) throw new Error("面试记录尚未完整保存，请稍后重试结束面试");
       setLocallyCompleted(true);
       onComplete?.();

@@ -24,6 +24,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
+import { hasEightScoredAnswers, recruitmentQ1Transition } from "../src/lib/voice/recruitment-turn-policy";
 import type { RelayLlmRoute } from "../src/lib/relay-llm-route";
 import {
   isProgressiveOpeningOnly,
@@ -45,6 +46,8 @@ import {
     readPersistedRecruitmentFollowUpBudget,
     shouldConsumeFollowUpBudget,
     isRecruitmentConversationControl,
+    hasRecruitmentAnswer,
+    restoreRecruitmentQuestionTranscript,
     recruitmentMetricEvidenceFollowUp,
     isUserEndRequest,
     isUserSkipRequest,
@@ -1358,6 +1361,7 @@ async function handleBrowserConnection(
   let generatingResponse = false;
   let userTurnsOnCurrentQ = 0;
   const isOprunRecruitmentInterview = ctx.title.includes("数君招聘");
+  const recruitmentAnsweredQuestions = new Set<number>();
   // Recruitment interviews may use up to three concise verification follow-ups:
   // Q2-Q7 share up to two in-place checks and Q8 may use one optional final
   // cross-question verification. No individual scored question may receive
@@ -1654,6 +1658,10 @@ async function handleBrowserConnection(
     );
     totalFollowUpsUsed = recruitmentInlineFollowUpsUsed + recruitmentFinalFollowUpsUsed;
     userTurnsOnCurrentQ = new Map(summary.answersByQuestion).get(currentQuestionIndex) || 0;
+    for (const [index, count] of summary.answersByQuestion) {
+      if (count > 0) recruitmentAnsweredQuestions.add(index);
+    }
+    questionTranscript = restoreRecruitmentQuestionTranscript(sortedQuestions[currentQuestionIndex]?.id, data ?? []);
     log.info(
       `Hydrated recruitment resume budget: inline=${recruitmentInlineFollowUpsUsed}/2 `
       + `final=${recruitmentFinalFollowUpsUsed}/1 current_turns=${userTurnsOnCurrentQ}`,
@@ -2140,6 +2148,7 @@ async function handleBrowserConnection(
     pendingFarewell?: boolean;
     pendingFinalTimeout?: boolean;
   }): Promise<void> {
+    if (options?.pendingFarewell && rejectIncompleteRecruitmentEnd()) return;
     const completed = await speakText(text);
     if (!completed) return;
 
@@ -2195,8 +2204,23 @@ async function handleBrowserConnection(
 
   // ── Interview lifecycle ────────────────────────────────────────
 
+  function rejectIncompleteRecruitmentEnd(): boolean {
+    if (!isOprunRecruitmentInterview || hasEightScoredAnswers(recruitmentAnsweredQuestions)) return false;
+    endingInterview = false;
+    awaitingFinalResponse = false;
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({
+        type: "transition_rejected", reason: "scored_answers_pending",
+        message: isZh ? "我们还有问题没聊完，请继续回答当前题。" : "We still have questions to discuss. Please continue with the current question.",
+        questionIndex: currentQuestionIndex,
+      }));
+    }
+    return true;
+  }
+
   function endInterview() {
     if (interviewDone) return;
+    if (rejectIncompleteRecruitmentEnd()) return;
     if (!ownsPersistedSession()) {
       interviewDone = true;
       return;
@@ -2230,6 +2254,7 @@ async function handleBrowserConnection(
 
   function queueFarewellAndEnd(reason: string) {
     if (interviewDone || endingInterview) return;
+    if (rejectIncompleteRecruitmentEnd()) return;
     if (!ownsPersistedSession()) {
       interviewDone = true;
       endingInterview = true;
@@ -2356,13 +2381,23 @@ async function handleBrowserConnection(
     const forceSkip = opts?.forceSkip ?? false;
     const currentQ = sortedQuestions[currentQuestionIndex];
     const history = PROMPTS.formatHistory(questionTranscript, isZh);
-    const agentCtx = await buildAgentContext();
     const latestAnsweredExchange = getLatestAnsweredExchange();
     const isRecruitmentControlTurn = Boolean(
       isOprunRecruitmentInterview
       && latestAnsweredExchange?.participant
       && isRecruitmentConversationControl(latestAnsweredExchange.participant),
     );
+
+    const q1Transition = recruitmentQ1Transition({
+      recruitment: isOprunRecruitmentInterview, questionIndex: currentQuestionIndex,
+      hasAnswer: recruitmentAnsweredQuestions.has(currentQuestionIndex),
+      controlOnly: isRecruitmentControlTurn, isZh,
+    });
+    if (q1Transition) return q1Transition;
+    if (isOprunRecruitmentInterview && forceSkip && recruitmentAnsweredQuestions.has(currentQuestionIndex)) {
+      return isZh ? "好的，谢谢你的分享。 [NEXT]" : "Thanks for sharing. [NEXT]";
+    }
+    const agentCtx = await buildAgentContext();
 
     const qOpts = currentQ.options as { options: string[]; allowMultiple?: boolean } | null | undefined;
     let choiceInstruction = "";
@@ -2703,8 +2738,7 @@ async function handleBrowserConnection(
     }
     const hasSubstantiveRecruitmentAnswer = questionTranscript.some(
       (entry) => entry.role === "user"
-        && !isRecruitmentConversationControl(entry.text)
-        && !isUserSkipRequest(entry.text),
+        && hasRecruitmentAnswer(entry.text),
     );
     if (
       isOprunRecruitmentInterview
@@ -3037,8 +3071,8 @@ async function handleBrowserConnection(
     if (!userText || isTransitioning || interviewDone) return;
 
     // Fast-path commands work even during TTS/response generation
-    if (isUserEndRequest(userText)) {
-      queueFarewellAndEnd(`Explicit interview end request: "${userText.slice(0, 80)}"`);
+    if (isUserEndRequest(userText, { isRecruitmentInterview: isOprunRecruitmentInterview })) {
+      queueFarewellAndEnd("Explicit interview end request");
       return;
     }
     if (isFastPrevRequest(userText) || isUserPrevRequest(userText)) {
@@ -3046,7 +3080,8 @@ async function handleBrowserConnection(
       handlePreviousTransition().catch(log.error);
       return;
     }
-    if (isFastNextRequest(userText)) {
+    if (isFastNextRequest(userText) || (isOprunRecruitmentInterview
+      && isUserSkipRequest(userText, { isRecruitmentInterview: true }) && !hasRecruitmentAnswer(userText))) {
       log.info("Fast-path: next question request");
       handleTransition().catch(log.error);
       return;
@@ -3118,9 +3153,10 @@ async function handleBrowserConnection(
         questionTranscript.push({ role: "user", text: userText });
         if (
           !isOprunRecruitmentInterview
-          || !isRecruitmentConversationControl(userText)
+          || hasRecruitmentAnswer(userText)
         ) {
           userTurnsOnCurrentQ++;
+          if (isOprunRecruitmentInterview) recruitmentAnsweredQuestions.add(currentQuestionIndex);
         }
       }
       lastResponseWasCorrection = false;
@@ -3143,7 +3179,7 @@ async function handleBrowserConnection(
         return;
       }
 
-      const userWantsSkip = isUserSkipRequest(userText);
+      const userWantsSkip = isUserSkipRequest(userText, { isRecruitmentInterview: isOprunRecruitmentInterview });
       if (userWantsSkip) log.info(`User skip intent detected: "${userText.slice(0, 80)}"`);
 
       // Suppress ASR result processing during the response cycle.

@@ -26,7 +26,9 @@ type FunctionalScenarioId =
   | "recruitment-entry"
   | "recruitment-auto-retry"
   | "recruitment-incomplete"
-  | "recruitment-eight-question";
+  | "recruitment-eight-question"
+  | "recruitment-eight-question-premature"
+  | "recruitment-eight-question-save-retry";
 
 declare global {
   interface Window {
@@ -335,6 +337,14 @@ const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
       events: [{ type: "close", delay: 30 }],
     },
   },
+  "recruitment-eight-question-premature": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+    "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
+  },
+  "recruitment-eight-question-save-retry": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+    "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
+  },
 };
 
 function installFunctionalRelayMocks(
@@ -420,6 +430,7 @@ function installFunctionalRelayMocks(
     onclose: ((event?: unknown) => void) | null = null;
     private scheduled = false;
     private currentQuestionIndex = 0;
+    private interviewEnded = false;
 
     constructor(url: string | URL) {
       this.url = String(url);
@@ -465,7 +476,7 @@ function installFunctionalRelayMocks(
 
       if (
         parsed?.type === "text_input"
-        && window.__functionalScenarioId === "recruitment-eight-question"
+        && window.__functionalScenarioId?.startsWith("recruitment-eight-question")
       ) {
         const finalQuestion = this.currentQuestionIndex === 7;
         setTimeout(() => {
@@ -498,11 +509,21 @@ function installFunctionalRelayMocks(
             });
           }, 140);
         }
+        if (window.__functionalScenarioId === "recruitment-eight-question-premature"
+          && this.currentQuestionIndex === 1
+          && !window.sessionStorage.getItem("__functionalPrematureSent")) {
+          window.sessionStorage.setItem("__functionalPrematureSent", "1");
+          setTimeout(() => {
+            this.interviewEnded = true;
+            this.onmessage?.({ data: JSON.stringify({ type: "interview_complete" }) });
+          }, 140);
+        }
       }
 
       if (parsed?.type === "next_question") {
+        if (this.interviewEnded) return;
         const recruitmentFlow =
-          window.__functionalScenarioId === "recruitment-eight-question";
+          window.__functionalScenarioId?.startsWith("recruitment-eight-question");
         const nextIndex = recruitmentFlow
           ? Math.min(this.currentQuestionIndex + 1, 7)
           : 1;
@@ -528,6 +549,7 @@ function installFunctionalRelayMocks(
       }
 
       if (parsed?.type === "init" && !this.scheduled) {
+        this.currentQuestionIndex = Number((parsed.context as { startQuestionIndex?: number })?.startQuestionIndex || 0);
         this.scheduled = true;
         for (const event of this.events) {
           setTimeout(() => {
@@ -607,6 +629,7 @@ export function VoiceFunctionalHarness({
     "请说明一次协作分歧以及你如何处理。",
     "请说明求职动机、岗位预期和稳定性。",
   ].map((text, order) => ({
+    id: `functional-question-${order}`,
     text,
     type: "OPEN_ENDED",
     description: "Recruitment functional test prompt",

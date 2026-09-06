@@ -1,3 +1,5 @@
+import { recruitmentAnswerContent, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
+
 // Strong: self-referencing commands unlikely to appear as topic descriptions.
 const STRONG_END_PATTERNS = [
   /(?:please|let'?s|I\s+want\s+to|can\s+we)\s+end(?:\s+(?:the\s+)?interview)?/i,
@@ -120,7 +122,8 @@ export function evaluateTranscriptManualAdvance({
   return { allowed: true };
 }
 
-export function isUserEndRequest(text: string): boolean {
+export function isUserEndRequest(text: string, context?: { isRecruitmentInterview: boolean }): boolean {
+  if (context?.isRecruitmentInterview) return recruitmentSpeechIntent(text) === "end_interview";
   const trimmed = text.trim();
   if (!trimmed) return false;
 
@@ -155,8 +158,9 @@ function extractTrailingSentence(text: string): string {
   return trimmed;
 }
 
-export function isUserSkipRequest(text: string): boolean {
-  if (isUserEndRequest(text)) return false;
+export function isUserSkipRequest(text: string, context?: { isRecruitmentInterview: boolean }): boolean {
+  if (isUserEndRequest(text, context)) return false;
+  if (context?.isRecruitmentInterview && recruitmentSpeechIntent(text) === "answer_done") return true;
   return USER_SKIP_PATTERNS.some((pattern) => pattern.test(text));
 }
 
@@ -184,11 +188,29 @@ export function isRecruitmentConversationControl(text: string): boolean {
   return controlSignals.some((pattern) => pattern.test(normalized));
 }
 
+export function hasRecruitmentAnswer(text: string): boolean {
+  const content = recruitmentAnswerContent(text);
+  return Boolean(content) && !isRecruitmentConversationControl(content)
+    && !isUserEndRequest(content, { isRecruitmentInterview: true })
+    && !isUserSkipRequest(content);
+}
+
 export interface PersistedRecruitmentMessage {
   role: string;
   questionId?: string | null;
   content?: string | null;
   timestamp?: string | null;
+}
+
+/** Restore the actual current-question conversation, not just budget counters. */
+export function restoreRecruitmentQuestionTranscript(questionId: string | undefined, messages: readonly PersistedRecruitmentMessage[]): Array<{ role: "user" | "assistant"; text: string }> {
+  if (!questionId) return [];
+  return messages.flatMap((message) => {
+    const role = message.role.toLowerCase();
+    const text = message.content?.trim();
+    if (message.questionId !== questionId || !text || (role !== "user" && role !== "assistant")) return [];
+    return [{ role, text }];
+  });
 }
 
 export interface RecruitmentResumeBudget {
@@ -334,7 +356,7 @@ export function summarizeRecruitmentResumeBudget(
     const role = message.role.toUpperCase();
     if (role === "USER") {
       state.rawUserCount += 1;
-      if (isRecruitmentConversationControl(content) || isUserSkipRequest(content)) {
+      if (!hasRecruitmentAnswer(content)) {
         state.lastUserWasControl = true;
         states.set(questionIndex, state);
         continue;

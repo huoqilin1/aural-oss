@@ -964,12 +964,24 @@ export function useVoice({
             isTransitioning: false,
             transitionDirection: null,
             transitionRejectionCount: s.transitionRejectionCount + 1,
+            isProcessing: false,
           }));
           onError?.(message);
           break;
         }
 
         case "interview_complete":
+          if (interviewContext.title.includes("数君招聘")
+            && (currentQuestionIndexRef.current < 7 || !questionIdAt(7))) {
+            log.warn("Rejected premature recruitment completion; preserving media and answers");
+            interruptPlayback();
+            setState((s) => ({ ...s, isInterviewComplete: false, isProcessing: false, isTransitioning: false, transitionDirection: null }));
+            // Persist the current answer before reconnecting to a relay that
+            // has already entered its terminal state. Keep camera/mic alive.
+            void saveProgress(currentQuestionIndexRef.current, currentQuestionIndexRef.current)
+              .then(() => relayConnectorRef.current?.failover("premature recruitment completion"));
+            break;
+          }
           log.info("Interview complete, wrapping up");
           setState((s) => ({ ...s, isInterviewComplete: true }));
           break;
@@ -1030,6 +1042,8 @@ export function useVoice({
       onQuestionChange,
       onTranscript,
       saveProgress,
+      interviewContext.title,
+      questionIdAt,
       startAsrProcessingTimer,
     ]
   );
@@ -1226,37 +1240,45 @@ export function useVoice({
       `Saving ${messages.length} remaining messages and completing session`
     );
 
-    const response = await fetch("/api/voice/save", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId,
-        messages,
-        complete: true,
-      }),
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { error?: string };
-      throw new Error(body.error || `Voice completion failed with HTTP ${response.status}`);
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => abortController.abort(), 8_000);
+    try {
+      const response = await fetch("/api/voice/save", {
+        method: "POST",
+        signal: abortController.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, messages, complete: true }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || `Voice completion failed with HTTP ${response.status}`);
+      }
+      trackedMessagesRef.current = [];
+    } finally {
+      clearTimeout(timeout);
     }
-    trackedMessagesRef.current = [];
   }, [questionIdAt, sessionId]);
 
   /** Disconnect, save messages, and clean up everything */
-  const disconnect = useCallback(async () => {
+  const disconnect = useCallback(async (beforeCleanup?: () => Promise<void>) => {
     setState((s) => ({ ...s, isSaving: true }));
     try {
       await saveAndComplete();
+      await beforeCleanup?.();
       cleanup();
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : "面试记录保存失败，请重试";
       log.error("Failed to save voice data:", error);
       onError?.(message);
-      setState((s) => ({ ...s, isSaving: false }));
+      setState((s) => ({ ...s, isSaving: false, isInterviewComplete: false, isProcessing: false, isTransitioning: false, transitionDirection: null }));
+      // The relay may already have finished its farewell. Recover it without
+      // closing media or discarding the failed save batch.
+      void saveProgress(currentQuestionIndexRef.current, currentQuestionIndexRef.current)
+        .then(() => relayConnectorRef.current?.failover("completion save rejected"));
       return false;
     }
-  }, [saveAndComplete, cleanup, onError]);
+  }, [saveAndComplete, saveProgress, cleanup, onError]);
 
   return {
     ...state,

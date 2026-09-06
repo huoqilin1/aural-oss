@@ -293,8 +293,8 @@ test("greetings and audio clarifications never skip a scored question", () => {
     assert.match(source, /isRecruitmentConversationControl/);
     assert.match(source, /recruitment conversation control|不计入追问预算/);
   }
-  assert.match(relay, /!isRecruitmentConversationControl\(userText\)/);
-  assert.match(openAiRelay, /!isRecruitmentConversationControl\(text\)/);
+  assert.match(relay, /hasRecruitmentAnswer\(userText\)/);
+  assert.match(openAiRelay, /hasRecruitmentAnswer\(text\)/);
 });
 
 test("session export preserves durable question identity for HR reconciliation", () => {
@@ -385,7 +385,7 @@ test("candidate cannot manually complete recruitment before eight scored answers
   assert.match(completionAutoClose, /!hasAllowedQuestionCount/);
   assert.match(completionAutoClose, /input\.currentQuestionIndex < input\.plannedMainQuestionCount - 1/);
   assert.match(completionAutoClose, /!input\.answeredCurrentQuestion/);
-  assert.match(completionAutoClose, /input\.interviewComplete\) return false/);
+  assert.doesNotMatch(completionAutoClose, /\|\| input\.interviewComplete\) return false/);
   assert.match(voiceInterface, /八道计分题尚未完整完成，请继续完成当前面试/);
 });
 
