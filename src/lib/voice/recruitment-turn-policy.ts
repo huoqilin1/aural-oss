@@ -25,7 +25,10 @@ export function recruitmentAnswerContent(text: string): string {
 
 export function recruitmentSpeechIntent(text: string): "answer_done" | "end_interview" | null {
   const tail = text.trim().replace(/[。.!！?？\s]+$/, "").split(/[。.!！?？]/).pop()?.trim() || "";
-  if (/^(?:(?:好的?|那|我们|咱们|请|我想|我要|我希望)[，,\s]*)*(?:结束|停止|终止)(?:这次|本次|整个|整场)?面试(?:吧|了)?$/.test(tail)
+  // Accept a natural closing, but not a quoted, negated or narrative mention.
+  const closing = tail.replace(/[，,\s]*(?:谢谢(?:你|您)?|辛苦了)[，,\s]*$/, "")
+    .replace(/^(?:我)?(?:没有|没)(?:其他|别的|更多)(?:问题|补充)(?:了)?[，,\s]+/, "");
+  if (/^(?:(?:好的?|那|我们|咱们|请|可以|我想|我要|我希望)[，,\s]*)*(?:结束|停止|终止)(?:这次|本次|整个|整场)?面试(?:吧|了)?$/.test(closing)
     || /^(?:please\s+|let'?s\s+|i want to\s+|can we\s+)?(?:end|stop|finish)\s+(?:this |the |entire )?interview(?: now)?$/i.test(tail)
     || /^i'?m done with (?:the )?interview$/i.test(tail)) return "end_interview";
   if (answerDoneMatch(text.trim())) return "answer_done";

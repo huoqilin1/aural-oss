@@ -10,6 +10,7 @@ import {
     wasScreenSkipped,
 } from "@/lib/media-stream-store";
 import fixWebmDuration from "fix-webm-duration";
+import { retryableSingleFlight } from "@/lib/voice/retryable-single-flight";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const log = createLogger("recording");
@@ -108,6 +109,9 @@ export function useInterviewRecording({
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const stoppedRef = useRef(false);
+  const recordingStartedAtRef = useRef(0);
+  const recordingStoppedAtRef = useRef(0);
+  const stopWorkRef = useRef<(() => Promise<{ audioUrl?: string; audioDuration?: number; screenshots: ScreenshotEntry[] }>) | null>(null);
   const ttsPlayTimeRef = useRef(0);
   const ttsSourcesRef = useRef<AudioBufferSourceNode[]>([]);
 
@@ -278,6 +282,7 @@ export function useInterviewRecording({
     async (micStream?: MediaStream) => {
       if (!enabled || isRecording) return;
       stoppedRef.current = false;
+      stopWorkRef.current = null;
       ttsPlayTimeRef.current = 0;
 
       // Create mixing AudioContext and destination
@@ -311,6 +316,8 @@ export function useInterviewRecording({
         if (e.data.size > 0) chunksRef.current.push(e.data);
       };
       recorder.start(5000); // collect chunks every 5s
+      recordingStartedAtRef.current = Date.now();
+      recordingStoppedAtRef.current = 0;
       recorderRef.current = recorder;
 
       // Acquire camera + screen
@@ -361,14 +368,11 @@ export function useInterviewRecording({
    * Stop recording. Uploads the audio blob and returns recording metadata.
    * Returns the list of screenshot entries.
    */
-  const stop = useCallback(async (): Promise<{
+  const stopOnce = useCallback(async (): Promise<{
     audioUrl?: string;
     audioDuration?: number;
     screenshots: ScreenshotEntry[];
   }> => {
-    if (stoppedRef.current) {
-      return { screenshots: screenshotsRef.current };
-    }
     stoppedRef.current = true;
 
     // Stop screenshot timer
@@ -384,18 +388,22 @@ export function useInterviewRecording({
     let audioUrl: string | undefined;
     let audioDuration: number | undefined;
     const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      await new Promise<void>((resolve) => {
-        recorder.onstop = () => resolve();
-        recorder.stop();
-      });
+    if (recorder) {
+      if (recorder.state !== "inactive") {
+        await new Promise<void>((resolve) => {
+          recorder.onstop = () => resolve();
+          recorder.stop();
+        });
+        recordingStoppedAtRef.current = Date.now();
+      }
 
       const mime = audioMimeRef.current || "audio/webm";
       const isWebm = mime.includes("webm");
       const ext = isWebm ? "webm" : "m4a";
       const rawBlob = new Blob(chunksRef.current, { type: mime });
       if (rawBlob.size > 0) {
-        audioDuration = await resolveBlobDuration(rawBlob);
+        audioDuration = await resolveBlobDuration(rawBlob)
+          ?? Math.max(0, Math.round(((recordingStoppedAtRef.current || Date.now()) - recordingStartedAtRef.current) / 1000));
 
         // Patch WebM container with correct duration so players can display it
         const audioBlob = (isWebm && audioDuration)
@@ -409,20 +417,23 @@ export function useInterviewRecording({
           form.append("sessionId", sessionId);
           form.append("type", "recording");
           form.append("filename", fname);
+          if (audioDuration !== undefined) form.append("audioDuration", String(audioDuration));
 
           const res = await fetch("/api/session/upload", {
             method: "POST",
             body: form,
           });
-          if (res.ok) {
-            const data = await res.json();
-            audioUrl = data.url;
-            log.info("Audio uploaded:", audioUrl);
-          }
+          if (!res.ok) throw new Error("录音保存失败，请重试完成面试");
+          const data = await res.json();
+          if (!data.url) throw new Error("录音保存未确认，请重试完成面试");
+          audioUrl = data.url;
+          log.info("Audio uploaded and linked");
         } catch (err) {
           log.error("Audio upload failed:", err);
+          // Keep captured chunks and the inactive recorder for a real retry.
+          throw err;
         }
-      }
+      } else throw new Error("未获取到面试录音，请联系 HR 核实");
     }
 
     // Disconnect mic source
@@ -430,7 +441,7 @@ export function useInterviewRecording({
     micSourceRef.current = null;
 
     // Close mix context
-    try { mixCtxRef.current?.close(); } catch { /* noop */ }
+    try { if (mixCtxRef.current?.state !== "closed") await mixCtxRef.current?.close(); } catch { /* noop */ }
     mixCtxRef.current = null;
     mixDestRef.current = null;
     recorderRef.current = null;
@@ -463,13 +474,20 @@ export function useInterviewRecording({
     };
   }, [sessionId, takeScreenshots]);
 
+  const stop = useCallback(() => {
+    stopWorkRef.current ??= retryableSingleFlight(stopOnce);
+    return stopWorkRef.current();
+  }, [stopOnce]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       if (screenshotTimerRef.current) clearInterval(screenshotTimerRef.current);
       try { recorderRef.current?.stop(); } catch { /* noop */ }
       try { micSourceRef.current?.disconnect(); } catch { /* noop */ }
-      try { mixCtxRef.current?.close(); } catch { /* noop */ }
+      if (mixCtxRef.current && mixCtxRef.current.state !== "closed") {
+        void mixCtxRef.current.close().catch(() => {});
+      }
       cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
       screenStreamRef.current?.getTracks().forEach((t) => t.stop());
       if (cameraVideoRef.current) { cameraVideoRef.current.remove(); cameraVideoRef.current = null; }

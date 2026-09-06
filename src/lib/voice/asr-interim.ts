@@ -287,7 +287,9 @@ export function mergeAsrFinal(buffer: string, relayFinal: string): string {
   const bufKey = bufTokens.join(" ");
   const finKey = finTokens.join(" ");
   if (bufKey === finKey) return fin;
-  if (finTokens.length >= bufTokens.length) return fin;
+  // Length alone cannot establish containment: a later sentence may be longer
+  // than the entire interim buffer while omitting the beginning of the answer.
+  if (containsTokenSpan(finTokens, bufTokens)) return fin;
 
   // Find where the relay final's tokens start in the buffer's tokens.
   const spanStart = findLastTokenSpanStart(bufTokens, finTokens);
@@ -312,8 +314,9 @@ export function mergeAsrFinal(buffer: string, relayFinal: string): string {
   // Try suffix-prefix overlap (relay continues the buffer)
   const overlap = suffixPrefixOverlap(bufTokens, finTokens);
   if (overlap > 0) {
-    const finWords = fin.split(/\s+/);
-    return `${buf} ${finWords.slice(overlap).join(" ")}`.trim();
+    const positions = tokenizeWithPositions(fin);
+    const tail = overlap < positions.length ? fin.slice(positions[overlap].start) : "";
+    return `${buf} ${tail}`.trim();
   }
 
   return `${buf} ${fin}`;
@@ -326,10 +329,10 @@ function lowercaseIfMidSentence(prefix: string, text: string): string {
 }
 
 function findLastTokenSpanStart(haystack: string[], needle: string[]): number {
-  if (needle.length === 0 || haystack.length < needle.length) return -1;
+  if (needle.length === 0 || haystack.length === 0) return -1;
   const minMatch = Math.min(3, needle.length);
 
-  for (let start = haystack.length - needle.length; start >= 0; start--) {
+  for (let start = haystack.length - minMatch; start >= 0; start--) {
     const overlap = commonPrefixLength(haystack.slice(start), needle);
     if (overlap >= minMatch) return start;
   }
@@ -379,8 +382,9 @@ export function mergeClientAsrInterim(existing: string, incoming: string): strin
 
   const overlap = suffixPrefixOverlap(currentTokens, nextTokens);
   if (overlap > 0) {
-    const nextWords = next.split(/\s+/);
-    return `${current} ${nextWords.slice(overlap).join(" ")}`.trim();
+    const positions = tokenizeWithPositions(next);
+    const tail = overlap < positions.length ? next.slice(positions[overlap].start) : "";
+    return `${current} ${tail}`.trim();
   }
 
   return `${current} ${next}`;

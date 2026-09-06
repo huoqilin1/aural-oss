@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
-import { evaluateTranscriptManualAdvance, hasRecruitmentAnswer, isUserEndRequest, isUserSkipRequest, restoreRecruitmentQuestionTranscript, summarizeRecruitmentResumeBudget } from "../server/voice-relay-helpers";
+import { evaluateTranscriptManualAdvance, hasRecruitmentAnswer, isUserEndRequest, isUserSkipRequest, mergeAsrSegments, restoreRecruitmentQuestionTranscript, summarizeRecruitmentResumeBudget } from "../server/voice-relay-helpers";
 import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentSpeechIntent, recruitmentControlOnly } from "../src/lib/voice/recruitment-turn-policy";
 import { shouldBlockRecruitmentCompletion } from "../src/lib/voice/completion-auto-close";
 import { createAnswerCommitGate } from "../server/answer-commit-gate";
@@ -107,12 +107,76 @@ test("answer-done commands advance one question and do not fabricate an answer",
 });
 
 test("explicit interview withdrawal is distinct from task descriptions and negations", () => {
-  for (const text of ["结束面试", "我要结束整个面试。", "Please end the interview.", "I'm done with the interview."]) {
+  for (const text of ["结束面试", "我要结束整个面试。", "没有其他问题了，可以结束面试，谢谢。", "可以结束面试，谢谢。", "Please end the interview.", "I'm done with the interview."]) {
     assert.equal(recruitmentSpeechIntent(text), "end_interview", text);
   }
   for (const text of ["不要结束面试", "我不想结束面试", "我负责结束面试后的资料归档", "I finished the interview workflow for our project."]) {
     assert.equal(recruitmentSpeechIntent(text), null, text);
   }
+});
+
+test("late primary response after a fast next neither speaks nor releases the new turn lock", async () => {
+  let release: (text: string) => void = () => {};
+  const pending = new Promise<string>((resolve) => { release = resolve; });
+  const noop = () => {};
+  const sandbox = relayFunctions("voice-relay.ts", ["handleUserUtterance"], {
+    isTransitioning:false, interviewDone:false, isOprunRecruitmentInterview:true,
+    isUserEndRequest, isUserSkipRequest, hasRecruitmentAnswer,
+    isFastPrevRequest:()=>false, isUserPrevRequest:()=>false, isFastNextRequest:()=>false,
+    isSameAsPendingUserTurn:()=>false, isDuplicateUserFinal:()=>false,
+    clearSilenceAutoSkip:noop, silenceAskCount:0, silenceConfirmPending:false, unansweredQuestionsStreak:0,
+    generatingResponse:false, browserWs:{readyState:1,send:noop}, WebSocket:{OPEN:1},
+    ttsSpeaking:false, updateUserLanguage:noop, rememberAcceptedUserFinal:noop, questionTranscript:[],
+    userTurnsOnCurrentQ:0, recruitmentAnsweredQuestions:new Set(), currentQuestionIndex:2,
+    lastResponseWasCorrection:false, pendingLastQuestionTimeout:null, awaitingFinalResponse:false,
+    suppressAsrResults:false, cancelTts:noop, log:{info:noop,error:noop},
+    generateControlledResponse:()=>pending,
+    speakAndHandle:()=>{throw new Error("stale follow-up spoken on Q4");},
+    reopenAsr:()=>{throw new Error("stale cycle reset Q4 input");},
+  });
+  const work = vm.runInContext("handleUserUtterance('我负责招聘交付与资料核对。')", sandbox);
+  sandbox.transitionGeneration = 1;
+  sandbox.currentQuestionIndex = 3;
+  sandbox.generatingResponse = true;
+  release("请补充你在上一题中的个人贡献？");
+  await work;
+  assert.equal(sandbox.generatingResponse, true);
+  assert.equal(sandbox.currentQuestionIndex, 3);
+});
+
+test("late TTS completion cannot add the old follow-up to the new question transcript", async () => {
+  let finish: (ok: boolean) => void = () => {};
+  const transcript: unknown[] = [];
+  const sandbox = relayFunctions("voice-relay.ts", ["speakAndHandle"], {
+    interviewDone:false, questionTranscript:transcript,
+    speakText:()=>new Promise<boolean>((resolve)=>{finish=resolve;}),
+  });
+  const work = vm.runInContext("speakAndHandle('请补充具体职责？')", sandbox);
+  sandbox.transitionGeneration = 1;
+  finish(true);
+  await work;
+  assert.equal(transcript.length, 0);
+});
+
+test("fast next retains all deferred final segments on the old question before save", () => {
+  const transcript: Array<{text:string}> = [];
+  const events: Array<{text:string;questionIndex:number}> = [];
+  const noop=()=>{};
+  const sandbox = relayFunctions("voice-relay.ts", ["retainDeferredAnswerBeforeTransition"], {
+    queuedUserUtteranceWhileGenerating:"我负责资料审核。", queuedUserUtteranceIsChat:false,
+    pendingUserUtteranceWhileSuppressed:"然后登记台账并提交复核。", pendingAsrFinalText:"最后回访确认。",
+    mergeAsrSegments, hasRecruitmentAnswer, clearPendingAsrFinal:noop,
+    looksLikeAssistantPlaybackEcho:()=>false, isDuplicateUserFinal:()=>false,
+    rememberAcceptedUserFinal:noop, questionTranscript:transcript, userTurnsOnCurrentQ:1,
+    recruitmentAnsweredQuestions:new Set([2]), currentQuestionIndex:2, WebSocket:{OPEN:1},
+    browserWs:{readyState:1,send:(s:string)=>events.push(JSON.parse(s))},
+  });
+  vm.runInContext("retainDeferredAnswerBeforeTransition()",sandbox);
+  assert.equal(transcript.length,1);
+  for(const part of ["资料审核","提交复核","回访确认"]) assert.ok(transcript[0].text.includes(part));
+  assert.equal(events[0].questionIndex,2);
+  assert.equal(sandbox.pendingUserUtteranceWhileSuppressed,"");
+  assert.equal(sandbox.queuedUserUtteranceWhileGenerating,"");
 });
 
 test("Q1 always transitions after an actual answer but not greetings or repeat requests", () => {
@@ -171,7 +235,7 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
   }
   visit(source);
   assert.equal(found.size, names.length);
-  const sandbox=vm.createContext(context);
+  const sandbox=vm.createContext({transitionGeneration:0, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
   vm.runInContext(ts.transpileModule(Array.from(found.values()).join("\n"), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, sandbox);
   return sandbox;
 }
@@ -179,7 +243,7 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
 test("primary relay real response function never calls the model for answered Q1 or answer-done Q2", async () => {
   for (const index of [0,1]) {
     const sandbox=relayFunctions("voice-relay.ts", ["generateControlledResponse"], {
-      currentQuestionIndex:index, sortedQuestions:[{text:"介绍"},{text:"经历"}],
+      interviewDone:false, currentQuestionIndex:index, sortedQuestions:[{text:"介绍"},{text:"经历"}],
       PROMPTS:{formatHistory:()=>""}, questionTranscript:[], isZh:true,
       getLatestAnsweredExchange:()=>({participant:"我负责项目交付。"}),
       isOprunRecruitmentInterview:true, isRecruitmentConversationControl:()=>false,

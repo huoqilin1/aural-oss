@@ -778,6 +778,7 @@ export function useVoice({
         }
 
         case "tts_text": {
+          if (msg.questionIndex !== undefined && Number(msg.questionIndex) !== currentQuestionIndexRef.current) break;
           const text = extractText(msg.data);
           if (text) {
             clearAsrProcessingTimer();
@@ -801,6 +802,7 @@ export function useVoice({
 
         case "chat_ended":
         case "tts_ended": {
+          if (msg.questionIndex !== undefined && Number(msg.questionIndex) !== currentQuestionIndexRef.current) break;
           clearAsrProcessingTimer();
           const fullResponse = chatBufferRef.current.trim();
           chatBufferRef.current = "";
@@ -882,15 +884,10 @@ export function useVoice({
           break;
 
         case "question_change": {
-          // For manual transitions, interrupt immediately so old audio
-          // doesn't bleed into the new question. For auto-transitions
-          // the wrap-up acknowledgement ("好的，谢谢分享") may still be
-          // playing — let it finish naturally; the new question's audio
-          // will be queued after it via sequential scheduling.
-          if (!msg.auto) {
-            clearAsrProcessingTimer();
-            interruptPlayback();
-          }
+          // A new question owns a new audio/transcript cycle. The relay has
+          // finished the bridge before this event; no old playback may bleed in.
+          clearAsrProcessingTimer();
+          interruptPlayback();
           // Discard transition greeting text before saving progress
           chatBufferRef.current = "";
           lastOnAIResponseRef.current = "";
@@ -910,6 +907,7 @@ export function useVoice({
             totalQuestions: total,
             isInputReady: false,
             aiTranscript: "",
+            userTranscript: "",
             lastAssistantUtteranceEndedAt: 0,
           }));
           onQuestionChange?.(idx, total);

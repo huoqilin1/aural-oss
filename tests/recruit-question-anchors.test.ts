@@ -8,7 +8,17 @@ import {
   recruitQuestionFitsRoleType,
   safeRecruitAnchorLines,
   selectRecruitAnchor,
+  completeRecruitAnchor,
 } from "../src/lib/recruit-question-anchors";
+
+test("resume anchor never truncates the 72nd character into a broken claim", () => {
+  const line = "参与过跨部门协作，" + "定期复核招聘数据并记录修改依据".repeat(6);
+  assert.equal(completeRecruitAnchor(line), "参与过跨部门协作");
+  assert.equal(completeRecruitAnchor("参与招聘流程(简历筛选，邀约"), "");
+  assert.equal(completeRecruitAnchor("参与招聘数据核对，每周汇总数据(简历量、"), "参与招聘数据核对");
+  const complete = "负责" + "招聘资料核对和审查".repeat(9);
+  assert.equal(completeRecruitAnchor(complete), complete);
+});
 
 test("generated evidence questions receive the exact explicit resume and job lead", () => {
   const lead = "你在简历中写到“负责政府客户项目”，而岗位要求中强调“推进项目交付”。";

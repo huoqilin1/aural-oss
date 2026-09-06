@@ -2032,6 +2032,7 @@ async function handleBrowserConnection(
    * Returns true if TTS completed without cancellation.
    */
   async function speakText(text: string): Promise<boolean> {
+    const speakingQuestionIndex = currentQuestionIndex;
     cancelTts();
     currentTtsText = text;
 
@@ -2054,7 +2055,7 @@ async function handleBrowserConnection(
     const sendTranscriptTextOnce = () => {
       if (sentTranscriptText || browserWs.readyState !== WebSocket.OPEN) return;
       sentTranscriptText = true;
-      browserWs.send(JSON.stringify({ type: "tts_text", data: { text } }));
+      browserWs.send(JSON.stringify({ type: "tts_text", questionIndex: speakingQuestionIndex, data: { text } }));
     };
 
     // 单次合成尝试。返回 ok=收到完整 done;audioBytes 用于判断能否安全重试
@@ -2133,16 +2134,16 @@ async function handleBrowserConnection(
       }
     }
 
-    ttsSpeaking = false;
-    currentTtsText = "";
     if (ttsAbortController === abortController) {
+      ttsSpeaking = false;
+      currentTtsText = "";
       ttsAbortController = null;
     }
 
     const delivered = (completed || degradedTextOnly) && !abortController.signal.aborted;
     if (delivered && browserWs.readyState === WebSocket.OPEN) {
       sendTranscriptTextOnce();
-      browserWs.send(JSON.stringify({ type: "tts_ended" }));
+      browserWs.send(JSON.stringify({ type: "tts_ended", questionIndex: speakingQuestionIndex }));
     }
 
     return delivered;
@@ -2160,8 +2161,9 @@ async function handleBrowserConnection(
     pendingFinalTimeout?: boolean;
   }): Promise<void> {
     if (options?.pendingFarewell && rejectIncompleteRecruitmentEnd()) return;
+    const speechGeneration = transitionGeneration;
     const completed = await speakText(text);
-    if (!completed) return;
+    if (!completed || speechGeneration !== transitionGeneration || interviewDone) return;
 
     if (options?.trackInTranscript !== false) {
       questionTranscript.push({ role: "assistant", text });
@@ -2265,6 +2267,7 @@ async function handleBrowserConnection(
 
   function queueFarewellAndEnd(reason: string) {
     if (interviewDone || endingInterview) return;
+    if (isOprunRecruitmentInterview) retainDeferredAnswerBeforeTransition();
     if (rejectIncompleteRecruitmentEnd()) return;
     if (!ownsPersistedSession()) {
       interviewDone = true;
@@ -2272,6 +2275,7 @@ async function handleBrowserConnection(
       return;
     }
     endingInterview = true;
+    transitionGeneration++;
 
     awaitingFinalResponse = false;
     generatingResponse = false;
@@ -2389,6 +2393,8 @@ async function handleBrowserConnection(
   }
 
   async function generateControlledResponse(opts?: { forceSkip?: boolean }): Promise<string> {
+    const responseGeneration = transitionGeneration;
+    const isCurrentResponse = () => responseGeneration === transitionGeneration && !interviewDone;
     const forceSkip = opts?.forceSkip ?? false;
     const currentQ = sortedQuestions[currentQuestionIndex];
     const history = PROMPTS.formatHistory(questionTranscript, isZh);
@@ -2409,6 +2415,7 @@ async function handleBrowserConnection(
       return isZh ? "好的，谢谢你的分享。 [NEXT]" : "Thanks for sharing. [NEXT]";
     }
     const agentCtx = await buildAgentContext();
+    if (!isCurrentResponse()) return "";
 
     const qOpts = currentQ.options as { options: string[]; allowMultiple?: boolean } | null | undefined;
     let choiceInstruction = "";
@@ -2568,6 +2575,9 @@ async function handleBrowserConnection(
       stage: "interview-turn",
       question: currentQuestionIndex + 1,
     }, llmRoute);
+    // A fast spoken/chat "next" can move the question while this call is pending.
+    // Discard that response before it can consume a budget or speak on the new card.
+    if (!isCurrentResponse()) return "";
     if (deterministicMetricFollowUp) {
       log.info("Using deterministic Q4 metric-evidence follow-up");
     }
@@ -2741,12 +2751,34 @@ async function handleBrowserConnection(
     return true;
   }
 
+  function retainDeferredAnswerBeforeTransition() {
+    const deferred = mergeAsrSegments(queuedUserUtteranceWhileGenerating,
+      mergeAsrSegments(pendingUserUtteranceWhileSuppressed, pendingAsrFinalText)).trim();
+    queuedUserUtteranceWhileGenerating = "";
+    queuedUserUtteranceIsChat = false;
+    pendingUserUtteranceWhileSuppressed = "";
+    clearPendingAsrFinal();
+    if (!deferred || !hasRecruitmentAnswer(deferred)
+      || looksLikeAssistantPlaybackEcho(deferred, questionTranscript)
+      || isDuplicateUserFinal(deferred)) return;
+    rememberAcceptedUserFinal(deferred);
+    questionTranscript.push({ role: "user", text: deferred });
+    userTurnsOnCurrentQ++;
+    recruitmentAnsweredQuestions.add(currentQuestionIndex);
+    // Emit before the commit request on the same socket, so this final is
+    // durably stored under its old question, not replayed after question_change.
+    if (browserWs.readyState === WebSocket.OPEN) browserWs.send(JSON.stringify({
+      type: "asr_ended", text: deferred, questionIndex: currentQuestionIndex,
+    }));
+  }
+
   async function handleTransition(auto = false) {
     if (interviewDone) return;
     if (isTransitioning) {
       if (!auto) queueManualTransition("next");
       return;
     }
+    if (isOprunRecruitmentInterview) retainDeferredAnswerBeforeTransition();
     const hasSubstantiveRecruitmentAnswer = questionTranscript.some(
       (entry) => entry.role === "user"
         && hasRecruitmentAnswer(entry.text),
@@ -2775,6 +2807,8 @@ async function handleBrowserConnection(
     silenceConfirmPending = false;
     const transitionId = ++transitionGeneration;
     isTransitioning = true;
+    generatingResponse = false;
+    cancelTts();
     pendingProgressiveTransition = false;
 
     // The browser saves the still-current question before any index/ASR reset.
@@ -3154,12 +3188,13 @@ async function handleBrowserConnection(
         );
         return;
       }
-      queuedUserUtteranceWhileGenerating = userText;
+      queuedUserUtteranceWhileGenerating = mergeAsrSegments(queuedUserUtteranceWhileGenerating, userText);
       queuedUserUtteranceIsChat = Boolean(options?.isChatInput);
       log.info(`Queueing user utterance until current response cycle completes: "${userText.slice(0, 60)}"`);
       return;
     }
 
+    const userResponseGeneration = transitionGeneration;
     generatingResponse = true;
     if (browserWs.readyState === WebSocket.OPEN) {
       browserWs.send(JSON.stringify({ type: "response_started" }));
@@ -3226,7 +3261,7 @@ async function handleBrowserConnection(
       try {
         const response = await generateControlledResponse({ forceSkip: userWantsSkip });
 
-        if (!response || browserWs.readyState !== WebSocket.OPEN) return;
+        if (!response || userResponseGeneration !== transitionGeneration || interviewDone || browserWs.readyState !== WebSocket.OPEN) return;
 
         let shouldTransition = response.includes(NEXT_TOKEN);
         let shouldGoPrev = response.includes(PREV_TOKEN);
@@ -3267,6 +3302,7 @@ async function handleBrowserConnection(
             );
             return;
           }
+          if (userResponseGeneration !== transitionGeneration || interviewDone) return;
           log.info("Sent controlled response via TTS");
           await speakAndHandle(spokenText, {
             pendingTransition: shouldTransition,
@@ -3284,9 +3320,10 @@ async function handleBrowserConnection(
       } catch (err) {
         log.error("Response generation failed:", err);
       } finally {
-        generatingResponse = false;
+        if (userResponseGeneration === transitionGeneration) generatingResponse = false;
         if (
-          !interviewDone
+          userResponseGeneration === transitionGeneration
+          && !interviewDone
           && !isTransitioning
           && browserWs.readyState === WebSocket.OPEN
         ) {
@@ -3312,7 +3349,7 @@ async function handleBrowserConnection(
         }
       }
     } finally {
-      generatingResponse = false;
+      if (userResponseGeneration === transitionGeneration) generatingResponse = false;
     }
   }
 
@@ -3719,7 +3756,7 @@ async function handleBrowserConnection(
                     `Keeping deferred utterance — ignoring stale duplicate: "${suppressedFinal.slice(0, 72)}..."`,
                   );
                 } else if (!incomingDup || sameAsPending) {
-                  pendingUserUtteranceWhileSuppressed = suppressedFinal;
+                  pendingUserUtteranceWhileSuppressed = mergeAsrSegments(prevPending, suppressedFinal);
                 } else if (!prevPending) {
                   log.info(
                     `Suppressed ASR final skipped (already answered, nothing deferred): "${suppressedFinal.slice(0, 72)}..."`,

@@ -1408,11 +1408,13 @@ export function VoiceInterface({
       // Validate and durably save all eight answers before stopping media.
       // A rejected completion must leave the current interview usable.
       const completed = await voice.disconnect(async () => {
-      try {
         // Stop recording and save artifacts (video mode)
-        if (videoMode && recording.isRecording) {
-          const result = await withTimeout(recording.stop(), 8000, "stop recording");
-          await withTimeout(
+        if (videoMode) {
+          // Upload is durable work, not an eight-second UI race. stop() is
+          // single-flight and retains the captured recording for failed retries.
+          const result = await recording.stop();
+          if (!result.audioUrl) throw new Error("面试录音尚未保存，请联系 HR 核实");
+          const saved = await withTimeout(
             fetch("/api/trpc/session.saveRecording", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -1428,10 +1430,8 @@ export function VoiceInterface({
             8000,
             "save recording",
           );
+          if (!saved.ok) throw new Error("面试录音关联尚未完成，请重试结束面试");
         }
-      } catch (err) {
-        console.error("[voice] Failed to save recording:", err);
-      }
       });
       if (!completed) throw new Error("面试记录尚未完整保存，请稍后重试结束面试");
       setLocallyCompleted(true);
@@ -1662,10 +1662,10 @@ export function VoiceInterface({
           <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
           <h2 className="mt-4 text-2xl font-bold">面试已顺利完成</h2>
           <p className="mt-2 text-muted-foreground">
-            感谢你的时间和用心的回答，你的每一题都已被完整记录。
+            感谢你的时间和用心的回答，本次面试记录已提交。
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
-            HR 会尽快查看你的面试结果，通常在一个工作日内与你联系。辛苦了，好好休息。
+            HR 会查看你的面试结果，后续安排请留意招聘方通知。辛苦了。
           </p>
         </CardContent>
       </Card>
@@ -2487,7 +2487,7 @@ export function VoiceInterface({
               )}
               {voice.isConnected && !showVoiceListening && !showVoiceProcessing && !showVoiceSpeaking && (
                 <p className="text-sm text-muted-foreground">
-                  点麦克风开始说话
+                  {voice.isListening ? "请直接作答，我在听。" : "麦克风已静音，取消静音后可以继续作答"}
                 </p>
               )}
               {voice.isConnected && showVoiceListening && (

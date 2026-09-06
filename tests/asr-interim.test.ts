@@ -3,6 +3,26 @@ import test from "node:test";
 
 import { cleanPeriodArtifacts, mergeAsrFinal, mergeClientAsrInterim, stripInterimPunctuation, stripIsolatedCjk, trimCrossTurnOverlap } from "@/lib/voice/asr-interim";
 
+test("Chinese interim overlap retains continuation without whitespace token loss", () => {
+  assert.equal(mergeClientAsrInterim("核对资料", "资料齐全后归档"), "核对资料 齐全后归档");
+});
+
+test("longer Chinese final retains earlier independent answer and completes its tail", () => {
+  const prefix = "我负责招聘协调，不会自行承诺录用。";
+  const partial = "核对审批之后";
+  const final = "核对审批之后整理申报清单、检查回执并记录异常，最后由负责人复核办理结果。";
+  assert.equal(mergeAsrFinal(prefix + partial, final), prefix + " " + final);
+});
+
+test("Chinese final preserves non-overlapping previous speech regardless of length", () => {
+  assert.equal(mergeAsrFinal("我负责初筛。", "其次需要与用人部门核实专业技能以及岗位要求。"),
+    "我负责初筛。 其次需要与用人部门核实专业技能以及岗位要求。");
+});
+
+test("Chinese suffix overlap keeps the actual final tail instead of splitting on spaces", () => {
+  assert.equal(mergeAsrFinal("核对资料", "资料齐全后归档"), "核对资料 齐全后归档");
+});
+
 test("client ASR interim keeps earlier speech when a trailing fragment arrives", () => {
   const first =
     "I also finetune the prompt quite a bit, in order to guide the model behavior.";

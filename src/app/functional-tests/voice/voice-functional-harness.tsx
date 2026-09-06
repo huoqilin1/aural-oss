@@ -29,7 +29,8 @@ type FunctionalScenarioId =
   | "recruitment-eight-question"
   | "recruitment-eight-question-premature"
   | "recruitment-eight-question-save-retry"
-  | "recruitment-eight-question-progress-retry";
+  | "recruitment-eight-question-progress-retry"
+  | "recruitment-eight-question-recording-late";
 
 declare global {
   interface Window {
@@ -44,6 +45,10 @@ declare global {
 }
 
 const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
+  "recruitment-eight-question-recording-late": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+    "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
+  },
   default: {
     "/ws/voice": {
       events: [{ type: "ready", delay: 30 }],
@@ -365,6 +370,45 @@ function installFunctionalRelayMocks(
   window.__functionalRelayScenario = scenario;
   window.__functionalScenarioId = scenarioId;
   window.__functionalMediaFailureInjected = false;
+  if (scenarioId === "recruitment-eight-question-recording-late") {
+    const realFetch = window.fetch.bind(window);
+    const answers = new Set<string>();
+    const state = { answeredQuestions: 0, uploads: 0, recordingLinked: false, clientRecordingSaved: false };
+    const report = () => {
+      const node = document.querySelector('[data-testid="local-save-ledger"]');
+      if (node) node.textContent = JSON.stringify(state);
+    };
+    // This scenario runs the real components and MediaRecorder, with only
+    // local API persistence and relay dependencies replaced. Never production.
+    window.fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, location.href);
+      if (url.origin !== location.origin) return realFetch(input, init);
+      if (url.pathname === "/api/voice/save") {
+        const body = JSON.parse(String(init?.body || "{}"));
+        for (const message of body.messages || []) {
+          if (message.role === "user" && message.questionId && message.content?.trim()) answers.add(message.questionId);
+        }
+        state.answeredQuestions = answers.size;
+        report();
+        return Response.json({ success: !body.complete || answers.size === 8 },
+          { status: body.complete && answers.size !== 8 ? 409 : 200 });
+      }
+      if (url.pathname === "/api/session/upload") {
+        const form = init?.body as FormData;
+        if (form.get("type") === "recording") {
+          state.uploads++; report();
+          await new Promise((resolve) => setTimeout(resolve, 9000));
+          state.recordingLinked = true; report();
+        }
+        return Response.json({url:`${location.origin}/functional-recording.webm`,path:"local-only"});
+      }
+      if (url.pathname === "/api/trpc/session.saveRecording") {
+        state.clientRecordingSaved = state.recordingLinked; report();
+        return Response.json({result:{data:{json:{success:state.recordingLinked}}}}, {status:state.recordingLinked?200:409});
+      }
+      return realFetch(input, init);
+    };
+  }
   window.sessionStorage.setItem("__functionalRelayConnections", "[]");
   window.sessionStorage.setItem("__functionalRelaySentMessages", "[]");
   window.sessionStorage.setItem("__functionalMediaRequests", "[]");
@@ -405,7 +449,16 @@ function installFunctionalRelayMocks(
     if (constraints.audio) {
       const context = new AudioContext();
       functionalAudioContexts.push(context);
-      tracks.push(...context.createMediaStreamDestination().stream.getAudioTracks());
+      const destination = context.createMediaStreamDestination();
+      if (scenarioId === "recruitment-eight-question-recording-late") {
+        const source = context.createOscillator();
+        const gain = context.createGain();
+        gain.gain.value = 0.001;
+        source.connect(gain).connect(destination);
+        source.start();
+        void context.resume();
+      }
+      tracks.push(...destination.stream.getAudioTracks());
     }
     if (constraints.video) {
       const canvas = document.createElement("canvas");
@@ -566,6 +619,12 @@ function installFunctionalRelayMocks(
             }),
           });
         }, 120);
+        if (window.__functionalScenarioId === "recruitment-eight-question-recording-late") {
+          setTimeout(() => {
+            this.onmessage?.({data:JSON.stringify({type:"tts_text",questionIndex:nextIndex-1,data:{text:"STALE_Q_PREVIOUS 不应显示的上一题追问"}})});
+            this.onmessage?.({data:JSON.stringify({type:"tts_ended",questionIndex:nextIndex-1})});
+          },150);
+        }
         setTimeout(() => {
           this.onmessage?.({ data: JSON.stringify({ type: "input_ready" }) });
         }, 180);
@@ -634,6 +693,7 @@ export function VoiceFunctionalHarness({
   scenario: string;
 }) {
   const [parentCompleted, setParentCompleted] = useState(false);
+  const [localStarted, setLocalStarted] = useState(false);
   const [mocksReady, setMocksReady] = useState(false);
   const isRecruitmentScenario = scenario.startsWith("recruitment-");
   const isAdvanceScenario = scenario.startsWith("advance-") || isRecruitmentScenario;
@@ -697,6 +757,9 @@ export function VoiceFunctionalHarness({
 
   return (
     <div className="relative min-h-screen bg-background">
+      {scenario === "recruitment-eight-question-recording-late" && (
+        <pre data-testid="local-save-ledger" className="relative z-50 bg-white text-xs">local-only: ready</pre>
+      )}
       <div
         data-testid="parent-complete"
         className="sr-only"
@@ -710,7 +773,9 @@ export function VoiceFunctionalHarness({
       <div data-testid="harness-ready" className="sr-only">
         {mocksReady ? "true" : "false"}
       </div>
-      {mocksReady && scenario === "recruitment-entry" && !recruitmentOnboarding.ready ? (
+      {mocksReady && scenario === "recruitment-eight-question-recording-late" && !localStarted ? (
+        <button onClick={() => setLocalStarted(true)}>开始本地测试</button>
+      ) : mocksReady && scenario === "recruitment-entry" && !recruitmentOnboarding.ready ? (
         <div data-testid="onboarding-restoring">restoring</div>
       ) : mocksReady && scenario === "recruitment-entry" && !recruitmentOnboarding.done ? (
         <IntervieweeOnboarding

@@ -15,6 +15,7 @@ export function safeRecruitAnchorLines(value: string): string[] {
   return value
     .split(/[\r\n。；;]+/)
     .map(stripRecruitAnchorBullet)
+    .map(completeRecruitAnchor)
     .filter((line) => {
       if (
         line.length < 8
@@ -28,8 +29,23 @@ export function safeRecruitAnchorLines(value: string): string[] {
       if (seen.has(normalized)) return false;
       seen.add(normalized);
       return true;
-    })
-    .map((line) => line.slice(0, 72));
+    });
+}
+
+/** Shorten only at source punctuation outside parentheses, never at character 72. */
+export function completeRecruitAnchor(line: string, limit = 72): string {
+  let depth = 0;
+  let boundary = -1;
+  for (let i = 0; i < line.length; i++) {
+    if (/[（(]/.test(line[i])) depth++;
+    else if (/[）)]/.test(line[i])) {
+      if (!depth) return "";
+      depth--;
+    } else if (/[，,；;。]/.test(line[i]) && depth === 0 && i >= 8 && i <= limit) boundary = i;
+  }
+  if (depth === 0 && line.length <= limit) return line;
+  if (boundary >= 8) return line.slice(0, boundary).trim();
+  return depth === 0 && line.length <= 160 ? line : "";
 }
 
 export function recruitAnchorTerms(value: string): string[] {
