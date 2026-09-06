@@ -432,6 +432,12 @@ export class AllFourModelsFailed extends Error {
   }
 }
 
+function safeRelayFailure(error: unknown): string {
+  if (!(error instanceof Error)) return "provider_error";
+  if (/^(?:invalid_question_response|missing_or_invalid_scored_question|question_anchor_invalid|duplicate_scored_question|empty_response|invalid_summary_response|report_storage_failed|LLM API [1-5][0-9]{2})$/.test(error.message)) return error.message;
+  return error.name;
+}
+
 export async function callRelayLLM(
   prompt: string,
   maxTokens?: number,
@@ -501,7 +507,7 @@ async function callRelayRequest(prompt: string, maxTokens?: number, meta?: Relay
     } catch (err) {
       lastError = err;
       attempts.push({ provider: endpoint.provider ?? "legacy", model: endpoint.model,
-        state: "failed", error: err instanceof Error ? err.name : "provider_error" });
+        state: "failed", error: safeRelayFailure(err) });
       endpointCooldowns.set(
         endpointKey(endpoint),
         Date.now() + failureCooldownMs(err),
@@ -510,7 +516,7 @@ async function callRelayRequest(prompt: string, maxTokens?: number, meta?: Relay
       if (next) {
         log.warn(
           `Relay LLM failed for ${endpoint.model}, falling back to ${next.model}`,
-          err instanceof Error ? err.name : "provider_error",
+          safeRelayFailure(err),
         );
       }
     } finally {
@@ -521,7 +527,7 @@ async function callRelayRequest(prompt: string, maxTokens?: number, meta?: Relay
     }
   }
 
-  log.error("Relay LLM failed on all configured models", lastError instanceof Error ? lastError.name : "provider_error");
+  log.error("Relay LLM failed on all configured models", safeRelayFailure(lastError));
   if (route?.fallbacks.length === 3) throw new AllFourModelsFailed(attempts);
   throw lastError ?? new Error("Relay LLM failed");
 }

@@ -2866,6 +2866,8 @@ async function handleBrowserConnection(
       if (isProgressiveOpeningOnly(sortedQuestions)) {
         isTransitioning = false;
         pendingProgressiveTransition = true;
+        clearSilenceAutoSkip();
+        silenceConfirmPending = false;
         if (browserWs.readyState === WebSocket.OPEN) {
           browserWs.send(JSON.stringify({
             type: "next_question_not_ready",
@@ -2875,8 +2877,8 @@ async function handleBrowserConnection(
         }
         await speakAndHandle(
           isZh
-            ? "抱歉，下一道个性化题暂未准备好，这是系统异常，我会继续自动重试。本次等待不会作为额外面试题。"
-            : "Sorry, the next personalized question is not ready yet. This is a system issue and I will keep retrying automatically. This wait is not an additional interview question.",
+            ? "我正在结合你的经历准备接下来的问题，请稍候，准备好后我们会自动继续。"
+            : "I am preparing the next questions based on your experience. We will continue automatically when they are ready.",
           { trackInTranscript: false },
         );
         return;
@@ -3420,10 +3422,10 @@ async function handleBrowserConnection(
   /** 静默计时:先问是否答完,绝不直接切题(王总 2026-08-21) */
   function armSilenceAutoSkip() {
     clearSilenceAutoSkip();
-    if (interviewDone || endingInterview) return;
+    if (interviewDone || endingInterview || pendingProgressiveTransition) return;
     silenceAutoSkipTimer = setTimeout(() => {
       silenceAutoSkipTimer = null;
-      if (interviewDone || endingInterview) return;
+      if (interviewDone || endingInterview || pendingProgressiveTransition) return;
       // 小君还在说话/出题/切题时,顺延再看(不打断小君)
       if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
         armSilenceAutoSkip();
@@ -3491,7 +3493,7 @@ async function handleBrowserConnection(
 
   /** AFK 守卫:页面开着但人不在,空转两题后诚实收尾,不留全空回答记录 */
   async function abandonForInactivity() {
-    if (interviewDone || endingInterview) return;
+    if (interviewDone || endingInterview || pendingProgressiveTransition) return;
     if (!ownsPersistedSession()) {
       interviewDone = true;
       endingInterview = true;

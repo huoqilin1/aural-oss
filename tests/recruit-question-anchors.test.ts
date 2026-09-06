@@ -90,3 +90,11 @@ test("generated questions must reference both selected resume and job anchors", 
   assert.equal(questionReferencesRecruitAnchor(generic, resumeAnchor), false);
   assert.equal(questionReferencesRecruitAnchor(generic, jobAnchor), false);
 });
+
+test("complete short-term job requirements are valid anchors without a four-character Chinese run", () => {
+  const anchor="沟通、抗压、协作";
+  assert.equal(questionReferencesRecruitAnchor('岗位要求“沟通、抗压、协作”，请说明相关经历。',anchor),true);
+  assert.equal(questionReferencesRecruitAnchor('岗位要求沟通/抗压/协作，请说明相关经历。',anchor),true);
+  assert.equal(questionReferencesRecruitAnchor('请说明你的沟通经历。',anchor),false);
+  assert.equal(questionReferencesRecruitAnchor('请说明相关工作。','工作'),false);
+});

@@ -49,6 +49,25 @@ test("completion preflight retains late messages and serializes subsequent saves
   }
 });
 
+test("waiting for background questions cannot arm or finish an inactivity timeout", async () => {
+  const timers: Array<()=>void> = [];
+  const sandbox = relayFunctions("voice-relay.ts", ["armSilenceAutoSkip", "abandonForInactivity"], {
+    pendingProgressiveTransition:true, interviewDone:false, endingInterview:false,
+    clearSilenceAutoSkip:()=>{}, silenceAutoSkipTimer:null, SILENCE_ASK_MS:100,
+    setTimeout:(callback:()=>void)=>{timers.push(callback);return timers.length;},
+    ownsPersistedSession:()=>{throw new Error("background wait must not terminate a candidate");},
+  });
+  vm.runInContext("armSilenceAutoSkip()",sandbox);
+  assert.equal(timers.length,0);
+  await vm.runInContext("abandonForInactivity()",sandbox);
+  sandbox.pendingProgressiveTransition=false;
+  vm.runInContext("armSilenceAutoSkip()",sandbox);
+  assert.equal(timers.length,1);
+  sandbox.pendingProgressiveTransition=true;
+  timers[0]();
+  assert.equal(timers.length,1,"a stale timeout must not re-arm while questions are pending");
+});
+
 test("actual inactivity termination persists the current answer before publishing a terminal state", async () => {
   const order: string[] = [];
   const noop = () => {};
@@ -327,7 +346,7 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
   }
   visit(source);
   assert.equal(found.size, names.length);
-  const sandbox=vm.createContext({transitionGeneration:0, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
+  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
   vm.runInContext(ts.transpileModule(Array.from(found.values()).join("\n"), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, sandbox);
   return sandbox;
 }

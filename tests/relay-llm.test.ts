@@ -97,6 +97,21 @@ test("four-provider request counts empty JSON responses once and includes missin
   }
 });
 
+test("failure alerts retain known validation codes but never arbitrary provider content", async () => {
+  const originalFetch=globalThis.fetch;
+  try {
+    await withEnvAsync({ZHIPU_API_KEY:"z-test",KIMI_API_KEY:"k-test",DEEPSEEK_API_KEY:"d-test",HR_MODEL_CONTROL_URL:undefined},async()=>{
+      for(const [message,expected] of [["question_anchor_invalid","question_anchor_invalid"],["private synthetic provider payload","Error"]]){
+        globalThis.fetch=(async()=>{throw new Error(message);}) as typeof fetch;
+        await assert.rejects(relayLlm.callRelayLLM("synthetic",undefined,{stage:"test"},{primary:"zhipu",fallbacks:["kimi","deepseek","doubao"]}), (error:unknown)=>{
+          assert.ok(error instanceof relayLlm.AllFourModelsFailed);
+          assert.equal(error.attempts[0].error,expected);return true;
+        });
+      }
+    });
+  } finally {globalThis.fetch=originalFetch;}
+});
+
 test("default chain starts GLM then Kimi when provider keys set", () => {
   withEnv(
     {

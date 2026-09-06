@@ -81,6 +81,11 @@ export function selectRecruitAnchor(value: string, keywords: string[]): string {
 
 export function questionReferencesRecruitAnchor(question: string, anchor: string): boolean {
   if (!question || !anchor) return false;
+  // A complete citation is stronger evidence than a partial four-character
+  // match. Lists such as 沟通、抗压、协作 otherwise can never pass validation.
+  const compact = (value: string) => value.normalize("NFKC").toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+  const fullAnchor = compact(anchor);
+  if (fullAnchor.length >= 4 && /[\p{L}]/u.test(fullAnchor) && compact(question).includes(fullAnchor)) return true;
   const questionNormalized = question.toLocaleLowerCase().replace(/\s+/g, "");
   const latinTokens = anchor.toLocaleLowerCase().match(/[a-z][a-z0-9+#._-]{2,}/g) || [];
   if (latinTokens.some((token) => questionNormalized.includes(token))) return true;
