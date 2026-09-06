@@ -55,7 +55,32 @@ afterEach(() => {
   relayLlm.resetRelayLlmCacheForTests();
 });
 
-test("default chain is deepseek-v4-flash -> glm-5.3 -> kimi when provider keys set", () => {
+test("four-provider request counts empty JSON responses once and includes missing configuration", async () => {
+  const originalFetch = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (_input, init) => {
+    assert.ok(init?.signal instanceof AbortSignal);
+    calls.push(JSON.parse(String(init?.body)).model);
+    return Response.json({ choices: [{ message: { content: "" } }] });
+  }) as typeof fetch;
+  try {
+    await withEnvAsync({ ZHIPU_API_KEY: "z-test", KIMI_API_KEY: "k-test", DEEPSEEK_API_KEY: "d-test",
+      DOUBAO_TEXT_API_KEY: undefined, DOUBAO_TEXT_MODEL: undefined }, async () => {
+      await assert.rejects(relayLlm.callRelayLLM("synthetic", undefined, { stage: "test" },
+        { primary: "zhipu", fallbacks: ["kimi", "deepseek", "doubao"] }), (error: unknown) => {
+          assert.ok(error instanceof relayLlm.AllFourModelsFailed);
+          assert.deepEqual(error.attempts.map(row => row.provider), ["zhipu", "kimi", "deepseek", "doubao"]);
+          assert.equal(error.message, "all_models_failed");
+          return true;
+        });
+      assert.deepEqual(calls, ["glm-5.3", "kimi-k3", "deepseek-v4-flash"]);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("default chain starts GLM then Kimi when provider keys set", () => {
   withEnv(
     {
       RELAY_LLM_MODEL: undefined,
@@ -66,8 +91,8 @@ test("default chain is deepseek-v4-flash -> glm-5.3 -> kimi when provider keys s
       MINIMAX_API_KEY: undefined,
     },
     () => {
-      assert.equal(relayLlm.getRelayLlmModel(), "deepseek-v4-flash");
-      assert.equal(relayLlm.getRelayLlmFallbackModel(), "glm-5.3");
+      assert.equal(relayLlm.getRelayLlmModel(), "glm-5.3");
+      assert.equal(relayLlm.getRelayLlmFallbackModel(), "kimi-k3");
     },
   );
 });
@@ -84,8 +109,8 @@ test("chain trims to configured providers (deepseek + kimi only)", () => {
       MINIMAX_API_KEY: undefined,
     },
     () => {
-      assert.equal(relayLlm.getRelayLlmModel(), "deepseek-v4-flash");
-      assert.equal(relayLlm.getRelayLlmFallbackModel(), "kimi-k3");
+      assert.equal(relayLlm.getRelayLlmModel(), "kimi-k3");
+      assert.equal(relayLlm.getRelayLlmFallbackModel(), "deepseek-v4-flash");
     },
   );
 });
@@ -106,7 +131,7 @@ test("retired kimi-latest overrides migrate to kimi-k3", () => {
   );
 });
 
-test("402 primary falls back to Kimi K3 without legacy temperature and opens a circuit", async () => {
+test("402 HR-selected primary is attempted once per request then falls back without changing the route", async () => {
   const originalFetch = globalThis.fetch;
   const calls: Array<{ model: string; temperature: unknown }> = [];
   globalThis.fetch = (async (_input, init) => {
@@ -137,15 +162,17 @@ test("402 primary falls back to Kimi K3 without legacy temperature and opens a c
         KIMI_MODEL: undefined,
       },
       async () => {
-        assert.equal(await relayLlm.callRelayLLM("hello"), "READY");
+        const route = { primary: "deepseek" as const, fallbacks: ["kimi" as const, "zhipu" as const] };
+        assert.equal(await relayLlm.callRelayLLM("hello", undefined, undefined, route), "READY");
         assert.deepEqual(calls, [
           { model: "deepseek-v4-flash", temperature: 0 },
           { model: "kimi-k3", temperature: undefined },
         ]);
 
         calls.length = 0;
-        assert.equal(await relayLlm.callRelayLLM("hello again"), "READY");
+        assert.equal(await relayLlm.callRelayLLM("hello again", undefined, undefined, route), "READY");
         assert.deepEqual(calls, [
+          { model: "deepseek-v4-flash", temperature: 0 },
           { model: "kimi-k3", temperature: undefined },
         ]);
       },

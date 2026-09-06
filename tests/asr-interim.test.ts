@@ -3,8 +3,46 @@ import test from "node:test";
 
 import { cleanPeriodArtifacts, mergeAsrFinal, mergeClientAsrInterim, stripInterimPunctuation, stripIsolatedCjk, trimCrossTurnOverlap } from "@/lib/voice/asr-interim";
 
+test("production rolling Q4 recognition retains an already visible opening", () => {
+  // Simulated speech, not a resume holder's statement. These are the two
+  // observed browser snapshots which lost the opening before persistence.
+  const first = "关于准确和按时完成，我先说明，没有真实台账，不能把模拟数字当成 应办理人数作为分母，已成功办理并有回执的人数作为分子，退回补件和未办结要单列。不能只统计提交成功。我的职责是材料核对";
+  const second = "应办理人数作为分母，已成功办理并有回执的人数作为分子，退回补件和未办结要单列，不能只统计提交成功。我的职责是材料核对、异常登记和跟踪。因此，我会提前预留复核时间，并记录截止前的未完成事项和责任人。没有证据支持的提升比例我会明确写待核实我答完了";
+  const interim = mergeClientAsrInterim(first, second);
+  for (const marker of ["没有真实台账", "应办理人数作为分母", "截止前的未完成事项"]) {
+    assert.ok(interim.includes(marker), `interim lost ${marker}`);
+  }
+  const final = cleanPeriodArtifacts(mergeAsrFinal(interim, second));
+  assert.ok(final.includes("没有真实台账"), "final must also preserve the opening disclaimer");
+});
+
 test("Chinese interim overlap retains continuation without whitespace token loss", () => {
   assert.equal(mergeClientAsrInterim("核对资料", "资料齐全后归档"), "核对资料 齐全后归档");
+});
+
+test("similar Chinese evidence must not erase a negation or a different metric", () => {
+  const a = "我没有负责审批，只负责材料收集和业务数据核对。";
+  const b = "我负责审批之后的材料收集和业务数据核对，最终由经理签字确认。";
+  const merged = cleanPeriodArtifacts(mergeClientAsrInterim(a, b));
+  assert.ok(merged.includes("我没有负责审批"));
+  assert.ok(merged.includes("最终由经理签字确认"));
+  const two = "我负责每月核对十份材料。 我负责每月核对二十份材料。";
+  assert.ok(cleanPeriodArtifacts(mergeClientAsrInterim("", two)).includes("十份材料"));
+  assert.ok(mergeClientAsrInterim("", two).includes("二十份材料"));
+});
+
+test("long rolling recognition retains every numbered evidence segment without repeats", () => {
+  let merged = "";
+  const sentences = Array.from({length:80}, (_, index)=>
+    `第${index + 1}阶段的原始凭证已完成独立核验，未确认事项保留待核实标记。`);
+  for (let index=0; index<sentences.length; index++) {
+    const windowText = sentences.slice(Math.max(0,index-1),index+1).join("");
+    merged = mergeClientAsrInterim(merged, windowText);
+  }
+  merged = cleanPeriodArtifacts(mergeAsrFinal(merged,sentences.at(-1)!));
+  for (const sentence of sentences) {
+    assert.equal(merged.split(sentence).length-1,1,`missing or duplicated numbered evidence`);
+  }
 });
 
 test("longer Chinese final retains earlier independent answer and completes its tail", () => {

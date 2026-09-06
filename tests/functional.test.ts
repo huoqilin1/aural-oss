@@ -6,7 +6,17 @@ import { dirname, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { chromium, type Browser, type Page, type Route } from "playwright";
+import { chromium, type Browser, type BrowserContext, type BrowserContextOptions, type Page, type Route } from "playwright";
+
+import { buildFunctionalComponent } from "./functional-component-browser";
+
+const componentOnly = process.env.AURAL_FUNCTIONAL_COMPONENT_ONLY === "1";
+let mountComponent: ((context: BrowserContext) => Promise<void>) | undefined;
+async function newContext(options: BrowserContextOptions) {
+  const context = await browser.newContext(options);
+  if (mountComponent) await mountComponent(context);
+  return context;
+}
 
 const APP_CWD = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -16,7 +26,7 @@ type RelayConnection = {
 };
 
 let browser: Browser;
-let serverProcess: ChildProcess;
+let serverProcess: ChildProcess | undefined;
 let baseUrl = "";
 
 function delay(ms: number): Promise<void> {
@@ -145,6 +155,7 @@ async function waitForText(
     }
     await delay(100);
   }
+  if (componentOnly) console.error("[component DOM]", await page.locator("body").innerText());
   throw new Error(`Timed out waiting for text: ${text}`);
 }
 
@@ -168,17 +179,30 @@ async function startVoiceInterview(page: Page): Promise<void> {
 }
 
 before(async () => {
-  const port = await getFreePort();
-  baseUrl = `http://127.0.0.1:${port}`;
-  serverProcess = startAppServer(port);
-  await waitForHttp(`${baseUrl}/login`);
-  // A clean release build has no Next.js development cache. Compile the
-  // functional voice page once during suite setup so per-scenario navigation
-  // timeouts continue to measure runtime behavior instead of cold compilation.
-  await waitForHttp(
-    `${baseUrl}/functional-tests/voice?language=en&scenario=english-failover`,
-    120_000,
-  );
+  if (componentOnly) {
+    baseUrl = "https://aural-component.invalid";
+    mountComponent = await buildFunctionalComponent(APP_CWD);
+  } else {
+    const supplied = process.env.AURAL_FUNCTIONAL_BASE_URL;
+    if (supplied) {
+      const url = new URL(supplied);
+      assert.equal(url.protocol, "http:");
+      assert.ok(["127.0.0.1", "localhost"].includes(url.hostname));
+      baseUrl = url.origin;
+    } else {
+      const port = await getFreePort();
+      baseUrl = `http://127.0.0.1:${port}`;
+      serverProcess = startAppServer(port);
+    }
+    await waitForHttp(`${baseUrl}/login`);
+    // A clean release build has no Next.js development cache. Compile the
+    // functional voice page once during suite setup so per-scenario navigation
+    // timeouts continue to measure runtime behavior instead of cold compilation.
+    await waitForHttp(
+      `${baseUrl}/functional-tests/voice?language=en&scenario=english-failover`,
+      120_000,
+    );
+  }
   const systemChrome = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
     || (process.platform === "win32"
       && existsSync("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe")
@@ -192,11 +216,11 @@ before(async () => {
 
 after(async () => {
   await browser?.close();
-  await stopProcess(serverProcess);
+  if (serverProcess) await stopProcess(serverProcess);
 });
 
-test("login defaults to English and no longer shows a language toggle", async () => {
-  const context = await browser.newContext({ locale: "en-US" });
+test("login defaults to English and no longer shows a language toggle", { skip: componentOnly ? "Requires packaged Next server; not component evidence" : false }, async () => {
+  const context = await newContext({ locale: "en-US" });
   const page = await context.newPage();
 
   await page.goto(`${baseUrl}/login`);
@@ -208,14 +232,14 @@ test("login defaults to English and no longer shows a language toggle", async ()
   await context.close();
 });
 
-test("login honors browser locale and persisted locale cache", async () => {
-  const zhContext = await browser.newContext({ locale: "zh-CN" });
+test("login honors browser locale and persisted locale cache", { skip: componentOnly ? "Requires packaged Next server; not component evidence" : false }, async () => {
+  const zhContext = await newContext({ locale: "zh-CN" });
   const zhPage = await zhContext.newPage();
   await zhPage.goto(`${baseUrl}/login`);
   await waitForText(zhPage, "欢迎回来");
   await zhContext.close();
 
-  const cachedContext = await browser.newContext({ locale: "en-US" });
+  const cachedContext = await newContext({ locale: "en-US" });
   const cachedPage = await cachedContext.newPage();
   await cachedPage.addInitScript(() => {
     window.localStorage.setItem("aural.app.locale", "zh");
@@ -225,14 +249,14 @@ test("login honors browser locale and persisted locale cache", async () => {
   await cachedContext.close();
 });
 
-test("voice save rejects an interrupted empty request without a server exception", async () => {
+test("voice save rejects an interrupted empty request without a server exception", { skip: componentOnly ? "Requires packaged Next server; not component evidence" : false }, async () => {
   const response = await fetch(`${baseUrl}/api/voice/save`, { method: "POST" });
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { error: "Invalid JSON body" });
 });
 
 test("English interviews try the voice relay first and fail over to OpenAI", async () => {
-  const context = await browser.newContext({ locale: "en-US" });
+  const context = await newContext({ locale: "en-US" });
   const page = await context.newPage();
   await page.goto(
     `${baseUrl}/functional-tests/voice?language=en&scenario=english-failover`,
@@ -257,7 +281,7 @@ test("English interviews try the voice relay first and fail over to OpenAI", asy
 });
 
 test("Chinese interviews also try the voice relay first and fail over to OpenAI", async () => {
-  const context = await browser.newContext({ locale: "en-US" });
+  const context = await newContext({ locale: "en-US" });
   const page = await context.newPage();
   await page.goto(
     `${baseUrl}/functional-tests/voice?language=zh-CN&scenario=chinese-failover`,
@@ -282,7 +306,7 @@ test("Chinese interviews also try the voice relay first and fail over to OpenAI"
 });
 
 test("voice interview does not show Thinking from speech finalization alone", async () => {
-  const context = await browser.newContext({ locale: "en-US" });
+  const context = await newContext({ locale: "en-US" });
   const page = await context.newPage();
 
   await page.goto(
@@ -316,7 +340,7 @@ test("voice interview does not show Thinking from speech finalization alone", as
 });
 
 test("voice interview keeps Thinking visible until the agent response returns", async () => {
-  const context = await browser.newContext({ locale: "en-US" });
+  const context = await newContext({ locale: "en-US" });
   const page = await context.newPage();
 
   await page.goto(
@@ -360,7 +384,7 @@ test("voice interview keeps Thinking visible until the agent response returns", 
 });
 
 test("next-question control sends one request and waits for relay acknowledgement", async () => {
-  const context = await browser.newContext({ locale: "en-US" });
+  const context = await newContext({ locale: "en-US" });
   const page = await context.newPage();
 
   await page.goto(
@@ -399,7 +423,7 @@ test("next-question control sends one request and waits for relay acknowledgemen
 });
 
 test("latest follow-up must be answered before next-question control unlocks", async () => {
-  const context = await browser.newContext({ locale: "en-US" });
+  const context = await newContext({ locale: "en-US" });
   const page = await context.newPage();
 
   await page.goto(
@@ -434,7 +458,7 @@ test("latest follow-up must be answered before next-question control unlocks", a
 });
 
 test("candidate input stays unavailable until the relay confirms ASR readiness", async () => {
-  const context = await browser.newContext({ locale: "zh-CN" });
+  const context = await newContext({ locale: "zh-CN" });
   const page = await context.newPage();
 
   await page.goto(
@@ -462,7 +486,7 @@ test("candidate input stays unavailable until the relay confirms ASR readiness",
 });
 
 test("recruitment notice has one start action then auto-connects camera and microphone", async () => {
-  const context = await browser.newContext({ locale: "zh-CN" });
+  const context = await newContext({ locale: "zh-CN" });
   const page = await context.newPage();
 
   await page.goto(
@@ -519,7 +543,7 @@ test("recruitment notice has one start action then auto-connects camera and micr
 });
 
 test("recruitment auto-start retries a transient media failure without a second start action", async () => {
-  const context = await browser.newContext({ locale: "zh-CN" });
+  const context = await newContext({ locale: "zh-CN" });
   const page = await context.newPage();
 
   await page.goto(
@@ -546,7 +570,7 @@ test("recruitment auto-start retries a transient media failure without a second 
 });
 
 test("recruitment entry auto-connects media and rejects completion before eight answers", async () => {
-  const context = await browser.newContext({ locale: "zh-CN" });
+  const context = await newContext({ locale: "zh-CN" });
   const page = await context.newPage();
   const saveBodies: unknown[] = [];
 
@@ -598,7 +622,7 @@ test("recruitment entry auto-connects media and rejects completion before eight 
 });
 
 test("a late ASR final from the previous question is not saved twice", async () => {
-  const context = await browser.newContext({ locale: "en-US" });
+  const context = await newContext({ locale: "en-US" });
   const page = await context.newPage();
   const saveBodies: Array<{ messages?: Array<{ content?: string }> }> = [];
 
@@ -636,7 +660,7 @@ test("a late ASR final from the previous question is not saved twice", async () 
 
 for (const scenario of ["recruitment-eight-question", "recruitment-eight-question-premature", "recruitment-eight-question-save-retry", "recruitment-eight-question-progress-retry"]) {
 test(`recruitment completes only after eight distinct scored answers: ${scenario}`, async () => {
-  const context = await browser.newContext({ locale: "zh-CN" });
+  const context = await newContext({ locale: "zh-CN" });
   const page = await context.newPage();
   const saveBodies: unknown[] = [];
   let failedCompletion = false;
@@ -665,7 +689,7 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
       await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:"local save failure"})});
       return;
     }
-    if (scenario.endsWith("save-retry") && body.complete && !failedCompletion) {
+    if (scenario.endsWith("save-retry") && body.validateOnly && !failedCompletion) {
       failedCompletion = true;
       await route.fulfill({ status:409, contentType:"application/json", body:JSON.stringify({error:"本地故障注入：回答保存尚未同步"}) });
       return;
@@ -760,7 +784,7 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
   const completionWrites = saveBodies.filter(
     (body) => (body as { complete?: boolean }).complete === true,
   );
-  assert.equal(completionWrites.length, scenario.endsWith("save-retry") ? 2 : 1);
+  assert.equal(completionWrites.length, 1);
   assert.equal(recordingWrites, 1);
 
   await context.close();
@@ -768,13 +792,19 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
 }
 
 test("voice completion shows the farewell, waits for final save, and only then notifies the parent", async () => {
-  const context = await browser.newContext({ locale: "en-US" });
+  const context = await newContext({ locale: "en-US" });
   const page = await context.newPage();
   let resolveSave: (() => void) | null = null;
   const saveBodies: unknown[] = [];
 
   await page.route("**/api/voice/save", async (route: Route) => {
-    saveBodies.push(JSON.parse(route.request().postData() || "{}"));
+    const body = JSON.parse(route.request().postData() || "{}");
+    // Allow ordinary answer flushes; delay only the terminal persistence ack.
+    if (!body.complete) {
+      await route.fulfill({ json: { ok: true } });
+      return;
+    }
+    saveBodies.push(body);
     await new Promise<void>((resolve) => {
       resolveSave = resolve;
     });

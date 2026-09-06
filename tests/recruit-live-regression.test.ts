@@ -8,9 +8,101 @@ import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentSpeechIntent
 import { shouldBlockRecruitmentCompletion } from "../src/lib/voice/completion-auto-close";
 import { createAnswerCommitGate } from "../server/answer-commit-gate";
 
+test("completion preflight retains late messages and serializes subsequent saves", async () => {
+  const source = ts.createSourceFile("use-voice.ts", readFileSync(new URL("../src/hooks/use-voice.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+  let callback = "";
+  function visit(node: ts.Node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === "saveAndComplete"
+      && node.initializer && ts.isCallExpression(node.initializer)) callback = node.initializer.arguments[0].getText(source);
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  assert.ok(callback);
+  for (const [ok, concurrent] of [[true, false], [false, false], [true, true], [false, true]]) {
+    const trackedMessagesRef = { current: [{ role: "user", content: "最初回答", questionId: "q8" }] };
+    const bodies: Array<{ messages: Array<{ content: string }> }> = [];
+    let release: (value: unknown) => void = () => {};
+    const sandbox = vm.createContext({
+      trackedMessagesRef, progressSaveChainRef: { current: Promise.resolve() },
+      asrBufferRef: { current: "" }, chatBufferRef: { current: "" }, currentQuestionIndexRef: { current: 7 },
+      questionIdAt: () => "q8", sessionId: "local-preflight", AbortController, setTimeout, clearTimeout,
+      log: { info: () => {} }, requeueFailedProgressMessages: (a: unknown[], b: unknown[]) => [...a, ...b],
+      fetch: async (_url: string, options: { body: string }) => {
+        bodies.push(JSON.parse(options.body));
+        if (bodies.length === 1) return await new Promise(resolve => { release = resolve; });
+        return { ok: true };
+      },
+    });
+    vm.runInContext(ts.transpileModule(`const saveAndComplete = ${callback}`, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, sandbox);
+    const first = vm.runInContext("saveAndComplete(true)", sandbox);
+    const firstResult = Promise.resolve(first).then(() => true, () => false);
+    await new Promise(resolve => setImmediate(resolve));
+    trackedMessagesRef.current.push({ role: "user", content: "补充证据", questionId: "q8" });
+    const queued = concurrent ? vm.runInContext("saveAndComplete(true)", sandbox) : null;
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bodies.length, 1, "second save raced past the first ACK");
+    release({ ok, status: 503, json: async () => ({ error: "local failure" }) });
+    assert.equal(await firstResult, ok);
+    if (!concurrent) assert.ok(trackedMessagesRef.current.some(m => m.content === "补充证据"), "late message was erased by preflight ACK");
+    await (queued ?? vm.runInContext("saveAndComplete(true)", sandbox));
+    assert.deepEqual(bodies[1].messages.map(m => m.content), ok ? ["补充证据"] : ["最初回答", "补充证据"]);
+  }
+});
+
+test("actual inactivity termination persists the current answer before publishing a terminal state", async () => {
+  const order: string[] = [];
+  const noop = () => {};
+  const sandbox = relayFunctions("voice-relay.ts", ["abandonForInactivity"], {
+    interviewDone:false, endingInterview:false, ownsPersistedSession:()=>true,
+    clearSilenceAutoSkip:noop, clearPendingAsrFinal:noop, cancelTts:noop,
+    ctxSessionId:"local-abandon-test", liveSessions:new Map(),
+    isOprunRecruitmentInterview:true, currentQuestionIndex:5, lastUserAudioActivityAt:0,
+    questionTranscript:[{role:"user",text:"我已经回答本题，追问暂时没有继续回复。"}],
+    retainDeferredAnswerBeforeTransition:()=>order.push("retain"),
+    answerCommitGate:{request:async()=>{order.push("save");return true;}},
+    persistSessionStatus:async()=>{order.push("terminal");return true;},
+    browserWs:{readyState:1,send:()=>order.push("notify")},WebSocket:{OPEN:1},
+    log:{info:noop,warn:noop,error:noop},
+  });
+  await vm.runInContext("abandonForInactivity()",sandbox);
+  assert.ok(order.includes("save"), "current answer was never committed");
+  assert.ok(order.indexOf("save") < order.indexOf("terminal"), "terminal preceded answer persistence");
+  assert.ok(order.indexOf("terminal") < order.indexOf("notify"));
+});
+
 test("recruitment answer-done is not an interview-end command, including appended ASR", () => {
   for (const phrase of ["我答完了。", "我做完了。", "我的交付是台账和完整的手续，没有依据的数字不补充。我答完了。", "That's all.", "I'm done."]) {
     assert.equal(isUserEndRequest(phrase, { isRecruitmentInterview: true }), false, phrase);
+  }
+});
+
+test("inactivity save failure, resumed speech and failed status write do not publish a terminal", async () => {
+  for (const failure of ["answer", "resumed", "status", "answer-throw", "status-throw"]) {
+    const events:string[] = [];
+    const noop = () => {};
+    const sandbox = relayFunctions("voice-relay.ts", ["abandonForInactivity"], {
+      interviewDone:false, endingInterview:false, ownsPersistedSession:()=>true,
+      clearSilenceAutoSkip:noop, clearPendingAsrFinal:noop, cancelTts:noop,
+      ctxSessionId:"local-failure", liveSessions:new Map(),
+      isOprunRecruitmentInterview:true, currentQuestionIndex:5,lastUserAudioActivityAt:0,
+      retainDeferredAnswerBeforeTransition:noop,
+      persistSessionStatus:async()=>{
+        if (failure === "status-throw") throw new Error("local storage unavailable");
+        return false;
+      },
+      armSilenceAutoSkip:()=>events.push("retry"),
+      browserWs:{readyState:1,send:()=>events.push("terminal")},WebSocket:{OPEN:1},
+      log:{info:noop,warn:noop,error:noop},
+    });
+    sandbox.answerCommitGate = {request:async()=>{
+      if (failure === "answer-throw") throw new Error("local transport unavailable");
+      if (failure === "resumed") sandbox.lastUserAudioActivityAt = 1;
+      return failure !== "answer";
+    }};
+    await vm.runInContext("abandonForInactivity()", sandbox);
+    assert.equal(sandbox.interviewDone, false);
+    assert.equal(sandbox.endingInterview, false);
+    assert.deepEqual(events,["retry"]);
   }
 });
 
@@ -308,7 +400,7 @@ test("primary actual transition preserves the answer until ACK and allows retry 
     userTurnsOnCurrentQ:1, lastResponseWasCorrection:false, cachedWhiteboardDescription:"",
     whiteboardDirty:false, latestWhiteboardImage:null, recentAgentResponses:[], pendingLastQuestionTimeout:null,
     refreshDynamicQuestions:async()=>{}, isZh:true, summarizeQuestion:async()=>"summary",
-    speakAndHandle:async()=>{}, llmRoute:{}, questionSummaries:[], runQueuedManualTransition:()=>false,
+    speakAndHandle:async()=>{}, llmRoute:{}, ctxSessionId:"synthetic-session", questionSummaries:[], runQueuedManualTransition:()=>false,
   });
   const failed = vm.runInContext("handleTransition()", sandbox);
   assert.equal(sandbox.currentQuestionIndex, 1);

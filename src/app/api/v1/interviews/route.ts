@@ -5,7 +5,7 @@ import {
 } from "@/lib/api-key-auth";
 import { nanoid } from "@/lib/id";
 import {
-  RELAY_LLM_PROVIDER_SPECS,
+  relayLlmProviderModel,
   parseRelayLlmRoute,
 } from "@/lib/relay-llm-route";
 import { supabaseAdmin } from "@/lib/supabase/admin";
@@ -167,7 +167,7 @@ export async function POST(request: Request) {
     ...(relayLlmRoute
       ? {
           llmProvider: relayLlmRoute.primary,
-          llmModel: RELAY_LLM_PROVIDER_SPECS[relayLlmRoute.primary].relayModel,
+          llmModel: relayLlmProviderModel(relayLlmRoute.primary),
           customBranding: { oprunRelayLlmRoute: relayLlmRoute },
         }
       : {}),

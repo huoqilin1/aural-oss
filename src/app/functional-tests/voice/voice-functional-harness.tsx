@@ -30,7 +30,14 @@ type FunctionalScenarioId =
   | "recruitment-eight-question-premature"
   | "recruitment-eight-question-save-retry"
   | "recruitment-eight-question-progress-retry"
+  | "recruitment-eight-question-asr"
+  | "recruitment-eight-question-interrupted"
   | "recruitment-eight-question-recording-late";
+
+const isLocalRecordingScenario = (id: string) => [
+  "recruitment-eight-question-recording-late", "recruitment-eight-question-asr",
+  "recruitment-eight-question-interrupted",
+].includes(id);
 
 declare global {
   interface Window {
@@ -45,6 +52,12 @@ declare global {
 }
 
 const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
+  "recruitment-eight-question-asr": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+  },
+  "recruitment-eight-question-interrupted": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+  },
   "recruitment-eight-question-recording-late": {
     "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
     "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
@@ -370,10 +383,12 @@ function installFunctionalRelayMocks(
   window.__functionalRelayScenario = scenario;
   window.__functionalScenarioId = scenarioId;
   window.__functionalMediaFailureInjected = false;
-  if (scenarioId === "recruitment-eight-question-recording-late") {
+  if (isLocalRecordingScenario(scenarioId)) {
     const realFetch = window.fetch.bind(window);
     const answers = new Set<string>();
-    const state = { answeredQuestions: 0, uploads: 0, recordingLinked: false, clientRecordingSaved: false };
+    const state = { answeredQuestions: 0, uploads: 0, recordingLinked: false, clientRecordingSaved: false,
+      completeRequests:0, retainedOpenings:0, recordingBytes:0 };
+    const openings = new Set<string>();
     const report = () => {
       const node = document.querySelector('[data-testid="local-save-ledger"]');
       if (node) node.textContent = JSON.stringify(state);
@@ -387,16 +402,25 @@ function installFunctionalRelayMocks(
         const body = JSON.parse(String(init?.body || "{}"));
         for (const message of body.messages || []) {
           if (message.role === "user" && message.questionId && message.content?.trim()) answers.add(message.questionId);
+          if (message.role === "user" && message.content?.includes("不能编造历史业绩")) openings.add(message.questionId);
         }
         state.answeredQuestions = answers.size;
+        state.retainedOpenings = openings.size;
+        if (body.complete) state.completeRequests++;
         report();
-        return Response.json({ success: !body.complete || answers.size === 8 },
-          { status: body.complete && answers.size !== 8 ? 409 : 200 });
+        const invalid = ((body.complete || body.validateOnly) && answers.size !== 8)
+          || (body.complete && !state.recordingLinked);
+        return Response.json({ success: !invalid }, { status: invalid ? 409 : 200 });
       }
       if (url.pathname === "/api/session/upload") {
         const form = init?.body as FormData;
         if (form.get("type") === "recording") {
           state.uploads++; report();
+          state.recordingBytes = (form.get("file") as Blob)?.size || 0;
+          if (scenarioId.endsWith("interrupted") && state.uploads === 1) {
+            report();
+            return Response.json({error:"local recording failure"}, {status:503});
+          }
           await new Promise((resolve) => setTimeout(resolve, 9000));
           state.recordingLinked = true; report();
         }
@@ -450,7 +474,7 @@ function installFunctionalRelayMocks(
       const context = new AudioContext();
       functionalAudioContexts.push(context);
       const destination = context.createMediaStreamDestination();
-      if (scenarioId === "recruitment-eight-question-recording-late") {
+      if (isLocalRecordingScenario(scenarioId)) {
         const source = context.createOscillator();
         const gain = context.createGain();
         gain.gain.value = 0.001;
@@ -511,6 +535,40 @@ function installFunctionalRelayMocks(
         this.readyState = 1;
         this.onopen?.({});
       }, 0);
+    }
+
+    scheduleSpokenAnswer(): void {
+      if (!scenarioId.endsWith("-asr") && !scenarioId.endsWith("-interrupted")) return;
+      const index = this.currentQuestionIndex;
+      const emit = (message: Record<string, unknown>) => {
+        if (this.readyState !== 3 && this.currentQuestionIndex === index) {
+          this.onmessage?.({data:JSON.stringify(message)});
+        }
+      };
+      const opening = `第${index + 1}项工作，我没有真实台账，不能编造历史业绩。`;
+      const middle = "应办理事项逐项核对，提交记录不等于办理完成，结果需要负责人复核";
+      const tail = "，未完成事项登记责任人和截止时间，我答完了。";
+      // Real useVoice event handling and MediaRecorder, controlled upstream
+      // ASR only. No text_input or next-question UI actions drive this scenario.
+      emit({type:"tts_text", questionIndex:index, data:{text:`请说明第${index + 1}项工作中的本人职责和验证方法？`}});
+      emit({type:"tts_ended", questionIndex:index});
+      emit({type:"input_ready"});
+      setTimeout(()=>emit({type:"asr",data:{results:[{text:opening + middle}]}}),400);
+      setTimeout(()=>emit({type:"asr",data:{results:[{text:middle + tail}]}}),700);
+      setTimeout(()=>emit({type:"asr_ended",questionIndex:index,text:middle + tail}),900);
+      setTimeout(()=>{
+        if (scenarioId.endsWith("interrupted") && index === 5) {
+          this.interviewEnded = true;
+          emit({type:"interview_incomplete",reason:"candidate_inactive",message:"本次面试尚未完成。"});
+        } else if (index === 7) {
+          emit({type:"tts_text",questionIndex:index,data:{text:"本次面试已结束，感谢你的时间，再见。"}});
+          emit({type:"tts_ended",questionIndex:index});
+          setTimeout(()=>emit({type:"interview_complete"}),100);
+        } else {
+          this.pendingCommitRequest = `asr-commit-${index}`;
+          emit({type:"answer_commit_required",questionIndex:index,requestId:this.pendingCommitRequest});
+        }
+      },1100);
     }
 
     send(data: string): void {
@@ -627,6 +685,7 @@ function installFunctionalRelayMocks(
         }
         setTimeout(() => {
           this.onmessage?.({ data: JSON.stringify({ type: "input_ready" }) });
+          this.scheduleSpokenAnswer();
         }, 180);
       }
 
@@ -644,6 +703,7 @@ function installFunctionalRelayMocks(
                   sessionId: event.sessionId ?? "functional-session",
                 }),
               });
+              setTimeout(()=>this.scheduleSpokenAnswer(),200);
               return;
             }
 
@@ -757,7 +817,7 @@ export function VoiceFunctionalHarness({
 
   return (
     <div className="relative min-h-screen bg-background">
-      {scenario === "recruitment-eight-question-recording-late" && (
+      {isLocalRecordingScenario(scenario) && (
         <pre data-testid="local-save-ledger" className="relative z-50 bg-white text-xs">local-only: ready</pre>
       )}
       <div
@@ -773,7 +833,7 @@ export function VoiceFunctionalHarness({
       <div data-testid="harness-ready" className="sr-only">
         {mocksReady ? "true" : "false"}
       </div>
-      {mocksReady && scenario === "recruitment-eight-question-recording-late" && !localStarted ? (
+      {mocksReady && isLocalRecordingScenario(scenario) && !localStarted ? (
         <button onClick={() => setLocalStarted(true)}>开始本地测试</button>
       ) : mocksReady && scenario === "recruitment-entry" && !recruitmentOnboarding.ready ? (
         <div data-testid="onboarding-restoring">restoring</div>

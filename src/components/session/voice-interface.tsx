@@ -485,6 +485,9 @@ export function VoiceInterface({
   // 服务端终态错误(已结束/不完整)必须持续可见,不能像瞬时连接错误那样 5 秒后消失。
   const terminalRef = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [incompleteSaveFailed, setIncompleteSaveFailed] = useState(false);
+  const incompleteSaveStartedRef = useRef(false);
+  const incompleteSaveBusyRef = useRef(false);
   const [locallyCompleted, setLocallyCompleted] = useState(false);
   const [advancePending, setAdvancePending] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
@@ -754,6 +757,40 @@ export function VoiceInterface({
   useEffect(() => {
     terminalRef.current = voice.isSessionTerminal;
   }, [voice.isSessionTerminal]);
+
+  const preserveIncomplete = voice.preserveIncomplete;
+  const stopRecording = recording.stop;
+  const saveInterruptedInterview = useCallback(async () => {
+    if (incompleteSaveBusyRef.current) return;
+    incompleteSaveBusyRef.current = true;
+    setIncompleteSaveFailed(false);
+    setIsSaving(true);
+    try {
+      // Independent work: an answer write failure must not leave the camera
+      // capturing, and a failed upload must not discard the retained answer.
+      const results = await Promise.allSettled([
+        preserveIncomplete().then((ok) => {
+          if (!ok) throw new Error("interrupted transcript save failed");
+        }),
+        videoMode ? stopRecording() : Promise.resolve(),
+      ]);
+      if (results.some((result) => result.status === "rejected")) {
+        setIncompleteSaveFailed(true);
+        setError("面试已暂停，部分记录尚未保存，请保持页面打开并重试保存。");
+      } else {
+        setError("本次面试尚未完成，已有记录已保存。请联系招聘负责人安排后续面试。");
+      }
+    } finally {
+      incompleteSaveBusyRef.current = false;
+      setIsSaving(false);
+    }
+  }, [preserveIncomplete, videoMode, stopRecording]);
+
+  useEffect(() => {
+    if (!voice.isSessionTerminal || incompleteSaveStartedRef.current) return;
+    incompleteSaveStartedRef.current = true;
+    void saveInterruptedInterview();
+  }, [voice.isSessionTerminal, saveInterruptedInterview]);
   const latestAssistantRequiresAnswer =
     !!voice.aiTranscript.trim() && looksLikeInterviewQuestion(voice.aiTranscript);
   const canAdvanceCurrentQuestion =
@@ -1868,9 +1905,9 @@ export function VoiceInterface({
       {isSaving && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-background/80 backdrop-blur-sm">
           <Loader2 className="h-10 w-10 animate-spin text-primary" />
-          <p className="mt-4 text-lg font-medium">Saving interview data...</p>
+          <p className="mt-4 text-lg font-medium">正在保存面试记录…</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            This will only take a moment.
+            请稍候，保存完成前请保持页面打开。
           </p>
         </div>
       )}
@@ -1977,6 +2014,11 @@ export function VoiceInterface({
         <div className="mx-6 mt-2 flex items-center gap-2 rounded-md bg-destructive/10 px-4 py-2 text-sm text-destructive">
           <AlertCircle className="h-4 w-4 shrink-0" />
           {error}
+          {incompleteSaveFailed && voice.isSessionTerminal && (
+            <Button variant="outline" size="sm" onClick={() => void saveInterruptedInterview()} disabled={isSaving}>
+              重试保存
+            </Button>
+          )}
         </div>
       )}
 

@@ -7,11 +7,21 @@
  */
 
 import { GoogleGenAI } from "@google/genai";
+import { randomUUID } from "node:crypto";
+import { runHrModelTask, type TaskIdentity } from "./hr-model-task";
+import { ensureHrUsageReady, queueHrUsage } from "./hr-model-usage-outbox";
+
+type RequestOptions = {
+  messages?: Array<{ role: string; content: unknown }>;
+  validate?: (text: string) => void;
+  deep?: boolean;
+};
 import { createLogger } from "../src/lib/logger";
 import {
   type RelayLlmProviderId,
   type RelayLlmRoute,
   relayLlmRouteOrder,
+  RELAY_LLM_PROVIDER_SPECS,
 } from "../src/lib/relay-llm-route";
 
 const log = createLogger("relay-llm");
@@ -44,11 +54,17 @@ export interface RelayLlmCallMeta {
 }
 
 interface RelayLlmUsage {
-  promptTokens: number;
-  completionTokens: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  cachedInputTokens?: number;
+}
+
+function knownTokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 interface RelayLlmEndpoint {
+  provider?: RelayLlmProviderId;
   model: string;
   temperature: number;
   apiKey: string;
@@ -152,6 +168,15 @@ function providerEndpoint(
   provider: RelayLlmProviderId,
   temperature: number,
 ): RelayLlmEndpoint | null {
+  if (provider === "doubao") {
+    return {
+      model: process.env.DOUBAO_TEXT_MODEL?.trim() || process.env.DOUBAO_LLM_MODEL?.trim() || "unconfigured",
+      temperature,
+      apiKey: process.env.DOUBAO_TEXT_API_KEY?.trim() || process.env.DOUBAO_LLM_API_KEY?.trim() || "",
+      baseUrl: process.env.DOUBAO_TEXT_BASE_URL?.trim() || process.env.DOUBAO_LLM_BASE_URL?.trim() || "https://ark.cn-beijing.volces.com/api/v3",
+      useGemini: false,
+    };
+  }
   if (provider === "deepseek") {
     const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
     return apiKey ? {
@@ -186,10 +211,15 @@ function buildProviderChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
   const temperature = parseTemperature();
   const order: RelayLlmProviderId[] = route
     ? relayLlmRouteOrder(route)
-    : ["deepseek", "zhipu", "kimi"];
+    : ["zhipu", "kimi", "deepseek", "doubao"];
   return order.flatMap((provider) => {
     const endpoint = providerEndpoint(provider, temperature);
-    return endpoint ? [endpoint] : [];
+    if (endpoint) return [{ ...endpoint, provider }];
+    if (route?.fallbacks.length === 3) return [{ provider,
+      model: RELAY_LLM_PROVIDER_SPECS[provider].relayModel,
+      temperature, apiKey: "", baseUrl: "", useGemini: false,
+    }];
+    return [];
   });
 }
 
@@ -306,8 +336,8 @@ async function callGemini(
     const meta = chunk.usageMetadata;
     if (meta) {
       usage = {
-        promptTokens: meta.promptTokenCount ?? 0,
-        completionTokens: meta.candidatesTokenCount ?? 0,
+        promptTokens: knownTokenCount(meta.promptTokenCount),
+        completionTokens: knownTokenCount(meta.candidatesTokenCount),
       };
     }
   }
@@ -318,11 +348,12 @@ async function callOpenAICompatible(
   endpoint: RelayLlmEndpoint,
   prompt: string,
   maxTokens?: number,
+  options?: RequestOptions,
 ): Promise<{ text: string; usage?: RelayLlmUsage }> {
   // 2026-08-20 王总指令：Token 无上限——不传 max_tokens，让模型自然收尾。
   const reqBody: Record<string, unknown> = {
     model: endpoint.model,
-    messages: [{ role: "user", content: prompt }],
+    messages: options?.messages ?? [{ role: "user", content: prompt }],
     ...(maxTokens ? { max_tokens: maxTokens } : {}),
   };
   // Kimi K3 rejects the legacy `temperature` field. The official Kimi
@@ -343,18 +374,25 @@ async function callOpenAICompatible(
       Authorization: `Bearer ${endpoint.apiKey}`,
     },
     body: JSON.stringify(reqBody),
+    // Abort the actual transport, not just a Promise.race that leaves billing
+    // and an in-flight request running while the fallback starts.
+    signal: AbortSignal.timeout((() => {
+      const configured = Number(process.env.FALLBACK_ATTEMPT_TIMEOUT_MS);
+      return Number.isSafeInteger(configured) && configured > 0 ? configured : 30_000;
+    })()),
   });
 
   if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`LLM API ${res.status}: ${errBody.slice(0, 200)}`);
+    await res.body?.cancel();
+    throw new Error(`LLM API ${res.status}`);
   }
 
   const data = await res.json();
   const usage = data.usage
     ? {
-        promptTokens: Number(data.usage.prompt_tokens ?? 0) || 0,
-        completionTokens: Number(data.usage.completion_tokens ?? 0) || 0,
+        promptTokens: knownTokenCount(data.usage.prompt_tokens),
+        completionTokens: knownTokenCount(data.usage.completion_tokens),
+        cachedInputTokens: knownTokenCount(data.usage.prompt_cache_hit_tokens ?? data.usage.prompt_tokens_details?.cached_tokens),
       }
     : undefined;
   return { text: data.choices?.[0]?.message?.content?.trim() || "", usage };
@@ -375,13 +413,21 @@ async function callEndpoint(
   endpoint: RelayLlmEndpoint,
   prompt: string,
   maxTokens?: number,
+  options?: RequestOptions,
 ): Promise<{ text: string; usage?: RelayLlmUsage }> {
-  if (!endpoint.apiKey) {
+  if (!endpoint.apiKey || endpoint.model === "unconfigured") {
     throw new Error(`No API key for relay model ${endpoint.model}`);
   }
   return endpoint.useGemini
     ? callGemini(endpoint, prompt, maxTokens)
-    : callOpenAICompatible(endpoint, prompt, maxTokens);
+    : callOpenAICompatible(endpoint, prompt, maxTokens, options);
+}
+
+export class AllFourModelsFailed extends Error {
+  readonly code = "all_models_failed";
+  constructor(readonly attempts: Array<{ provider: string; model: string; state: string; error: string }>) {
+    super("all_models_failed");
+  }
 }
 
 export async function callRelayLLM(
@@ -390,11 +436,28 @@ export async function callRelayLLM(
   meta?: RelayLlmCallMeta,
   route?: RelayLlmRoute,
 ): Promise<string> {
-  const chain = getEndpointChain(route);
+  if (route?.fallbacks.length === 3 && meta?.session) {
+    return runHrModelTask({ session_id: meta.session, stage: meta.stage ?? "voice_turn" },
+      saved => callRelayRequest(prompt, maxTokens, meta, saved));
+  }
+  return callRelayRequest(prompt, maxTokens, meta, route);
+}
+
+export async function generateGovernedText(identity: TaskIdentity, messages: Array<{role: string; content: unknown}>, validate: (text: string) => void) {
+  return runHrModelTask(identity, route => callRelayRequest("", undefined, { stage: identity.stage }, route,
+    { messages, validate, deep: true }));
+}
+
+async function callRelayRequest(prompt: string, maxTokens?: number, meta?: RelayLlmCallMeta, route?: RelayLlmRoute, options?: RequestOptions): Promise<string> {
+  const chain = getEndpointChain(route).map(endpoint => options?.deep && endpoint.provider === "deepseek"
+    ? { ...endpoint, model: "deepseek-v4-pro" } : endpoint);
   logConfig(chain);
+  const metered = Boolean(process.env.HR_MODEL_CONTROL_URL?.trim());
+  if (metered) await ensureHrUsageReady();
+  const callId = randomUUID();
 
   const configured = chain.filter((e) => e.apiKey);
-  if (configured.length === 0) {
+  if (configured.length === 0 && route?.fallbacks.length !== 3) {
     return "";
   }
 
@@ -404,15 +467,23 @@ export async function callRelayLLM(
   );
   // If every provider is cooling down, retry the chain so recovery is not
   // permanently blocked. Otherwise skip known-bad providers immediately.
-  const candidates = available.length > 0 ? available : configured;
+  const candidates = route ? chain : (available.length > 0 ? available : configured);
 
   const startMs = Date.now();
   let lastError: unknown;
+  const attempts: Array<{ provider: string; model: string; state: string; error: string }> = [];
 
   for (let i = 0; i < candidates.length; i++) {
     const endpoint = candidates[i]!;
+    const startedAt = new Date().toISOString();
+    let recordedUsage: RelayLlmUsage | undefined;
+    let outcome: "success" | "failed" | "empty" = "failed";
     try {
-      const { text, usage } = await callEndpoint(endpoint, prompt, maxTokens);
+      const { text, usage } = await callEndpoint(endpoint, prompt, maxTokens, options);
+      recordedUsage = usage;
+      if (!text.trim()) { outcome = "empty"; throw new Error("empty_response"); }
+      options?.validate?.(text);
+      outcome = "success";
       endpointCooldowns.delete(endpointKey(endpoint));
       const latencyMs = Date.now() - startMs;
       // Token 分类账：每笔调用一行，stage 区分环节（turn/summarize/generate…），
@@ -426,6 +497,8 @@ export async function callRelayLLM(
       return text;
     } catch (err) {
       lastError = err;
+      attempts.push({ provider: endpoint.provider ?? "legacy", model: endpoint.model,
+        state: "failed", error: err instanceof Error ? err.name : "provider_error" });
       endpointCooldowns.set(
         endpointKey(endpoint),
         Date.now() + failureCooldownMs(err),
@@ -434,13 +507,19 @@ export async function callRelayLLM(
       if (next) {
         log.warn(
           `Relay LLM failed for ${endpoint.model}, falling back to ${next.model}`,
-          err,
+          err instanceof Error ? err.name : "provider_error",
         );
       }
+    } finally {
+      if (metered) await queueHrUsage({ call_id: callId, provider: endpoint.provider ?? "legacy", model: endpoint.model,
+        scene: meta?.stage ?? "unclassified", started_at: startedAt, status: outcome,
+        usage: recordedUsage ? { prompt_tokens: recordedUsage.promptTokens, completion_tokens: recordedUsage.completionTokens,
+          prompt_cache_hit_tokens: recordedUsage.cachedInputTokens } : null });
     }
   }
 
-  log.error("Relay LLM failed on all configured models", lastError);
+  log.error("Relay LLM failed on all configured models", lastError instanceof Error ? lastError.name : "provider_error");
+  if (route?.fallbacks.length === 3) throw new AllFourModelsFailed(attempts);
   throw lastError ?? new Error("Relay LLM failed");
 }
 

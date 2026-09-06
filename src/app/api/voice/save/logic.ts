@@ -7,6 +7,7 @@ export type VoiceSavePayload = {
     source?: string;
   }>;
   complete?: boolean;
+  validateOnly?: boolean;
   currentQuestionIndex?: number;
 };
 
@@ -92,6 +93,7 @@ export function computeMessageBasedDuration(
 
 export type CompletionSession = {
   status: string;
+  audioRecordingUrl?: string | null;
   startedAt: string;
   lastActivityAt?: string | null;
   activitySegments: unknown;
@@ -159,7 +161,7 @@ export async function handleVoiceSave(
   payload: VoiceSavePayload,
   ops: VoiceSaveOps,
 ): Promise<{ status: number; body: { ok?: boolean; error?: string } }> {
-  const { sessionId, messages, complete, currentQuestionIndex } = payload;
+  const { sessionId, messages, complete, validateOnly, currentQuestionIndex } = payload;
 
   if (!sessionId) {
     return { status: 400, body: { error: "Missing sessionId" } };
@@ -170,10 +172,16 @@ export async function handleVoiceSave(
       await ops.insertMessages(sessionId, messages);
     }
 
-    if (complete) {
+    if (complete || validateOnly) {
       const session = await ops.loadSessionForCompletion(sessionId);
+      if (!session) {
+        return { status: 404, body: { error: "未找到本次面试，无法确认保存结果。" } };
+      }
 
       if (session) {
+        if (session.status === "ABANDONED") {
+          return { status:409, body:{error:"本次面试尚未完整完成，不能提交完成结果。"} };
+        }
         const isRecruitment = /^数君招聘\s*·\s*/.test(session.interview.title);
         // Recruitment completion is fail-closed even when another process has
         // already written COMPLETED.  The relay cannot authoritatively know
@@ -189,6 +197,9 @@ export async function handleVoiceSave(
             .slice(0, 8)
             .map((question) => question.id)
             .filter((questionId): questionId is string => Boolean(questionId));
+          if (requiredQuestionIds.length !== 8) {
+            return { status:409, body:{error:"正式面试题目尚未完整同步，请稍后重试保存。"} };
+          }
           if (requiredQuestionIds.length === 8) {
             const answered = new Set(await ops.loadAnsweredQuestionIds(sessionId));
             const missingCount = requiredQuestionIds.filter(
@@ -203,6 +214,10 @@ export async function handleVoiceSave(
               };
             }
           }
+        }
+        if (validateOnly) return { status:200, body:{ok:true} };
+        if (isRecruitment && !session.audioRecordingUrl) {
+          return { status:409, body:{error:"面试录音尚未保存完成，请稍后重试保存。"} };
         }
         if (session.status === "COMPLETED") {
           return { status: 200, body: { ok: true } };

@@ -5,6 +5,7 @@ import {
 import {
   RELAY_LLM_PROVIDER_IDS,
   RELAY_LLM_PROVIDER_SPECS,
+  relayLlmProviderModel,
   relayLlmProviderConfigured,
 } from "@/lib/relay-llm-route";
 
@@ -16,7 +17,7 @@ export async function GET(request: Request) {
     data: RELAY_LLM_PROVIDER_IDS.map((id) => ({
       id,
       label: RELAY_LLM_PROVIDER_SPECS[id].label,
-      model: RELAY_LLM_PROVIDER_SPECS[id].relayModel,
+      model: relayLlmProviderModel(id),
       configured: relayLlmProviderConfigured(id),
     })),
   });

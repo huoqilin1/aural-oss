@@ -8,6 +8,12 @@ import {
 } from "../src/lib/relay-llm-route";
 import { relayLlmRouteFromInterview } from "../server/interview-llm-route";
 
+test("new route accepts exactly four unique providers", () => {
+  const route = parseRelayLlmRoute({primary: "zhipu", fallbacks: ["kimi", "deepseek", "doubao"]});
+  assert.deepEqual(relayLlmRouteOrder(route!), ["zhipu", "kimi", "deepseek", "doubao"]);
+  assert.equal(parseRelayLlmRoute({primary: "zhipu", fallbacks: ["kimi", "deepseek", "zhipu"]}), null);
+});
+
 test("accepts one primary plus two unique supported fallbacks", () => {
   const route = parseRelayLlmRoute({
     primary: "zhipu",
@@ -41,7 +47,7 @@ test("reads only the namespaced route from interview metadata", () => {
   );
   assert.equal(relayLlmRouteFromInterview({ customBranding: { color: "blue" } }), undefined);
   assert.deepEqual(DEFAULT_RELAY_LLM_ROUTE, {
-    primary: "deepseek",
-    fallbacks: ["zhipu", "kimi"],
+    primary: "zhipu",
+    fallbacks: ["kimi", "deepseek", "doubao"],
   });
 });

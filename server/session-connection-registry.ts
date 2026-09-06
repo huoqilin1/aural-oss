@@ -17,14 +17,14 @@ export class SessionConnectionRegistry<
 > {
   private readonly active = new Map<
     string,
-    { lease: number; connection: Connection }
+    { lease: number; connection: Connection; established: boolean; lastSeen: number }
   >();
   private nextLease = 0;
 
   claim(sessionId: string, connection: Connection): SessionConnectionLease {
     const lease = ++this.nextLease;
     const previous = this.active.get(sessionId);
-    this.active.set(sessionId, { lease, connection });
+    this.active.set(sessionId, { lease, connection, established: false, lastSeen: 0 });
 
     if (previous && previous.connection !== connection) {
       try {
@@ -39,6 +39,23 @@ export class SessionConnectionRegistry<
 
   isCurrent(sessionId: string, lease: number): boolean {
     return this.active.get(sessionId)?.lease === lease;
+  }
+
+  establish(sessionId: string, lease: number, now = Date.now()): void {
+    const entry = this.active.get(sessionId);
+    if (entry?.lease !== lease) return;
+    entry.established = true;
+    entry.lastSeen = now;
+  }
+
+  touch(sessionId: string, lease: number, now = Date.now()): void {
+    const entry = this.active.get(sessionId);
+    if (entry?.lease === lease) entry.lastSeen = now;
+  }
+
+  onlineSessionIds(now = Date.now(), freshMs = 45_000): string[] {
+    return Array.from(this.active).filter(([, entry]) => entry.established
+      && entry.lastSeen <= now && now - entry.lastSeen <= freshMs).map(([id]) => id);
   }
 
   release(sessionId: string, lease: number): boolean {

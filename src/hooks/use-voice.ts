@@ -1225,11 +1225,11 @@ export function useVoice({
   }, []);
 
   /** Save remaining tracked messages and complete the session */
-  const saveAndComplete = useCallback(async () => {
+  const saveAndComplete = useCallback(async (validateOnly = false) => {
     // A question transition saves in the background. Wait for all queued
     // progress saves so completion cannot race ahead of durable answers.
     // Failed batches are requeued by saveProgress and included below.
-    await progressSaveChainRef.current;
+    const operation = progressSaveChainRef.current.then(async () => {
 
     // Flush any pending buffers before saving
     const pendingAsrText = asrBufferRef.current.trim();
@@ -1251,8 +1251,9 @@ export function useVoice({
       chatBufferRef.current = "";
     }
 
-    const messages = trackedMessagesRef.current;
+    const messages = [...trackedMessagesRef.current];
     if (messages.length === 0 && !sessionId) return;
+    trackedMessagesRef.current = [];
 
     log.info(
       `Saving ${messages.length} remaining messages and completing session`
@@ -1265,24 +1266,32 @@ export function useVoice({
         method: "POST",
         signal: abortController.signal,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, messages, complete: true }),
+        body: JSON.stringify({ sessionId, messages, complete: !validateOnly, validateOnly }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({})) as { error?: string };
         throw new Error(body.error || `Voice completion failed with HTTP ${response.status}`);
       }
-      trackedMessagesRef.current = [];
+    } catch (error) {
+      trackedMessagesRef.current = requeueFailedProgressMessages(messages, trackedMessagesRef.current);
+      throw error;
     } finally {
       clearTimeout(timeout);
     }
+    });
+    // Progress ACKs and completion preflight share the same queue. A failed
+    // completion remains visible to its caller without poisoning later retries.
+    progressSaveChainRef.current = operation.then(() => undefined, () => undefined);
+    return await operation;
   }, [questionIdAt, sessionId]);
 
   /** Disconnect, save messages, and clean up everything */
   const disconnect = useCallback(async (beforeCleanup?: () => Promise<void>) => {
     setState((s) => ({ ...s, isSaving: true }));
     try {
-      await saveAndComplete();
+      await saveAndComplete(true);
       await beforeCleanup?.();
+      await saveAndComplete();
       cleanup();
       return true;
     } catch (error) {
@@ -1298,10 +1307,17 @@ export function useVoice({
     }
   }, [saveAndComplete, saveProgress, cleanup, onError]);
 
+  // Non-completing save for terminal/interrupted sessions. Never run report
+  // generation or turn ABANDONED into COMPLETED just to retain the transcript.
+  const preserveIncomplete = useCallback(() =>
+    saveProgress(currentQuestionIndexRef.current, currentQuestionIndexRef.current),
+  [saveProgress]);
+
   return {
     ...state,
     connect,
     disconnect,
+    preserveIncomplete,
     startListening,
     stopListening,
     nextQuestion,

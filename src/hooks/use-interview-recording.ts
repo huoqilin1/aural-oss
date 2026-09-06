@@ -368,6 +368,26 @@ export function useInterviewRecording({
    * Stop recording. Uploads the audio blob and returns recording metadata.
    * Returns the list of screenshot entries.
    */
+  const releaseCapture = useCallback(async () => {
+    try { micSourceRef.current?.disconnect(); } catch { /* noop */ }
+    micSourceRef.current = null;
+    cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    setCameraStream(null);
+    setScreenStream(null);
+    setIsRecording(false);
+    for (const ref of [cameraVideoRef, screenVideoRef]) {
+      if (ref.current) {
+        ref.current.srcObject = null;
+        ref.current.remove();
+        ref.current = null;
+      }
+    }
+    try { if (mixCtxRef.current?.state !== "closed") await mixCtxRef.current?.close(); } catch { /* noop */ }
+    mixCtxRef.current = null;
+    mixDestRef.current = null;
+  }, []);
+
   const stopOnce = useCallback(async (): Promise<{
     audioUrl?: string;
     audioDuration?: number;
@@ -396,6 +416,10 @@ export function useInterviewRecording({
         });
         recordingStoppedAtRef.current = Date.now();
       }
+
+      // Release devices before slow/failed network work, keeping the inactive
+      // recorder and captured chunks available for a real upload retry.
+      await releaseCapture();
 
       const mime = audioMimeRef.current || "audio/webm";
       const isWebm = mime.includes("webm");
@@ -436,35 +460,9 @@ export function useInterviewRecording({
       } else throw new Error("未获取到面试录音，请联系 HR 核实");
     }
 
-    // Disconnect mic source
-    try { micSourceRef.current?.disconnect(); } catch { /* noop */ }
-    micSourceRef.current = null;
-
-    // Close mix context
-    try { if (mixCtxRef.current?.state !== "closed") await mixCtxRef.current?.close(); } catch { /* noop */ }
-    mixCtxRef.current = null;
-    mixDestRef.current = null;
+    // Also release devices when no recorder was created.
+    await releaseCapture();
     recorderRef.current = null;
-
-    // Stop camera/screen tracks
-    cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
-    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
-    setCameraStream(null);
-    setScreenStream(null);
-
-    // Clean up hidden video elements
-    if (cameraVideoRef.current) {
-      cameraVideoRef.current.srcObject = null;
-      cameraVideoRef.current.remove();
-      cameraVideoRef.current = null;
-    }
-    if (screenVideoRef.current) {
-      screenVideoRef.current.srcObject = null;
-      screenVideoRef.current.remove();
-      screenVideoRef.current = null;
-    }
-
-    setIsRecording(false);
     log.info("Stopped");
 
     return {
@@ -472,7 +470,7 @@ export function useInterviewRecording({
       audioDuration,
       screenshots: screenshotsRef.current,
     };
-  }, [sessionId, takeScreenshots]);
+  }, [sessionId, takeScreenshots, releaseCapture]);
 
   const stop = useCallback(() => {
     stopWorkRef.current ??= retryableSingleFlight(stopOnce);

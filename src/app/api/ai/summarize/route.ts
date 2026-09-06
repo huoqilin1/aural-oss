@@ -1,8 +1,10 @@
 import { svgDataUrlToPng } from "@/lib/ai/convert-svg";
 import { extractJson } from "@/lib/ai/extract-json";
+import { validateReport } from "@/lib/ai/validate-report";
 import { createLogger } from "@/lib/logger";
 import { buildSummaryPrompt } from "@/lib/ai/prompts/summary";
 import { generateWithFallback } from "@/lib/ai/fallback";
+import { generateGovernedText } from "../../../../../server/relay-llm";
 import { REPORT_MODEL, REPORT_FALLBACK_CHAIN } from "@/lib/ai/registry";
 import { getAuthUser } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/supabase/admin";
@@ -101,7 +103,10 @@ export async function POST(req: Request) {
     );
 
     let response;
-    try {
+    if (/^数君招聘\s*·/.test(interview.title) && !drawingsInput?.some(drawing => drawing.imageDataUrl)) {
+      response = { content: await generateGovernedText({ session_id: sessionId, stage: "interview.summary_report" },
+        messages, text => { validateReport(extractJson(text)); }) };
+    } else try {
       response = await generateWithFallback(reportChain, {
         messages,
         temperature: 0.3,
@@ -129,7 +134,10 @@ export async function POST(req: Request) {
           textOnlyDrawings,
           codeInput,
         );
-        response = await generateWithFallback(reportChain, {
+        response = /^数君招聘\s*·/.test(interview.title)
+          ? { content: await generateGovernedText({ session_id: sessionId, stage: "interview.summary_report" },
+              fallbackMessages, text => { validateReport(extractJson(text)); }) }
+          : await generateWithFallback(reportChain, {
           messages: fallbackMessages,
           temperature: 0.3,
           maxTokens: 8192,
@@ -140,6 +148,7 @@ export async function POST(req: Request) {
     }
 
     const parsed = extractJson(response.content);
+    validateReport(parsed);
 
     const insightsData: Record<string, unknown> = {
       keyInsights: parsed.keyInsights ?? [],
@@ -157,7 +166,7 @@ export async function POST(req: Request) {
       insightsData.toneAnalysis = parsed.toneAnalysis;
     }
 
-    await supabaseAdmin
+    const saved = await supabaseAdmin
       .from("sessions")
       .update({
         summary: String(parsed.summary ?? ""),
@@ -166,10 +175,11 @@ export async function POST(req: Request) {
         insights: insightsData,
       })
       .eq("id", sessionId);
+    if (saved.error) throw new Error("report_storage_failed");
 
     return NextResponse.json(parsed);
   } catch (error) {
-    log.error("Summary generation error:", error);
+    log.error("Summary generation error", { errorType: error instanceof Error ? error.name : "unknown" });
     return NextResponse.json(
       { error: "Failed to generate summary" },
       { status: 500 },

@@ -40,11 +40,8 @@ export function extractJson<T = Record<string, unknown>>(raw: string): T {
     try {
       return JSON.parse(jsonStr) as T;
     } catch (e) {
-      // 6. Last resort: log the problematic content for debugging
-      log.error(
-        "Failed to parse after sanitisation. First 500 chars:",
-        jsonStr.slice(0, 500),
-      );
+      // Model output can contain private resume and interview material.
+      log.error("Failed to parse JSON after sanitisation");
       throw e;
     }
   }

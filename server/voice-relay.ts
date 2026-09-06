@@ -85,6 +85,7 @@ import {
   type LiveSessionRecord,
 } from "./session-finalization";
 import { SessionConnectionRegistry } from "./session-connection-registry";
+import { publishVoiceOnline } from "./voice-online-state";
 import { createAnswerCommitGate } from "./answer-commit-gate";
 import { loadInterviewRelayLlmRoute } from "./interview-llm-route";
 
@@ -770,6 +771,7 @@ async function summarizeQuestion(
   transcript: TranscriptEntry[],
   isZh: boolean,
   llmRoute?: RelayLlmRoute,
+  sessionId?: string,
 ): Promise<string> {
   if (transcript.length === 0) return "";
 
@@ -780,6 +782,7 @@ async function summarizeQuestion(
   try {
     const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), undefined, {
       stage: "q-summary",
+      session: sessionId,
     }, llmRoute);
     log.info(`Q summary: "${result.slice(0, 100)}..."`);
     return result;
@@ -848,7 +851,8 @@ wss.on("connection", (browserWs) => {
         const context = msg.context as InterviewContext;
         void loadInterviewRelayLlmRoute(dynamicQuestionClient, context.interviewId)
           .then(async (llmRoute) => {
-            await assertRelayLlmReady({ route: llmRoute });
+            // Q1/Q2 are persisted; a probe must not restart a failed model chain.
+            if (llmRoute?.fallbacks.length !== 3) await assertRelayLlmReady({ route: llmRoute });
             if (browserWs.readyState !== WebSocket.OPEN) return;
             // 终态会话(COMPLETED/ABANDONED)拒绝重新 init:不能因为刷新或
             // interview_incomplete 后的自动重连,从 Q1 重播一场已结束的面试。
@@ -887,15 +891,24 @@ const SESSION_DISCONNECT_GRACE_MS =
 
 const liveSessions = new Map<string, LiveSessionRecord>();
 const browserSessionConnections = new SessionConnectionRegistry<WebSocket>();
+let onlinePublishRunning = false;
+const onlinePublishTimer = setInterval(() => {
+  if (onlinePublishRunning) return;
+  onlinePublishRunning = true;
+  const ids = browserSessionConnections.onlineSessionIds().filter(id => liveSessions.get(id)?.status === "live");
+  void publishVoiceOnline(ids).catch(() => log.warn("Voice online telemetry write failed"))
+    .finally(() => { onlinePublishRunning = false; });
+}, 15_000);
+onlinePublishTimer.unref();
 
 async function persistSessionStatus(
   sessionId: string,
   status: string,
   reason: string,
-): Promise<void> {
+): Promise<boolean> {
   if (!dynamicQuestionClient) {
     log.warn(`session persist skipped (${sessionId} -> ${status} ${reason}): no service client`);
-    return;
+    return false;
   }
   const nowIso = new Date().toISOString();
   const patch: Record<string, unknown> = {
@@ -908,19 +921,25 @@ async function persistSessionStatus(
   // 已终态(COMPLETED/ABANDONED)的会话不得被重复放弃/迟到完成/重连清扫改写。
   const { data: currentRow, error: readError } = await dynamicQuestionClient
     .from("sessions")
-    .select("status")
+    .select("status, audioRecordingUrl, interview:interviews(title)")
     .eq("id", sessionId)
     .maybeSingle();
   if (readError) {
     log.error(`session persist status read failed (${sessionId}): ${readError.message}`);
-    return;
+    return false;
   }
   const currentStatus = currentRow?.status as string | null | undefined;
+  const interview = currentRow?.interview as {title?:string} | null;
+  if (status === "COMPLETED" && /^数君招聘\s*·\s*/.test(interview?.title || "")
+    && !currentRow?.audioRecordingUrl) {
+    log.info("Recruitment completion deferred until recording is durably linked");
+    return false;
+  }
   if (!shouldPersistSessionStatus(status, currentStatus)) {
     log.info(`Session ${sessionId} finalize ${status} skipped (current=${currentStatus ?? "unknown"})`);
-    return;
+    return currentStatus === status;
   }
-  const { error } = await dynamicQuestionClient
+  const { data: updatedRows, error } = await dynamicQuestionClient
     .from("sessions")
     .update(patch)
     .eq("id", sessionId)
@@ -929,9 +948,11 @@ async function persistSessionStatus(
     .select("id");
   if (error) {
     log.error(`session persist failed (${sessionId} -> ${status}):`, error.message);
-    return;
+    return false;
   }
+  if (!updatedRows?.length) return false;
   log.info(`Session ${sessionId} -> ${status} (${reason})`);
+  return true;
 }
 
 async function rejectInitForTerminalSession(
@@ -1288,6 +1309,9 @@ async function handleBrowserConnection(
     log.info("New browser connection superseded the previous relay for this session");
   }
   registerLiveSession(ctx);
+  browserWs.on("pong", () => {
+    if (connectionClaim) browserSessionConnections.touch(ctxSessionId, connectionClaim.lease);
+  });
   browserWs.on("message", () => {
     if (!ownsPersistedSession()) return;
     const record = ctxSessionId ? liveSessions.get(ctxSessionId) : undefined;
@@ -2294,7 +2318,7 @@ async function handleBrowserConnection(
     const currentQ = sortedQuestions[currentQuestionIndex];
     const transcriptSnapshot = [...questionTranscript];
     if (transcriptSnapshot.length > 0) {
-      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute)
+      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId)
         .then((summary) => questionSummaries.push(summary))
         .catch(log.error);
     }
@@ -2573,6 +2597,7 @@ async function handleBrowserConnection(
       : null;
     let response = deterministicMetricFollowUp || await callRelayLLM(prompt, undefined, {
       stage: "interview-turn",
+      session: ctxSessionId,
       question: currentQuestionIndex + 1,
     }, llmRoute);
     // A fast spoken/chat "next" can move the question while this call is pending.
@@ -2901,7 +2926,7 @@ async function handleBrowserConnection(
         log.info(`→ Q${currentQuestionIndex + 1}/${sortedQuestions.length}: ${nextQ.text.slice(0, 60)}...`);
         const previousQuestionIndex = currentQuestionIndex - 1;
         const summaryPromise = transcriptSnapshot.length > 0
-          ? summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute)
+          ? summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId)
           : Promise.resolve("");
         const [, summary] = await Promise.all([
           speakAndHandle(transition, { trackInTranscript: false }),
@@ -2915,6 +2940,7 @@ async function handleBrowserConnection(
             transcriptSnapshot,
             isZh,
             llmRoute,
+            ctxSessionId,
           );
           questionSummaries.push(lastSummary);
         }
@@ -2987,6 +3013,7 @@ async function handleBrowserConnection(
           transcriptSnapshot,
           isZh,
           llmRoute,
+          ctxSessionId,
         );
         questionSummaries.push(summary);
       }
@@ -3405,7 +3432,7 @@ async function handleBrowserConnection(
       if (silenceAskCount >= MAX_SILENT_ASKS_PER_QUESTION) {
         if (isOprunRecruitmentInterview) {
           log.warn("正式计分题两次提醒后仍无回应,标记面试未完成,绝不跳题");
-          abandonForInactivity();
+          void abandonForInactivity().catch(log.error);
         } else {
           log.info("本题已询问 2 次仍无回应,进入下一题");
           void advanceAfterSilence();
@@ -3437,7 +3464,7 @@ async function handleBrowserConnection(
       if (isOprunRecruitmentInterview) {
         if (silenceAskCount >= MAX_SILENT_ASKS_PER_QUESTION) {
           log.warn("正式计分题持续静默,标记面试未完成,绝不跳题");
-          abandonForInactivity();
+          void abandonForInactivity().catch(log.error);
         } else {
           log.info("正式计分题提醒后仍静默,继续停留原题并再次等待");
           armSilenceAutoSkip();
@@ -3453,7 +3480,7 @@ async function handleBrowserConnection(
     // AFK 守卫:连续 2 道题零回答(两次询问均无回应) → 提前诚实收尾
     if (unansweredQuestionsStreak >= MAX_UNANSWERED_QUESTIONS_STREAK) {
       log.warn("连续多题零回答,判定候选人已离开,提前收尾");
-      abandonForInactivity();
+      await abandonForInactivity();
       return;
     }
     unansweredQuestionsStreak += 1;
@@ -3463,7 +3490,7 @@ async function handleBrowserConnection(
   }
 
   /** AFK 守卫:页面开着但人不在,空转两题后诚实收尾,不留全空回答记录 */
-  function abandonForInactivity() {
+  async function abandonForInactivity() {
     if (interviewDone || endingInterview) return;
     if (!ownsPersistedSession()) {
       interviewDone = true;
@@ -3474,15 +3501,46 @@ async function handleBrowserConnection(
       return;
     }
     endingInterview = true;
-    interviewDone = true;
     clearSilenceAutoSkip();
-    clearPendingAsrFinal();
     cancelTts();
+    const inactiveQuestionIndex = currentQuestionIndex;
+    const inactiveAudioAt = lastUserAudioActivityAt;
+    if (isOprunRecruitmentInterview) {
+      let saved = false;
+      try {
+        retainDeferredAnswerBeforeTransition();
+        saved = await answerCommitGate.request(currentQuestionIndex);
+      } catch {
+        log.warn("Inactivity answer persistence unavailable; retaining the current turn");
+      }
+      if (!ownsPersistedSession()) return;
+      if (!saved || currentQuestionIndex !== inactiveQuestionIndex || lastUserAudioActivityAt !== inactiveAudioAt) {
+        // Keep the same question and retained answer available for retry.
+        // A transport/storage failure must not publish a successful terminal.
+        endingInterview = false;
+        log.warn("Inactivity finalization deferred: answer save not acknowledged");
+        armSilenceAutoSkip();
+        return;
+      }
+    }
+    clearPendingAsrFinal();
     if (ctxSessionId) {
+      let persisted = false;
+      try {
+        persisted = await persistSessionStatus(ctxSessionId, "ABANDONED", "candidate_inactive");
+      } catch {
+        log.warn("Inactivity status persistence unavailable; deferring finalization");
+      }
+      if (!ownsPersistedSession()) return;
+      if (!persisted) {
+        endingInterview = false;
+        armSilenceAutoSkip();
+        return;
+      }
       const record = liveSessions.get(ctxSessionId);
       if (record) record.status = "ended";
-      void persistSessionStatus(ctxSessionId, "ABANDONED", "candidate_inactive");
     }
+    interviewDone = true;
     if (browserWs.readyState === WebSocket.OPEN) {
       browserWs.send(JSON.stringify({
         type: "interview_incomplete",
@@ -3904,6 +3962,10 @@ async function handleBrowserConnection(
     await connectAsr();
 
     browserWs.send(JSON.stringify({ type: "ready", sessionId: randomUUID() }));
+
+    if (isOprunRecruitmentInterview && connectionClaim) {
+      browserSessionConnections.establish(ctxSessionId, connectionClaim.lease);
+    }
 
     browserWs.send(
       JSON.stringify({

@@ -35,7 +35,35 @@ test("voice storage failures throw so progress messages can be requeued", () => 
   );
 });
 
+test("an abandoned session cannot be promoted by validation or completion", async () => {
+  const {ops, updatedSessions, summaryCalls} = createOps();
+  const load = ops.loadSessionForCompletion;
+  const interruptedOps = {...ops, loadSessionForCompletion:async()=>({
+    ...(await load("local-abandoned"))!,status:"ABANDONED",
+  })};
+  for (const payload of [{validateOnly:true},{complete:true}]) {
+    const result = await handleVoiceSave({sessionId:"local-abandoned",...payload},interruptedOps);
+    assert.equal(result.status,409);
+  }
+  assert.equal(updatedSessions.length,0);
+  assert.equal(summaryCalls.length,0);
+});
+
 // ── computeSegmentDuration unit tests ───────────────────────────────
+
+test("missing session must not acknowledge validation or completion", async () => {
+  const { ops, updatedSessions, summaryCalls } = createOps();
+  for (const payload of [{ validateOnly: true }, { complete: true }]) {
+    const result = await handleVoiceSave(
+      { sessionId: "local-missing", ...payload },
+      { ...ops, loadSessionForCompletion: async () => null },
+    );
+    assert.equal(result.status, 404);
+    assert.notEqual(result.body.ok, true);
+  }
+  assert.equal(updatedSessions.length, 0);
+  assert.equal(summaryCalls.length, 0);
+});
 
 test("computeSegmentDuration returns 0 for empty segments", () => {
   assert.equal(computeSegmentDuration([], Date.now()), 0);
@@ -355,7 +383,7 @@ test("recruitment completion cannot be bypassed by an early COMPLETED status", a
   assert.equal(summaryCalls.length, 0);
 });
 
-test("recruitment completion accepts eight question-bound answers", async () => {
+test("recruitment validates answers before recording and completes only after recording is linked", async () => {
   const { ops, updatedSessions } = createOps();
   const questions = Array.from({ length: 8 }, (_, index) => ({
     id: `q-${index + 1}`,
@@ -364,11 +392,13 @@ test("recruitment completion accepts eight question-bound answers", async () => 
     type: "OPEN_ENDED",
     description: `oprun_dimension:dimension_${index + 1}`,
   }));
+  let recording: string | null = null;
   const recruitmentOps = {
     ...ops,
     async loadSessionForCompletion() {
       return {
         status: "IN_PROGRESS",
+        audioRecordingUrl: recording,
         startedAt: "2026-03-11T10:00:00.000Z",
         activitySegments: [],
         interview: {
@@ -387,6 +417,13 @@ test("recruitment completion accepts eight question-bound answers", async () => 
     },
   };
 
+  const preflight = await handleVoiceSave({sessionId:"recruitment-complete",validateOnly:true}, recruitmentOps);
+  assert.equal(preflight.status,200);
+  assert.equal(updatedSessions.length,0);
+  const missingRecording = await handleVoiceSave({sessionId:"recruitment-complete",complete:true},recruitmentOps);
+  assert.equal(missingRecording.status,409);
+  assert.equal(updatedSessions.length,0);
+  recording = "https://example.test/recording.webm";
   const result = await handleVoiceSave(
     { sessionId: "recruitment-complete", complete: true },
     recruitmentOps,

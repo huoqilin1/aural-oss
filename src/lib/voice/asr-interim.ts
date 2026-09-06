@@ -204,6 +204,10 @@ function areAdjacentInterimRevisions(first: string, second: string): boolean {
   if (containsTokenSpan(firstTokens, secondTokens)) return true;
   if (containsTokenSpan(secondTokens, firstTokens)) return true;
 
+  // Similar Chinese statements can differ by a negation or a metric. Without
+  // an ASR segment identity that is evidence, not a replaceable revision.
+  if (/[\u3400-\u9fff]/.test(first + second)) return false;
+
   const shorter = Math.min(firstTokens.length, secondTokens.length);
   if (shorter < 3) return false;
 
@@ -259,8 +263,9 @@ export function trimCrossTurnOverlap(previous: string, incoming: string): string
   for (let skip = 0; skip <= maxSkip; skip++) {
     const overlap = suffixPrefixOverlap(prevTokens, incTokens.slice(skip));
     if (overlap >= 3) {
-      const words = incoming.split(/\s+/);
-      const tail = words.slice(skip + overlap).join(" ").trim();
+      const positions = tokenizeWithPositions(incoming);
+      const tail = skip + overlap < positions.length
+        ? incoming.slice(positions[skip + overlap].start).trim() : "";
       return tail || incoming;
     }
   }
@@ -299,8 +304,7 @@ export function mergeAsrFinal(buffer: string, relayFinal: string): string {
       const prefixTokens = tokenize(prefix);
       if (
         prefixTokens.length > 0 &&
-        (containsTokenSpan(finTokens, prefixTokens) ||
-          tokenSimilarity(prefixTokens, finTokens) >= 0.6)
+        containsTokenSpan(finTokens, prefixTokens)
       ) {
         return fin;
       }
@@ -362,6 +366,18 @@ export function mergeClientAsrInterim(existing: string, incoming: string): strin
   if (containsTokenSpan(currentTokens, nextTokens)) return current;
   if (containsTokenSpan(nextTokens, currentTokens)) return next;
 
+  // A rolling window may start halfway through an already recognised answer.
+  // Resolve its exact tail overlap BEFORE considering same-start revisions.
+  // Similarity or incoming length cannot authorize deleting the old prefix.
+  const overlap = suffixPrefixOverlap(currentTokens, nextTokens);
+  if (overlap > 0) {
+    const positions = tokenizeWithPositions(next);
+    const tail = overlap < positions.length ? next.slice(positions[overlap].start) : "";
+    return `${current} ${tail}`.trim();
+  }
+
+  if (/[\u3400-\u9fff]/.test(current + next)) return `${current} ${next}`;
+
   const shorter = Math.min(currentTokens.length, nextTokens.length);
   const prefix = commonPrefixLength(currentTokens, nextTokens);
   const revisionThreshold =
@@ -374,17 +390,6 @@ export function mergeClientAsrInterim(existing: string, incoming: string): strin
 
   if (prefix >= 2 && tokenSimilarity(currentTokens, nextTokens) >= 0.82) {
     return nextTokens.length >= currentTokens.length ? next : current;
-  }
-
-  if (shorter >= 6 && tokenSimilarity(currentTokens, nextTokens) >= 0.65) {
-    return nextTokens.length >= currentTokens.length ? next : current;
-  }
-
-  const overlap = suffixPrefixOverlap(currentTokens, nextTokens);
-  if (overlap > 0) {
-    const positions = tokenizeWithPositions(next);
-    const tail = overlap < positions.length ? next.slice(positions[overlap].start) : "";
-    return `${current} ${tail}`.trim();
   }
 
   return `${current} ${next}`;
