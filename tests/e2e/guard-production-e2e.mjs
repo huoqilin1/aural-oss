@@ -52,7 +52,7 @@ if (!careersAutoMatch && (!Number.isInteger(positionId) || positionId <= 0)) {
 }
 if (!careersAutoMatch && !/^[0-9a-f]{64}$/i.test(resumeHash)) {
   console.error(
-    "Production E2E blocked: PRODUCTION_RESUME_TEXT_SHA256 must identify the approved deidentified resume content.",
+    "Production E2E blocked: PRODUCTION_RESUME_TEXT_SHA256 must identify the approved resume content (original or deidentified).",
   );
   process.exit(2);
 }

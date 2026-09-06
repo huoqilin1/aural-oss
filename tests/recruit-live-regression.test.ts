@@ -4,12 +4,93 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { evaluateTranscriptManualAdvance, hasRecruitmentAnswer, isUserEndRequest, isUserSkipRequest, restoreRecruitmentQuestionTranscript, summarizeRecruitmentResumeBudget } from "../server/voice-relay-helpers";
-import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
+import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentSpeechIntent, recruitmentControlOnly } from "../src/lib/voice/recruitment-turn-policy";
 import { shouldBlockRecruitmentCompletion } from "../src/lib/voice/completion-auto-close";
+import { createAnswerCommitGate } from "../server/answer-commit-gate";
 
 test("recruitment answer-done is not an interview-end command, including appended ASR", () => {
   for (const phrase of ["我答完了。", "我做完了。", "我的交付是台账和完整的手续，没有依据的数字不补充。我答完了。", "That's all.", "I'm done."]) {
     assert.equal(isUserEndRequest(phrase, { isRecruitmentInterview: true }), false, phrase);
+  }
+});
+
+test("production Q2 negations, missing experience and quoted controls remain real answers", () => {
+  for (const text of [
+    "我负责资料核对和入职引导，合同特殊条款由负责人审核，我不会自行承诺。",
+    "没有经过复核的数据我不会报一个精确百分比，但可以提供流程版本和问题记录。",
+    "我不会使用这个工具，目前没有相关经验。", "我不会", "没有相关经验",
+    "我没有放弃了这个项目的想法。", "我负责设计下一题", "不要下一题", "我还没有答完了",
+    "候选人对我说我答完了", "他告诉我“下一题”。", "I cannot use that tool yet.",
+    "Our workflow tells the user to skip this question when it is irrelevant.",
+  ]) {
+    assert.equal(isUserSkipRequest(text, { isRecruitmentInterview: true }), false, text);
+    assert.equal(hasRecruitmentAnswer(text), true, text);
+  }
+  for (const text of ["我不会报虚假数据。我答完了。", "我写过“下一题”这个提示。现在我答完了。", "我本人负责交付，请进入下一题。"]) {
+    assert.equal(hasRecruitmentAnswer(text), true, text);
+    assert.equal(recruitmentSpeechIntent(text), "answer_done", text);
+  }
+});
+
+test("answer write gate waits for the matching successful acknowledgement, not a different question", async () => {
+  const events: Record<string, unknown>[] = [];
+  const gate = createAnswerCommitGate((e) => events.push(e), 500);
+  let settled = false;
+  const pending = gate.request(1).then((ok) => { settled = true; return ok; });
+  const event = events[0];
+  gate.acknowledge({ ...event, questionIndex: 2, ok: true });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  gate.acknowledge({ ...event, ok: true });
+  assert.equal(await pending, true);
+  gate.close();
+});
+
+test("failed or timed out saves never acknowledge advancement; fresh retry can succeed", async () => {
+  const events: Record<string, unknown>[] = [];
+  const gate = createAnswerCommitGate((e) => events.push(e), 15);
+  const failed = gate.request(1);
+  gate.acknowledge({ ...events[0], ok: false });
+  assert.equal(await failed, false);
+  assert.equal(await gate.request(1), false);
+  const retry = gate.request(1);
+  gate.acknowledge({ ...events[1], ok: true }); // expired ACK cannot satisfy new request
+  gate.acknowledge({ ...events[2], ok: true });
+  assert.equal(await retry, true);
+  const disconnected = gate.request(2);
+  gate.close();
+  assert.equal(await disconnected, false);
+});
+
+test("actual primary turn handler retains negated answers and appended done before requesting next", async () => {
+  for (const text of ["我不会报未经复核的数据，我负责入职审核。", "我负责入职审核，我不会自行承诺。我答完了。"] ) {
+    const transcript: Array<{role:string;text:string}> = [];
+    const order: string[] = [];
+    const noop = () => {};
+    const sandbox = relayFunctions("voice-relay.ts", ["handleUserUtterance"], {
+      isTransitioning:false, interviewDone:false, isOprunRecruitmentInterview:true,
+      isUserEndRequest, isUserSkipRequest, hasRecruitmentAnswer,
+      isFastPrevRequest:()=>false, isUserPrevRequest:()=>false, isFastNextRequest:()=>true,
+      isSameAsPendingUserTurn:()=>false, isDuplicateUserFinal:()=>false,
+      clearSilenceAutoSkip:noop, silenceAskCount:0, silenceConfirmPending:false, unansweredQuestionsStreak:0,
+      generatingResponse:false, browserWs:{readyState:1,send:noop}, WebSocket:{OPEN:1},
+      ttsSpeaking:false, updateUserLanguage:noop, rememberAcceptedUserFinal:noop, questionTranscript:transcript,
+      userTurnsOnCurrentQ:0, recruitmentAnsweredQuestions:new Set(), currentQuestionIndex:1,
+      lastResponseWasCorrection:false, pendingLastQuestionTimeout:null, awaitingFinalResponse:false,
+      suppressAsrResults:false, cancelTts:noop, log:{info:noop,error:noop},
+      generateControlledResponse:async ({forceSkip}:{forceSkip:boolean})=>{
+        assert.equal(transcript[0].text, text);
+        order.push("answer-retained");
+        return forceSkip ? "[NEXT]" : "";
+      }, NEXT_TOKEN:"[NEXT]", PREV_TOKEN:"[PREV]", sortedQuestions:[{}, {type:"OPEN"}],
+      pendingWhiteboardVision:false, handleTransition:async()=>{order.push("next");},
+      reopenAsr:async()=>{}, queuedUserUtteranceWhileGenerating:"", queuedUserUtteranceIsChat:false,
+    });
+    sandbox.text = text;
+    await vm.runInContext("handleUserUtterance(text)", sandbox);
+    assert.equal(transcript.length, 1);
+    assert.equal(sandbox.userTurnsOnCurrentQ, 1);
+    assert.deepEqual(order, recruitmentSpeechIntent(text) === "answer_done" ? ["answer-retained","next"] : ["answer-retained"]);
   }
 });
 
@@ -142,4 +223,122 @@ test("backup relay real completion gate recovers incomplete state and permits ei
     assert.deepEqual(events.map((event)=>event.type), [count===8 ? "interview_complete" : "transition_rejected"]);
     if(count===2) assert.equal(sandbox.interviewDone, false);
   }
+});
+
+test("primary actual transition preserves the answer until ACK and allows retry after save failure", async () => {
+  const events: Record<string, unknown>[] = [];
+  const gate = createAnswerCommitGate((e) => events.push(e), 1000);
+  const noop = () => {};
+  const transcript = [{role:"user",text:"我不会报未经核验的数据，我负责招聘台账。"}];
+  const sandbox = relayFunctions("voice-relay.ts", ["handleTransition"], {
+    interviewDone:false, isTransitioning:false, questionTranscript:transcript,
+    isOprunRecruitmentInterview:true, currentQuestionIndex:1, hasRecruitmentAnswer,
+    silenceAskCount:0, silenceConfirmPending:false, transitionGeneration:0,
+    pendingProgressiveTransition:false, answerCommitGate:gate, recruitmentControlOnly,
+    consumedRecruitmentControlKey:"old-control", recentAcceptedUserFinals:[{text:"我答完了",at:1}],
+    browserWs:{readyState:1,send:(s:string)=>events.push(JSON.parse(s))}, WebSocket:{OPEN:1},
+    reopenAsr:async()=>{}, log:{error:(err:unknown)=>{throw err;}, info:noop},
+    shouldWaitForQuestionExpansion:()=>false, sortedQuestions:[{text:"介绍"},{text:"经历"},{text:"协作"}],
+    clearPendingAsrFinal:noop, clearSilenceAutoSkip:noop, suppressAsrResults:false,
+    disconnectAsr:noop, cancelTts:noop, generatingResponse:false, asrAccumulator:"",
+    userTurnsOnCurrentQ:1, lastResponseWasCorrection:false, cachedWhiteboardDescription:"",
+    whiteboardDirty:false, latestWhiteboardImage:null, recentAgentResponses:[], pendingLastQuestionTimeout:null,
+    refreshDynamicQuestions:async()=>{}, isZh:true, summarizeQuestion:async()=>"summary",
+    speakAndHandle:async()=>{}, llmRoute:{}, questionSummaries:[], runQueuedManualTransition:()=>false,
+  });
+  const failed = vm.runInContext("handleTransition()", sandbox);
+  assert.equal(sandbox.currentQuestionIndex, 1);
+  assert.equal(sandbox.questionTranscript, transcript);
+  gate.acknowledge({...events[0],ok:false});
+  await failed;
+  assert.equal(sandbox.currentQuestionIndex, 1);
+  assert.equal(sandbox.questionTranscript, transcript);
+  assert.equal(sandbox.consumedRecruitmentControlKey, "");
+  assert.equal(sandbox.recentAcceptedUserFinals.length, 0);
+  assert.equal(events.at(-1)?.reason, "answer_save_failed");
+  const retry = vm.runInContext("handleTransition()", sandbox);
+  assert.equal(sandbox.currentQuestionIndex, 1);
+  gate.acknowledge({...events.at(-1),ok:true});
+  await retry;
+  assert.equal(sandbox.currentQuestionIndex, 2);
+  assert.equal(events.filter((e)=>e.type==="question_change").length, 1);
+  gate.close();
+});
+
+test("backup actual socket handler holds response.done behind delayed save and emits the tool result", async () => {
+  for (const saveOk of [false,true]) {
+    const events:Record<string,unknown>[] = [];
+    const upstream:Record<string,unknown>[] = [];
+    const handlers = new Map<string, (...args:any[])=>void>();
+    const ws = {on:(name:string,fn:(...args:any[])=>void)=>handlers.set(name,fn),
+      send:(s:string)=>upstream.push(JSON.parse(s))};
+    const gate = createAnswerCommitGate((e)=>events.push(e),1000);
+    const noop = () => {};
+    const sandbox = relayFunctions("openai-voice-relay.ts", ["attachOaiHandlers"], {
+      oaiWs:ws, lastOaiActivity:0, log:{error:(...args:unknown[])=>{throw args.at(-1);},info:noop,warn:noop,debug:noop},
+      isTransitioning:false, currentQuestionIndex:1, sortedQuestions:[{},{text:"经历"},{text:"协作"}],
+      ctx:{}, pendingFunctionCalls:[], questionEnteredAt:0, lastUserInput:1,
+      MIN_QUESTION_DWELL_MS:0, MIN_WORDS_BEFORE_TRANSITION:0, userCommittedWordsThisQuestion:20,
+      recruitmentCanComplete:()=>false, isOprunRecruitmentInterview:true, answerCommitGate:gate,
+      interviewDone:false, browserWs:{readyState:1}, WebSocket:{OPEN:1}, send:(e:Record<string,unknown>)=>events.push(e),
+      clearPendingTransition:noop, disableTools:noop, pushHistory:noop,
+      activeResponseQuestionIndex:1, responseInFlight:true, takeQueuedAssistantResponse:()=>null,
+      pendingAsrUpdate:null, outputTranscriptBuffer:"", modelIsSpeaking:false, pendingInterviewComplete:false,
+      responseTtsBytes:0, isProgressiveOpeningOnly:()=>false, inputTranscriptBuffer:"",
+      responseAudioStarted:false, responseAudioStartedAt:0, queuedAssistantResponse:null,
+      requestAssistantResponse:()=>events.push({type:"followup"}), reconnecting:false,
+    });
+    sandbox.ws=ws;
+    vm.runInContext("attachOaiHandlers(ws)",sandbox);
+    handlers.get("message")!(Buffer.from(JSON.stringify({type:"response.function_call_arguments.done",
+      name:"signal_question_change",call_id:"tool-1",arguments:JSON.stringify({questionIndex:2})})));
+    handlers.get("message")!(Buffer.from(JSON.stringify({type:"response.done",response:{status:"completed",output:[{}]}})));
+    await new Promise((resolve)=>setImmediate(resolve));
+    assert.equal(sandbox.currentQuestionIndex,1);
+    assert.equal(sandbox.responseInFlight,true);
+    assert.equal(upstream.length,0);
+    gate.acknowledge({...events[0],ok:saveOk});
+    await new Promise((resolve)=>setImmediate(resolve));
+    assert.equal(sandbox.currentQuestionIndex,saveOk?2:1);
+    assert.equal(sandbox.responseInFlight,false);
+    assert.equal(upstream.length,1);
+    assert.equal((upstream[0].item as any).call_id,"tool-1");
+    assert.equal(events.filter((e)=>e.type==="followup").length,1);
+    gate.close();
+  }
+});
+
+test("actual browser save queue carries an earlier failed answer into the later acknowledged write", async () => {
+  const source = ts.createSourceFile("use-voice.ts", readFileSync(new URL("../src/hooks/use-voice.ts",import.meta.url),"utf8"),ts.ScriptTarget.Latest,true);
+  let callback = "";
+  function visit(node:ts.Node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source)==="saveProgress"
+      && node.initializer && ts.isCallExpression(node.initializer)) callback=node.initializer.arguments[0].getText(source);
+    ts.forEachChild(node,visit);
+  }
+  visit(source);
+  assert.ok(callback);
+  const bodies:Array<{messages:Array<{content:string}>}> = [];
+  let rejectFirst:(response:{ok:boolean;status:number})=>void = () => {};
+  const trackedMessagesRef = {current:[{role:"user",content:"我不会编造数据，我维护招聘台账。",questionId:"q2"}]};
+  const sandbox = vm.createContext({trackedMessagesRef, asrBufferRef:{current:""},
+    progressSaveChainRef:{current:Promise.resolve()}, questionIdAt:()=>"q2",sessionId:"local-test",
+    AbortSignal,log:{info:()=>{},error:()=>{}},
+    requeueFailedProgressMessages:(failed:unknown[],pending:unknown[])=>[...failed,...pending],
+    fetch:async (_url:string,options:{body:string})=>{
+      bodies.push(JSON.parse(options.body));
+      if(bodies.length===1) return await new Promise((resolve)=>{rejectFirst=resolve;});
+      return {ok:true,status:200};
+    },
+  });
+  vm.runInContext(ts.transpileModule(`const saveProgress = ${callback}`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,sandbox);
+  const first = vm.runInContext("saveProgress(1,1)",sandbox);
+  await Promise.resolve();
+  const queued = vm.runInContext("saveProgress(1,1)",sandbox);
+  rejectFirst({ok:false,status:503});
+  assert.equal(await first,false);
+  assert.equal(await queued,true);
+  assert.equal(bodies.length,2);
+  assert.deepEqual(bodies[1].messages,bodies[0].messages);
+  assert.equal(trackedMessagesRef.current.length,0);
 });

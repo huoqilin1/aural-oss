@@ -587,18 +587,19 @@ export function useVoice({
         asrBufferRef.current = "";
       }
 
-      const messages = [...trackedMessagesRef.current];
-      trackedMessagesRef.current = []; // clear so next question starts fresh
-
-      if (messages.length === 0 && typeof currentQuestionIndex !== "number") return;
-
       const operation = progressSaveChainRef.current.then(async () => {
+        // Take the batch only after earlier writes settle, including any
+        // messages requeued by their failures. An empty newer write cannot
+        // acknowledge an older answer that is still unsaved.
+        const messages = [...trackedMessagesRef.current];
+        trackedMessagesRef.current = [];
         try {
           const response = await fetch("/api/voice/save", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ sessionId, messages, currentQuestionIndex }),
             keepalive: true,
+            signal: AbortSignal.timeout(8_000),
           });
           if (!response.ok) {
             throw new Error(`Progress save failed with HTTP ${response.status}`);
@@ -606,16 +607,18 @@ export function useVoice({
           log.info(
             `Progress saved: ${messages.length} msgs, Q${currentQuestionIndex + 1}`
           );
+          return true;
         } catch (err) {
           trackedMessagesRef.current = requeueFailedProgressMessages(
             messages,
             trackedMessagesRef.current,
           );
           log.error("Failed to save progress; messages requeued:", err);
+          return false;
         }
       });
-      progressSaveChainRef.current = operation;
-      await operation;
+      progressSaveChainRef.current = operation.then(() => undefined);
+      return await operation;
     },
     [questionIdAt, sessionId]
   );
@@ -664,7 +667,8 @@ export function useVoice({
           if (text.trim()) {
             const merged = mergeClientAsrInterim(asrBufferRef.current, text);
             asrBufferRef.current = merged;
-            startAsrProcessingTimer(merged);
+            // Pending recognition is still listening, not model reasoning.
+            if (!interviewContext.title.includes("数君招聘")) startAsrProcessingTimer(merged);
             if (!stateRef.current.isProcessing) {
               const cleaned = cleanPeriodArtifacts(merged);
               const display = cleaned.replace(/\s+$/, "").replace(/[.!?。！？]+$/, "");
@@ -955,7 +959,21 @@ export function useVoice({
           }));
           break;
 
+        case "answer_commit_required": {
+          const index = Number(msg.questionIndex);
+          const connector = relayConnectorRef.current;
+          if (!Number.isInteger(index) || index !== currentQuestionIndexRef.current) {
+            connector?.sendJson({ type: "answer_commit_ack", requestId: msg.requestId, questionIndex: index, ok: false });
+            break;
+          }
+          void saveProgress(index, index).then((ok) => {
+            connector?.sendJson({ type: "answer_commit_ack", requestId: msg.requestId, questionIndex: index, ok });
+          });
+          break;
+        }
+
         case "transition_rejected": {
+          clearAsrProcessingTimer();
           const message = typeof msg.message === "string"
             ? msg.message
             : "当前还不能进入下一题，请先完成本题。";
@@ -965,6 +983,8 @@ export function useVoice({
             transitionDirection: null,
             transitionRejectionCount: s.transitionRejectionCount + 1,
             isProcessing: false,
+            isInputReady: msg.reason === "answer_required" || msg.reason === "answer_save_failed"
+              ? !s.isSpeaking : s.isInputReady,
           }));
           onError?.(message);
           break;

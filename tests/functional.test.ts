@@ -634,12 +634,13 @@ test("a late ASR final from the previous question is not saved twice", async () 
   await context.close();
 });
 
-for (const scenario of ["recruitment-eight-question", "recruitment-eight-question-premature", "recruitment-eight-question-save-retry"]) {
+for (const scenario of ["recruitment-eight-question", "recruitment-eight-question-premature", "recruitment-eight-question-save-retry", "recruitment-eight-question-progress-retry"]) {
 test(`recruitment completes only after eight distinct scored answers: ${scenario}`, async () => {
   const context = await browser.newContext({ locale: "zh-CN" });
   const page = await context.newPage();
   const saveBodies: unknown[] = [];
   let failedCompletion = false;
+  let failedProgress = false;
   let recordingWrites = 0;
   await page.route("**/api/session/upload", async (route: Route) => {
     await route.fulfill({ status:200, contentType:"application/json", body:JSON.stringify({url:`${baseUrl}/functional-recording.webm`}) });
@@ -656,6 +657,14 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
   await page.route("**/api/voice/save", async (route: Route) => {
     const body = JSON.parse(route.request().postData() || "{}");
     saveBodies.push(body);
+    if (scenario.endsWith("progress-retry") && !body.complete && body.currentQuestionIndex === 1
+      && body.messages?.some((m: {role:string}) => m.role === "user") && !failedProgress) {
+      failedProgress = true;
+      await delay(600);
+      assert.match((await page.locator("body").innerText()), /第 2 \/ 8 题/);
+      await route.fulfill({status:503,contentType:"application/json",body:JSON.stringify({error:"local save failure"})});
+      return;
+    }
     if (scenario.endsWith("save-retry") && body.complete && !failedCompletion) {
       failedCompletion = true;
       await route.fulfill({ status:409, contentType:"application/json", body:JSON.stringify({error:"本地故障注入：回答保存尚未同步"}) });
@@ -687,7 +696,7 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
     await page.getByRole("button", { name: "打开文字输入", exact: true }).click();
     const input = page.getByRole("textbox");
     await input.fill(
-      `第${question}题回答：这是基于真实经历的具体证据，包含本人职责、执行步骤、结果数据和验证方法。`,
+      `第${question}题回答：我负责资料核对和入职引导，我不会报未经核验的数据。这是本人的职责、执行步骤、结果数据和验证方法。`,
     );
     await input.press("Enter");
     await page.getByRole("button", { name: "关闭文字输入", exact: true }).click();
@@ -712,6 +721,14 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
         `Expected next-question control after answer ${question}`,
       );
       await nextButton.click();
+      if (question === 2 && scenario.endsWith("progress-retry")) {
+        await waitForText(page, "刚才的回答暂未保存成功", 8_000);
+        assert.equal(failedProgress, true);
+        await waitForText(page, "第 2 / 8 题", 3_000);
+        await waitForText(page, "正在听取回答，慢慢来", 3_000, true);
+        assert.equal(recordingWrites, 0);
+        await nextButton.click();
+      }
     }
   }
 
@@ -734,7 +751,12 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
   );
   const sent = await readRelaySentMessages(page);
   assert.equal(sent.filter((message) => message.type === "text_input").length, 8);
-  assert.equal(sent.filter((message) => message.type === "next_question").length, 7);
+  assert.equal(sent.filter((message) => message.type === "next_question").length, scenario.endsWith("progress-retry") ? 8 : 7);
+  assert.equal(sent.filter((message) => message.type === "answer_commit_ack" && message.ok === true).length, 7);
+  if (scenario.endsWith("progress-retry")) {
+    const q2Writes = saveBodies.filter((b) => (b as {currentQuestionIndex:number}).currentQuestionIndex === 1) as Array<{messages:Array<{content:string}>}>;
+    assert.ok(q2Writes.filter((b)=>b.messages.some((m)=>m.content.includes("我不会报未经核验的数据"))).length >= 2, "Failed answer must be retained for the retry");
+  }
   const completionWrites = saveBodies.filter(
     (body) => (body as { complete?: boolean }).complete === true,
   );

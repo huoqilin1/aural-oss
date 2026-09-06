@@ -1,4 +1,4 @@
-import { recruitmentAnswerContent, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
+import { recruitmentAnswerContent, recruitmentSpeechIntent, recruitmentControlOnly } from "../src/lib/voice/recruitment-turn-policy";
 
 // Strong: self-referencing commands unlikely to appear as topic descriptions.
 const STRONG_END_PATTERNS = [
@@ -160,7 +160,7 @@ function extractTrailingSentence(text: string): string {
 
 export function isUserSkipRequest(text: string, context?: { isRecruitmentInterview: boolean }): boolean {
   if (isUserEndRequest(text, context)) return false;
-  if (context?.isRecruitmentInterview && recruitmentSpeechIntent(text) === "answer_done") return true;
+  if (context?.isRecruitmentInterview) return recruitmentSpeechIntent(text) === "answer_done";
   return USER_SKIP_PATTERNS.some((pattern) => pattern.test(text));
 }
 
@@ -189,10 +189,11 @@ export function isRecruitmentConversationControl(text: string): boolean {
 }
 
 export function hasRecruitmentAnswer(text: string): boolean {
+  if (recruitmentControlOnly(text)) return false;
   const content = recruitmentAnswerContent(text);
   return Boolean(content) && !isRecruitmentConversationControl(content)
     && !isUserEndRequest(content, { isRecruitmentInterview: true })
-    && !isUserSkipRequest(content);
+      && !isUserSkipRequest(content, { isRecruitmentInterview: true });
 }
 
 export interface PersistedRecruitmentMessage {

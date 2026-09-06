@@ -28,7 +28,8 @@ type FunctionalScenarioId =
   | "recruitment-incomplete"
   | "recruitment-eight-question"
   | "recruitment-eight-question-premature"
-  | "recruitment-eight-question-save-retry";
+  | "recruitment-eight-question-save-retry"
+  | "recruitment-eight-question-progress-retry";
 
 declare global {
   interface Window {
@@ -345,6 +346,10 @@ const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
     "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
     "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
   },
+  "recruitment-eight-question-progress-retry": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+    "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
+  },
 };
 
 function installFunctionalRelayMocks(
@@ -431,6 +436,7 @@ function installFunctionalRelayMocks(
     private scheduled = false;
     private currentQuestionIndex = 0;
     private interviewEnded = false;
+    private pendingCommitRequest: string | null = null;
 
     constructor(url: string | URL) {
       this.url = String(url);
@@ -520,10 +526,27 @@ function installFunctionalRelayMocks(
         }
       }
 
+      if (parsed?.type === "answer_commit_ack") {
+        if (parsed.requestId !== this.pendingCommitRequest || parsed.questionIndex !== this.currentQuestionIndex) return;
+        this.pendingCommitRequest = null;
+        if (parsed.ok !== true) {
+          this.onmessage?.({ data: JSON.stringify({ type:"transition_rejected", reason:"answer_save_failed",
+            message:"刚才的回答暂未保存成功，请稍后再点下一题，你也可以继续补充。" }) });
+          return;
+        }
+        parsed = { type: "next_question", committed: true };
+      }
+
       if (parsed?.type === "next_question") {
         if (this.interviewEnded) return;
         const recruitmentFlow =
           window.__functionalScenarioId?.startsWith("recruitment-eight-question");
+        if (recruitmentFlow && parsed.committed !== true) {
+          this.pendingCommitRequest = `commit-${this.currentQuestionIndex}-${Date.now()}`;
+          this.onmessage?.({ data: JSON.stringify({ type:"answer_commit_required",
+            requestId:this.pendingCommitRequest, questionIndex:this.currentQuestionIndex }) });
+          return;
+        }
         const nextIndex = recruitmentFlow
           ? Math.min(this.currentQuestionIndex + 1, 7)
           : 1;

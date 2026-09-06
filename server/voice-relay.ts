@@ -24,7 +24,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
-import { hasEightScoredAnswers, recruitmentQ1Transition } from "../src/lib/voice/recruitment-turn-policy";
+import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentControlOnly, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
 import type { RelayLlmRoute } from "../src/lib/relay-llm-route";
 import {
   isProgressiveOpeningOnly,
@@ -85,6 +85,7 @@ import {
   type LiveSessionRecord,
 } from "./session-finalization";
 import { SessionConnectionRegistry } from "./session-connection-registry";
+import { createAnswerCommitGate } from "./answer-commit-gate";
 import { loadInterviewRelayLlmRoute } from "./interview-llm-route";
 
 const log = createLogger("voice-relay");
@@ -1361,6 +1362,8 @@ async function handleBrowserConnection(
   let generatingResponse = false;
   let userTurnsOnCurrentQ = 0;
   const isOprunRecruitmentInterview = ctx.title.includes("数君招聘");
+  const answerCommitGate = createAnswerCommitGate((event) => browserWs.send(JSON.stringify(event)));
+  browserWs.on("close", () => answerCommitGate.close());
   const recruitmentAnsweredQuestions = new Set<number>();
   // Recruitment interviews may use up to three concise verification follow-ups:
   // Q2-Q7 share up to two in-place checks and Q8 may use one optional final
@@ -1398,6 +1401,12 @@ async function handleBrowserConnection(
   /** Wall time when the latest assistant line was appended to questionTranscript (split-noise heuristic). */
   let lastAssistantMessageWallClockMs = 0;
   const recentAcceptedUserFinals: RecentAsrFinal[] = [];
+  let consumedRecruitmentControlKey = "";
+  function recruitmentControlKey(text: string): string {
+    if (!isOprunRecruitmentInterview || !recruitmentControlOnly(text)) return "";
+    const answers = questionTranscript.filter((entry) => entry.role === "user" && hasRecruitmentAnswer(entry.text));
+    return `${currentQuestionIndex}:${answers.map((entry) => normalizeUserUtteranceKey(entry.text)).join("|")}:${recruitmentSpeechIntent(text)}`;
+  }
 
   function rememberAcceptedUserFinal(text: string) {
     const finalText = text.replace(/\s+/g, " ").trim();
@@ -1967,6 +1976,8 @@ async function handleBrowserConnection(
   }
 
   function schedulePendingAsrFinal(text: string, reason: string) {
+    const controlKey = recruitmentControlKey(text);
+    if (controlKey && controlKey === consumedRecruitmentControlKey) return;
     const prev = pendingAsrFinalText;
     const merged = mergeAsrSegments(pendingAsrFinalText, text);
     const unchanged =
@@ -2766,6 +2777,23 @@ async function handleBrowserConnection(
     isTransitioning = true;
     pendingProgressiveTransition = false;
 
+    // The browser saves the still-current question before any index/ASR reset.
+    if (isOprunRecruitmentInterview && !(await answerCommitGate.request(currentQuestionIndex))) {
+      isTransitioning = false;
+      consumedRecruitmentControlKey = "";
+      for (let i = recentAcceptedUserFinals.length - 1; i >= 0; i--) {
+        if (recruitmentControlOnly(recentAcceptedUserFinals[i].text)) recentAcceptedUserFinals.splice(i, 1);
+      }
+      if (browserWs.readyState === WebSocket.OPEN) {
+        browserWs.send(JSON.stringify({ type: "transition_rejected", direction: "next",
+          reason: "answer_save_failed", questionIndex: currentQuestionIndex,
+          message: "刚才的回答暂未保存成功，请稍后再点下一题，你也可以继续补充。" }));
+        await reopenAsr().catch(log.error);
+      }
+      return;
+    }
+    if (interviewDone || browserWs.readyState !== WebSocket.OPEN) { isTransitioning = false; return; }
+
     // Only wait when the candidate reaches the final currently available
     // progressive question. If a conditional transition Q2 already exists,
     // Q1 must advance to it immediately.
@@ -2825,7 +2853,7 @@ async function handleBrowserConnection(
 
       if (currentQuestionIndex < sortedQuestions.length) {
         const nextQ = sortedQuestions[currentQuestionIndex];
-        const transition = buildTransitionSayHello(currentQuestionIndex, nextQ, isZh);
+        const transition = isOprunRecruitmentInterview ? nextQ.text : buildTransitionSayHello(currentQuestionIndex, nextQ, isZh);
 
         browserWs.send(
           JSON.stringify({
@@ -2971,6 +2999,8 @@ async function handleBrowserConnection(
    * handleUserUtterance again and the agent speaks twice.
    */
   function isDuplicateUserFinal(userText: string): boolean {
+    const controlKey = recruitmentControlKey(userText);
+    if (controlKey && controlKey === consumedRecruitmentControlKey) return true;
     const key = normalizeUserUtteranceKey(userText);
     if (!key) return false;
 
@@ -3080,9 +3110,11 @@ async function handleBrowserConnection(
       handlePreviousTransition().catch(log.error);
       return;
     }
-    if (isFastNextRequest(userText) || (isOprunRecruitmentInterview
+    if ((!isOprunRecruitmentInterview && isFastNextRequest(userText)) || (isOprunRecruitmentInterview
       && isUserSkipRequest(userText, { isRecruitmentInterview: true }) && !hasRecruitmentAnswer(userText))) {
       log.info("Fast-path: next question request");
+      consumedRecruitmentControlKey = recruitmentControlKey(userText);
+      rememberAcceptedUserFinal(userText);
       handleTransition().catch(log.error);
       return;
     }
@@ -3918,6 +3950,8 @@ async function handleBrowserConnection(
           ).catch(log.error);
           log.info(`Text input${source ? ` (${source})` : ""}: "${userText.slice(0, 60)}..."`);
         }
+      } else if (msg.type === "answer_commit_ack") {
+        answerCommitGate.acknowledge(msg);
       } else if (msg.type === "question_set_update") {
         if (
           ctx.interviewId

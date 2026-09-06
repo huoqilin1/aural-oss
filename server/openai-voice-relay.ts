@@ -10,6 +10,7 @@
 import { randomUUID } from "crypto";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
+import { createAnswerCommitGate } from "./answer-commit-gate";
 import { createClient } from "@supabase/supabase-js";
 import { createLogger } from "../src/lib/logger";
 import { hasEightScoredAnswers, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
@@ -1015,6 +1016,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       browserWs.send(JSON.stringify(msg));
   }
 
+  const answerCommitGate = createAnswerCommitGate(send);
+  browserWs.on("close", () => answerCommitGate.close());
+
   function sendBinary(buf: Buffer) {
     if (browserWs.readyState === WebSocket.OPEN)
       browserWs.send(buf, { binary: true });
@@ -1783,7 +1787,13 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   // ── OpenAI event handler ──────────────────────────────────────────
 
   function attachOaiHandlers(ws: WebSocket) {
+    // Keep response.done behind an async tool/save acknowledgement. Browser
+    // ACKs use a separate socket handler and must not join this queue.
+    let messageWork = Promise.resolve();
     ws.on("message", (data: Buffer) => {
+      messageWork = messageWork.then(() => handleOaiMessage(data)).catch(log.error);
+    });
+    async function handleOaiMessage(data: Buffer) {
       if (ws !== oaiWs) return;
       lastOaiActivity = Date.now();
       try {
@@ -1877,6 +1887,12 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               const userRequested = args.userRequested === true;
               log.info(`OpenAI called signal_question_change → Q${newIdx + 1}${userRequested ? " (user requested)" : ""}`);
 
+              if (isTransitioning) {
+                pendingFunctionCalls.push({ callId: msg.call_id, name: msg.name,
+                  args: "A transition is already pending. Do not change the question or repeat this tool call." });
+                break;
+              }
+
               if (
                 newIdx >= sortedQuestions.length
                 && ctx.interviewId
@@ -1937,6 +1953,19 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
                 break;
               }
 
+              if (isOprunRecruitmentInterview && newIdx > currentQuestionIndex) {
+                isTransitioning = true;
+                const saved = await answerCommitGate.request(currentQuestionIndex);
+                isTransitioning = false;
+                if (ws !== oaiWs) return;
+                if (!saved || interviewDone || browserWs.readyState !== WebSocket.OPEN) {
+                  send({ type: "transition_rejected", reason: "answer_save_failed",
+                    message: "刚才的回答暂未保存成功，请稍后再点下一题，你也可以继续补充。" });
+                  pendingFunctionCalls.push({ callId: msg.call_id, name: msg.name,
+                    args: "Answer storage not acknowledged. Stay on the current question; do not move on or say farewell." });
+                  break;
+                }
+              }
               clearPendingTransition();
 
               let result: string;
@@ -2124,10 +2153,11 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       } catch (err) {
         log.error("Error parsing OpenAI message:", err);
       }
-    });
+    }
 
     ws.on("close", () => {
       if (ws !== oaiWs) return;
+      answerCommitGate.close();
       const sessionDuration = ((Date.now() - oaiSessionStart) / 1000).toFixed(1);
       log.info(`OpenAI WS closed (session lasted ${sessionDuration}s)`);
       oaiWs = null;
@@ -2437,7 +2467,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
 
   // ── Handle Browser → OpenAI ───────────────────────────────────────
 
-  function requestTransition(
+  async function requestTransition(
     targetIdx: number,
     directionLabel: string,
     reason: "button" | "user_request" | "answer_complete" = "button",
@@ -2457,6 +2487,16 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     ) {
       rejectManualAdvance("answer_required", requestId);
       return false;
+    }
+    if (isOprunRecruitmentInterview && targetIdx > currentQuestionIndex) {
+      isTransitioning = true;
+      const saved = await answerCommitGate.request(currentQuestionIndex);
+      isTransitioning = false;
+      if (!saved || interviewDone || browserWs.readyState !== WebSocket.OPEN) {
+        send({ type: "transition_rejected", reason: "answer_save_failed", requestId,
+          message: "刚才的回答暂未保存成功，请稍后再点下一题，你也可以继续补充。" });
+        return false;
+      }
     }
     pendingProgressiveTransition = null;
     if (targetIdx >= sortedQuestions.length && !isProgressiveOpeningOnly(sortedQuestions) && !recruitmentCanComplete()) {
@@ -2635,6 +2675,11 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   browserWs.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
+
+      if (msg.type === "answer_commit_ack") {
+        answerCommitGate.acknowledge(msg);
+        return;
+      }
 
       if (msg.type === "question_set_update") {
         if (

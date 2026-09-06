@@ -69,7 +69,7 @@ export function assertProductionWriteApproval(): void {
     process.env.PRODUCTION_RESUME_APPROVED !== "YES" ||
     origin !== "https://hr.yifx.vip"
   ) {
-    throw new Error("缺少当前任务的生产 E2E、脱敏简历或生产域名明确授权");
+    throw new Error("缺少当前任务的生产 E2E、简历材料（原件或脱敏副本均可）或生产域名明确授权");
   }
 }
 
