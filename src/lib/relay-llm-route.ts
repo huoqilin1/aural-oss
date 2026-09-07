@@ -41,7 +41,11 @@ export const DEFAULT_RELAY_LLM_ROUTE: RelayLlmRoute = {
 };
 
 export function recruitGlmOnlyEnabled(): boolean {
-  return process.env.RECRUIT_GLM_ONLY?.trim() === "1";
+  return !recruitTestModelRoutingEnabled() && process.env.RECRUIT_GLM_ONLY?.trim() === "1";
+}
+
+export function recruitTestModelRoutingEnabled(): boolean {
+  return process.env.RECRUIT_TEST_MODEL_ROUTING?.trim() === "1";
 }
 
 export function isRelayLlmProviderId(

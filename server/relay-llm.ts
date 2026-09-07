@@ -22,6 +22,7 @@ import {
   type RelayLlmRoute,
   relayLlmRouteOrder,
   recruitGlmOnlyEnabled,
+  recruitTestModelRoutingEnabled,
   RELAY_LLM_PROVIDER_SPECS,
 } from "../src/lib/relay-llm-route";
 
@@ -458,7 +459,7 @@ export async function callRelayLLM(
   meta?: RelayLlmCallMeta,
   route?: RelayLlmRoute,
 ): Promise<string> {
-  if ((recruitGlmOnlyEnabled() || (route && [0, 3].includes(route.fallbacks.length))) && (meta?.interview || meta?.session)) {
+  if ((recruitTestModelRoutingEnabled() || recruitGlmOnlyEnabled() || (route && [0, 3].includes(route.fallbacks.length))) && (meta?.interview || meta?.session)) {
     // HR persists the interview before candidate access opens. The session is
     // created later in Aural and its callback can still be waiting for HR sync.
     const identity = meta.interview ? { interview_id: meta.interview } : { session_id: meta.session };
@@ -475,6 +476,11 @@ export async function generateGovernedText(identity: TaskIdentity, messages: Arr
 
 async function callRelayRequest(prompt: string, maxTokens?: number, meta?: RelayLlmCallMeta, route?: RelayLlmRoute, options?: RequestOptions): Promise<string> {
   options = { ...options, deep: options?.deep || meta?.stage === "interview.generate_questions" };
+  if (recruitTestModelRoutingEnabled()) {
+    route = options.deep
+      ? { primary: "deepseek", fallbacks: ["doubao", "kimi", "zhipu"] }
+      : { primary: "doubao", fallbacks: ["deepseek", "kimi", "zhipu"] };
+  }
   const chain = getEndpointChain(route).map(endpoint => options?.deep && endpoint.provider === "deepseek"
     ? { ...endpoint, model: "deepseek-v4-pro" } : endpoint);
   logConfig(chain);

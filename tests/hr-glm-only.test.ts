@@ -7,9 +7,9 @@ import { generateGovernedText, callRelayLLM, AllFourModelsFailed } from "../serv
 import { HrTaskHalted } from "../server/hr-model-task";
 import { flushHrUsage } from "../server/hr-model-usage-outbox";
 
-test("GLM-only restriction pins the model and prevents legacy or saved fallbacks after failure", async () => {
+for (const split of [false, true]) test(`model routing preserves one-pass halt with split=${split}`, async () => {
   const root=await mkdtemp(join(tmpdir(),"hr-glm-only-"));
-  const configuration:Record<string,string>={RECRUIT_GLM_ONLY:"1",AURAL_RUNTIME_STATE_DIR:root,HR_MODEL_USAGE_OUTBOX:join(root,"usage"),
+  const configuration:Record<string,string>={RECRUIT_GLM_ONLY:"1",RECRUIT_TEST_MODEL_ROUTING:split?"1":"0",AURAL_RUNTIME_STATE_DIR:root,HR_MODEL_USAGE_OUTBOX:join(root,"usage"),
     HR_MODEL_CONTROL_URL:"http://127.0.0.1/v1/recruit/internal/aural/model-policy",HR_MODEL_CONTROL_SECRET:"synthetic-secret",
     ZHIPU_API_KEY:"synthetic",ZHIPU_MODEL:"glm-old",RELAY_LLM_MODEL:"deepseek-v4-pro",
     KIMI_API_KEY:"synthetic",DEEPSEEK_API_KEY:"synthetic",DOUBAO_TEXT_API_KEY:"synthetic",DOUBAO_TEXT_MODEL:"synthetic-doubao"};
@@ -24,12 +24,12 @@ test("GLM-only restriction pins the model and prevents legacy or saved fallbacks
     const path=new URL(String(input)).pathname,body=JSON.parse(String(options?.body));
     if(path.endsWith("/model-task")){
       if(body.action==="failure"){
-        assert.deepEqual(body.attempts.map((item:{provider:string})=>item.provider),["zhipu"]);state="halted";acknowledgeFailure();
+        assert.deepEqual(body.attempts.map((item:{provider:string})=>item.provider),(split?["deepseek","doubao","kimi","zhipu"]:["zhipu"]));state="halted";acknowledgeFailure();
       }
-      return Response.json({success:true,task_key:"aural:9",round:1,state,route:{primary:"zhipu",fallbacks:[]}});
+      return Response.json({success:true,task_key:"aural:9",round:1,state,route:split?{primary:body.stage==="interview.generate_questions"?"deepseek":"doubao",fallbacks:body.stage==="interview.generate_questions"?["doubao","kimi","zhipu"]:["deepseek","kimi","zhipu"]}:{primary:"zhipu",fallbacks:[]}});
     }
     if(path.endsWith("/model-usage"))return Response.json({success:true,id:body.id});
-    calls.push(body.model);assert.equal(body.model,"glm-5.3");
+    calls.push(body.model);
     if(fail)return new Response("synthetic",{status:429});
     return Response.json({choices:[{message:{content:"valid"}}],usage:{prompt_tokens:2,completion_tokens:2}});
   }) as typeof fetch;
@@ -40,7 +40,7 @@ test("GLM-only restriction pins the model and prevents legacy or saved fallbacks
     await assert.rejects(operation(),AllFourModelsFailed);
     await failureAck;
     await assert.rejects(operation(),HrTaskHalted);
-    assert.deepEqual(calls,["glm-5.3","glm-5.3"]);
+    assert.deepEqual(calls,split?["synthetic-doubao","deepseek-v4-pro","synthetic-doubao","kimi-k3","glm-old"]:["glm-5.3","glm-5.3"]);
     await flushHrUsage();
   }finally{
     globalThis.fetch=originalFetch;

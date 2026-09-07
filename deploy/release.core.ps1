@@ -12,6 +12,7 @@ param(
   [string]$TargetHost = "root@172.28.145.158",
   [string]$PublicBaseUrl = "https://agitest.yifx.vip",
   [switch]$Apply,
+  [switch]$RecoverStoppedWeb,
   [switch]$ForceRebuild,
   [switch]$PreflightOnly
 )
@@ -110,6 +111,8 @@ echo "conn=ok"
 df -P /root | awk 'NR==2{print "disk_avail_kb=" $4}'
 free -m | awk 'NR==2{print "mem_avail_mb=" $7}'
 systemctl is-active --quiet aural.service aural-voice.service && echo "services=ok" || echo "services=down"
+systemctl is-active --quiet aural-voice.service && echo "voice_service=ok" || echo "voice_service=down"
+systemctl is-active --quiet aural.service && echo "web_service=ok" || echo "web_service=down"
 systemctl is-active --quiet aural-openai-voice.service && echo "fallback_service=ok" || echo "fallback_service=missing_or_down"
 if grep -Eq '^AZURE_OPENAI_ENDPOINT=.+' /root/aural/env/.env.local 2>/dev/null && grep -Eq '^AZURE_OPENAI_API_KEY=.+' /root/aural/env/.env.local 2>/dev/null; then echo "fallback_configured=yes"; else echo "fallback_configured=no"; fi
 systemctl is-active --quiet docker && echo "docker=ok" || echo "docker=down"
@@ -125,14 +128,19 @@ $diskAvailKb = 0
 if ($probeOutput -match 'disk_avail_kb=(\d+)') { $diskAvailKb = [long]$Matches[1] }
 $diskAvailGb = [math]::Round($diskAvailKb / 1MB, 1)
 if ($diskAvailGb -lt 5) { throw "磁盘预检失败：/root 仅剩 ${diskAvailGb}GB（发布需约 3GB）" }
-if ($probeOutput -notmatch 'services=ok') { throw "SSH 预检失败：aural 双服务当前未运行（先恢复再发布）" }
+if ($probeOutput -notmatch 'services=ok') {
+  if (-not $RecoverStoppedWeb -or $probeOutput -notmatch 'voice_service=ok' -or $probeOutput -notmatch 'web_service=down') {
+    throw "SSH 预检失败：服务未运行；仅明确获批的网页停机恢复可使用 -RecoverStoppedWeb"
+  }
+  Write-Host "恢复=已明确选择网页停机恢复；仍执行排空、构建、部署和新版本验收"
+}
 $onlineRevision = "unknown"
 if ($probeOutput -match 'revision=([0-9a-f]{40}|unknown)') { $onlineRevision = $Matches[1] }
 $fallbackConfigured = $probeOutput -match 'fallback_configured=yes'
 if ($probeOutput -match 'docker=down') { Write-Host "警告=docker 未运行（Supabase 依赖需人工确认）" }
 if (-not $fallbackConfigured) { Write-Host "提示=备用 OpenAI 语音未配置；本次仅要求主语音线路就绪" }
 Write-Host "预检=SSH PASS（磁盘剩余 ${diskAvailGb}GB、线上版本=$($onlineRevision.Substring(0, [Math]::Min(7, $onlineRevision.Length)))）"
-if ($onlineRevision -eq $sha) {
+if ($onlineRevision -eq $sha -and $probeOutput -match 'services=ok') {
   Write-Host "结论=该 SHA 已在线上运行，无需发布"
   exit 0
 }
