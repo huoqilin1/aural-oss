@@ -855,6 +855,25 @@ export function VoiceInterface({
     });
   }, [autoStart, preview, voice.isConnected, voice.connect, voice.isSessionTerminal, autoStartRetryNonce]);
 
+  useEffect(() => {
+    if (!autoStart || preview || voice.isConnected || voice.isSessionTerminal) return;
+    // After the bounded immediate retries, wait for an actual browser/network
+    // recovery signal rather than leaving the single-start flow stranded.
+    const resumeOnRecovery = () => {
+      if (autoStartInFlightRef.current || autoStartAttemptsRef.current < 3) return;
+      autoStartAttemptsRef.current = 0;
+      setAutoStartRetryNonce((value) => value + 1);
+    };
+    window.addEventListener("online", resumeOnRecovery);
+    window.addEventListener("focus", resumeOnRecovery);
+    navigator.mediaDevices?.addEventListener("devicechange", resumeOnRecovery);
+    return () => {
+      window.removeEventListener("online", resumeOnRecovery);
+      window.removeEventListener("focus", resumeOnRecovery);
+      navigator.mediaDevices?.removeEventListener("devicechange", resumeOnRecovery);
+    };
+  }, [autoStart, preview, voice.isConnected, voice.isSessionTerminal]);
+
   // ── Start recording when voice connects (video mode) ───────────
   const recordingStartedRef = useRef(false);
   useEffect(() => {

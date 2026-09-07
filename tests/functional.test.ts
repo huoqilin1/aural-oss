@@ -549,6 +549,59 @@ test("recruitment notice has one start action then auto-connects camera and micr
   await context.close();
 });
 
+test("recruitment entry survives a browser that denies access to localStorage itself", async () => {
+  const context = await newContext({ locale: "zh-CN" });
+  await context.addInitScript(() => {
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      get() { throw new DOMException("Storage access denied", "SecurityError"); },
+    });
+  });
+  const page = await context.newPage();
+  await page.goto(`${baseUrl}/functional-tests/voice?language=zh-CN&scenario=recruitment-entry`);
+  await waitForText(page, "面试须知", 10_000, true);
+  assert.equal(await page.getByRole("button", { name: "开始面试", exact: true }).count(), 1);
+  await page.getByText("我已阅读并同意以上面试须知", { exact: true }).click();
+  await page.getByRole("button", { name: "开始面试", exact: true }).click();
+  await waitForCondition(async () => {
+    const requests = await readMediaRequests(page);
+    return requests.some((request) => !!request.audio) && requests.some((request) => !!request.video);
+  }, 15_000, "Storage denial must not block camera or microphone startup");
+  await waitForText(page, "第 1 / 8 题", 10_000);
+  await context.close();
+});
+
+test("recruitment auto-start resumes after online recovery beyond three failed attempts", async () => {
+  const context = await newContext({ locale: "zh-CN" });
+  const page = await context.newPage();
+  await page.goto(`${baseUrl}/functional-tests/voice?language=zh-CN&scenario=recruitment-entry`);
+  await waitForText(page, "面试须知", 10_000, true);
+  await page.evaluate(() => {
+    const getMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    const state = { blocked: true, attempts: 0 };
+    (window as unknown as { recoveryTest: typeof state }).recoveryTest = state;
+    navigator.mediaDevices.getUserMedia = async (constraints) => {
+      state.attempts++;
+      if (state.blocked) throw new DOMException("Temporary device unavailable", "NotReadableError");
+      return getMedia(constraints);
+    };
+  });
+  await page.getByText("我已阅读并同意以上面试须知", { exact: true }).click();
+  await page.getByRole("button", { name: "开始面试", exact: true }).click();
+  await waitForCondition(async () => page.evaluate(() =>
+    (window as unknown as { recoveryTest: { attempts: number } }).recoveryTest.attempts >= 3), 10_000);
+  await page.evaluate(() => {
+    (window as unknown as { recoveryTest: { blocked: boolean } }).recoveryTest.blocked = false;
+    window.dispatchEvent(new Event("online"));
+  });
+  await waitForCondition(async () => {
+    const requests = await readMediaRequests(page);
+    return requests.some((request) => !!request.audio) && requests.some((request) => !!request.video);
+  }, 10_000, "External recovery must resume entry without another start button");
+  assert.equal(await page.getByRole("button", { name: "开始面试", exact: true }).count(), 0);
+  await context.close();
+});
+
 test("recruitment auto-start retries a transient media failure without a second start action", async () => {
   const context = await newContext({ locale: "zh-CN" });
   const page = await context.newPage();
