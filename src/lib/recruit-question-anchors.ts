@@ -67,16 +67,29 @@ export function recruitQuestionFitsRoleType(question: string, isTechnicalRole: b
   return !/(?:伪代码|写\s*SQL|SQL\s*(?:语句|查询)|代码实现|接口定义|系统配置|数据库表结构)/i.test(question);
 }
 
-export function selectRecruitAnchor(value: string, keywords: string[]): string {
+export function selectRecruitAnchor(value: string, keywords: string[], preferQuantified = true): string {
   const lines = safeRecruitAnchorLines(value);
   if (!lines.length) return "";
   return [...lines].sort((left, right) => {
     const score = (line: string) => keywords.reduce(
       (total, keyword) => total + (line.toLocaleLowerCase().includes(keyword.toLocaleLowerCase()) ? 3 : 0),
-      /\d|%/.test(line) ? 1 : 0,
+      preferQuantified && /\d|%/.test(line) ? 1 : 0,
     );
     return score(right) - score(left);
   })[0] || "";
+}
+
+/** Fixed, privacy-safe reasons; never include source text or model output. */
+export function recruitQuestionAnchorFailure(
+  question: string,
+  anchors: { resume: string; job: string } | undefined,
+  isTechnicalRole: boolean,
+): string | null {
+  if (!anchors?.resume || !anchors.job) return "question_anchor_source_missing";
+  if (!questionReferencesRecruitAnchor(question, anchors.resume)) return "question_resume_anchor_missing";
+  if (!questionReferencesRecruitAnchor(question, anchors.job)) return "question_job_anchor_missing";
+  if (!recruitQuestionFitsRoleType(question, isTechnicalRole)) return "question_role_mismatch";
+  return null;
 }
 
 export function questionReferencesRecruitAnchor(question: string, anchor: string): boolean {
