@@ -19,8 +19,8 @@ export async function publishVoiceOnline(ids: string[], directory = runtimeState
   await rename(temporary, target);
 }
 
-export async function readVoiceOnline(directory = runtimeStateDirectory(), now = Date.now()) {
-  const unknown = { status: "unknown", count: null, observed_at: null };
+export async function readVoiceOnline(directory = runtimeStateDirectory(), now = Date.now(), sessionId?: string) {
+  const unknown = { status: "unknown", count: null, observed_at: null, ...(sessionId ? { connected: null } : {}) };
   if (!directory) return unknown;
   try {
     const files = (await readdir(directory)).filter(name => /^voice-online-[a-f0-9-]+\.json$/.test(name));
@@ -33,7 +33,8 @@ export async function readVoiceOnline(directory = runtimeStateDirectory(), now =
       observed = Math.max(observed, row.at);
       for (const id of row.sessions) sessions.add(id);
     }
-    return observed ? { status: "fresh", count: sessions.size, observed_at: new Date(observed).toISOString() } : unknown;
+    return observed ? { status: "fresh", count: sessions.size, observed_at: new Date(observed).toISOString(),
+      ...(sessionId ? { connected: sessions.has(createHash("sha256").update(sessionId).digest("hex")) } : {}) } : unknown;
   } catch {
     return unknown;
   }

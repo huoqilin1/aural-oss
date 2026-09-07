@@ -30,6 +30,8 @@ for (const split of [false, true]) test(`model routing preserves one-pass halt w
     }
     if(path.endsWith("/model-usage"))return Response.json({success:true,id:body.id});
     calls.push(body.model);
+    if (split && body.model === "synthetic-doubao" && !fail) assert.deepEqual(body.thinking, {type:"disabled"});
+    if (split && body.model === "deepseek-v4-pro") assert.deepEqual(body.thinking, {type:"enabled"});
     if(fail)return new Response("synthetic",{status:429});
     return Response.json({choices:[{message:{content:"valid"}}],usage:{prompt_tokens:2,completion_tokens:2}});
   }) as typeof fetch;

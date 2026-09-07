@@ -4,6 +4,7 @@ import {
     validateApiKey,
 } from "@/lib/api-key-auth";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { readVoiceOnline } from "../../../../../../server/voice-online-state";
 
 type InterviewJoin = {
   id: string;
@@ -73,6 +74,7 @@ export async function GET(
       totalDurationSeconds: session.totalDurationSeconds,
       createdAt: session.createdAt,
       currentQuestionId: session.currentQuestionId,
+      voiceConnection: await readVoiceOnline(undefined, Date.now(), sessionId),
       messages: messages.map((m) => ({
         id: m.id,
         role: m.role,

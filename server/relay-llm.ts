@@ -373,6 +373,10 @@ async function callOpenAICompatible(
   if (process.env.RELAY_LLM_DISABLE_THINKING?.trim() === "1") {
     reqBody.thinking = { type: "disabled" };
   }
+  if (recruitTestModelRoutingEnabled()) {
+    if (!options?.deep && endpoint.provider === "doubao") reqBody.thinking = { type: "disabled" };
+    if (options?.deep && endpoint.provider === "deepseek") reqBody.thinking = { type: "enabled" };
+  }
   const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
