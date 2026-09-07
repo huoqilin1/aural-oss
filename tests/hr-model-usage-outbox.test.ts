@@ -25,3 +25,39 @@ test('lost acknowledgement survives a new outbox instance with the same identity
     await rm(directory,{recursive:true,force:true});
   }
 });
+
+test('a failed record does not block later records in the same pass',async()=>{
+  const directory=await mkdtemp(path.join(os.tmpdir(),'usage-outbox-test-'));
+  const sent:string[]=[];
+  const first='00000000-0000-4000-8000-000000000001';
+  const second='00000000-0000-4000-8000-000000000002';
+  const outbox=new UsageOutbox<{id:string}>(directory,async row=>{
+    if(row.id===first)throw new Error('synthetic unavailable');
+    sent.push(row.id);
+  });
+  try{
+    await outbox.enqueue({id:first});await outbox.enqueue({id:second});
+    await assert.rejects(outbox.flush());
+    assert.deepEqual(sent,[second]);
+    assert.deepEqual(await readdir(directory),[first+'.json']);
+  }finally{assert.equal(path.dirname(path.resolve(directory)),path.resolve(os.tmpdir()));await rm(directory,{recursive:true,force:true});}
+});
+
+test('a full page of retained failures cannot starve record 101',async()=>{
+  const directory=await mkdtemp(path.join(os.tmpdir(),'usage-outbox-test-'));
+  const sent:number[]=[];
+  const attempted:number[]=[];
+  const outbox=new UsageOutbox<{id:string;index:number}>(directory,async row=>{
+    attempted.push(row.index);
+    if(row.index<=100)throw new Error('synthetic unavailable');
+    sent.push(row.index);
+  });
+  try{
+    for(let index=1;index<=102;index++)await outbox.enqueue({id:`00000000-0000-4000-8000-${String(index).padStart(12,'0')}`,index});
+    await assert.rejects(outbox.flush());
+    assert.equal(attempted.length,100);
+    await assert.rejects(outbox.flush());
+    assert.deepEqual(sent,[101,102]);
+    assert.equal((await readdir(directory)).length,100);
+  }finally{assert.equal(path.dirname(path.resolve(directory)),path.resolve(os.tmpdir()));await rm(directory,{recursive:true,force:true});}
+});

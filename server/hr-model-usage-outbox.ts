@@ -8,6 +8,7 @@ export type UsageEvent={id:string;call_id:string;provider:string;model:string;sc
 export class UsageOutbox<Event extends {id:string} = UsageEvent> {
   private running:Promise<void>|null=null;
   private generation=0;
+  private cursor='';
   constructor(private directory:string,private send:(event:Event)=>Promise<void>){}
   async ready(){await mkdir(this.directory,{recursive:true,mode:0o700});}
   async enqueue(event:Event){
@@ -31,12 +32,20 @@ export class UsageOutbox<Event extends {id:string} = UsageEvent> {
   }
   private async drain(){
     await this.ready();
-    const files=(await readdir(this.directory)).filter(f=>/^[0-9a-f-]{36}\.json$/.test(f)).sort().slice(0,100);
+    const pending=(await readdir(this.directory)).filter(f=>/^[0-9a-f-]{36}\.json$/.test(f)).sort();
+    // Keep each pass bounded while moving past retained failures on the next
+    // pass. One unavailable record must not hide unrelated newer records.
+    const files=[...pending.filter(f=>f>this.cursor),...pending.filter(f=>f<=this.cursor)].slice(0,100);
+    let failures=0;
     for(const file of files){
-      const event=JSON.parse(await readFile(path.join(this.directory,file),'utf8')) as Event;
-      await this.send(event);
-      await unlink(path.join(this.directory,file));
+      this.cursor=file;
+      try {
+        const event=JSON.parse(await readFile(path.join(this.directory,file),'utf8')) as Event;
+        await this.send(event);
+        await unlink(path.join(this.directory,file));
+      } catch { failures++; }
     }
+    if(failures)throw new Error(`Outbox retained ${failures} unacknowledged records`);
   }
 }
 
