@@ -21,6 +21,7 @@ import {
   type RelayLlmProviderId,
   type RelayLlmRoute,
   relayLlmRouteOrder,
+  recruitGlmOnlyEnabled,
   RELAY_LLM_PROVIDER_SPECS,
 } from "../src/lib/relay-llm-route";
 
@@ -37,6 +38,7 @@ function deepseekRelayModel(): string {
   return process.env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash";
 }
 function zhipuRelayModel(): string {
+  if (recruitGlmOnlyEnabled()) return "glm-5.3";
   return process.env.ZHIPU_MODEL?.trim() || process.env.GLM_MODEL?.trim() || "glm-5.3";
 }
 function kimiRelayModel(): string {
@@ -216,7 +218,7 @@ function buildProviderChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
   return order.flatMap((provider) => {
     const endpoint = providerEndpoint(provider, temperature);
     if (endpoint) return [{ ...endpoint, provider }];
-    if (route?.fallbacks.length === 3) return [{ provider,
+    if (route && [0, 3].includes(route.fallbacks.length)) return [{ provider,
       model: RELAY_LLM_PROVIDER_SPECS[provider].relayModel,
       temperature, apiKey: "", baseUrl: "", useGemini: false,
     }];
@@ -243,6 +245,8 @@ function buildEndpointChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
 }
 
 function getEndpointChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
+  // Apply the explicit restriction to saved routes and legacy env fallbacks.
+  if (recruitGlmOnlyEnabled()) return buildProviderChain({ primary: "zhipu", fallbacks: [] });
   if (route) return buildEndpointChain(route);
   if (!cachedChain) cachedChain = buildEndpointChain();
   return cachedChain;
@@ -454,7 +458,7 @@ export async function callRelayLLM(
   meta?: RelayLlmCallMeta,
   route?: RelayLlmRoute,
 ): Promise<string> {
-  if (route?.fallbacks.length === 3 && (meta?.interview || meta?.session)) {
+  if ((recruitGlmOnlyEnabled() || (route && [0, 3].includes(route.fallbacks.length))) && (meta?.interview || meta?.session)) {
     // HR persists the interview before candidate access opens. The session is
     // created later in Aural and its callback can still be waiting for HR sync.
     const identity = meta.interview ? { interview_id: meta.interview } : { session_id: meta.session };
@@ -479,7 +483,7 @@ async function callRelayRequest(prompt: string, maxTokens?: number, meta?: Relay
   const callId = randomUUID();
 
   const configured = chain.filter((e) => e.apiKey);
-  if (configured.length === 0 && route?.fallbacks.length !== 3) {
+  if (configured.length === 0 && !recruitGlmOnlyEnabled() && (!route || ![0, 3].includes(route.fallbacks.length))) {
     return "";
   }
 
@@ -541,7 +545,7 @@ async function callRelayRequest(prompt: string, maxTokens?: number, meta?: Relay
   }
 
   log.error("Relay LLM failed on all configured models", safeRelayFailure(lastError));
-  if (route?.fallbacks.length === 3) throw new AllFourModelsFailed(attempts);
+  if (recruitGlmOnlyEnabled() || (route && [0, 3].includes(route.fallbacks.length))) throw new AllFourModelsFailed(attempts);
   throw lastError ?? new Error("Relay LLM failed");
 }
 

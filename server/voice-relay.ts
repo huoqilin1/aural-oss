@@ -854,7 +854,7 @@ wss.on("connection", (browserWs) => {
         void loadInterviewRelayLlmRoute(dynamicQuestionClient, context.interviewId)
           .then(async (llmRoute) => {
             // Q1/Q2 are persisted; a probe must not restart a failed model chain.
-            if (llmRoute?.fallbacks.length !== 3) await assertRelayLlmReady({ route: llmRoute });
+            if (!llmRoute || ![0, 3].includes(llmRoute.fallbacks.length)) await assertRelayLlmReady({ route: llmRoute });
             if (browserWs.readyState !== WebSocket.OPEN) return;
             // 终态会话(COMPLETED/ABANDONED)拒绝重新 init:不能因为刷新或
             // interview_incomplete 后的自动重连,从 Q1 重播一场已结束的面试。

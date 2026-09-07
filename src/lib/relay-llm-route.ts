@@ -40,6 +40,10 @@ export const DEFAULT_RELAY_LLM_ROUTE: RelayLlmRoute = {
   fallbacks: ["kimi", "deepseek", "doubao"],
 };
 
+export function recruitGlmOnlyEnabled(): boolean {
+  return process.env.RECRUIT_GLM_ONLY?.trim() === "1";
+}
+
 export function isRelayLlmProviderId(
   value: unknown,
 ): value is RelayLlmProviderId {
@@ -51,9 +55,10 @@ export function parseRelayLlmRoute(value: unknown): RelayLlmRoute | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   if (!isRelayLlmProviderId(record.primary)) return null;
-  if (!Array.isArray(record.fallbacks) || ![2, 3].includes(record.fallbacks.length)) {
+  if (!Array.isArray(record.fallbacks) || ![0, 2, 3].includes(record.fallbacks.length)) {
     return null;
   }
+  if (record.fallbacks.length === 0 && record.primary !== "zhipu") return null;
   if (!record.fallbacks.every(isRelayLlmProviderId)) return null;
   const ordered = [record.primary, ...record.fallbacks];
   if (new Set(ordered).size !== ordered.length) return null;
