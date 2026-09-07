@@ -49,6 +49,7 @@ const KIMI_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1";
 
 export interface RelayLlmCallMeta {
   stage?: string;
+  interview?: string;
   session?: string;
   question?: number;
 }
@@ -441,7 +442,9 @@ export class AllFourModelsFailed extends Error {
 
 function safeRelayFailure(error: unknown): string {
   if (!(error instanceof Error)) return "provider_error";
-  if (/^(?:invalid_question_response|missing_or_invalid_scored_question|question_anchor_invalid|duplicate_scored_question|empty_response|invalid_summary_response|report_storage_failed|LLM API [1-5][0-9]{2})$/.test(error.message)) return error.message;
+  const http = /^LLM API ([1-5][0-9]{2})$/.exec(error.message);
+  if (http) return `http_${http[1]}`;
+  if (/^(?:invalid_question_response|missing_or_invalid_scored_question|question_anchor_invalid|duplicate_scored_question|empty_response|invalid_summary_response|report_storage_failed)$/.test(error.message)) return error.message;
   return error.name;
 }
 
@@ -451,8 +454,11 @@ export async function callRelayLLM(
   meta?: RelayLlmCallMeta,
   route?: RelayLlmRoute,
 ): Promise<string> {
-  if (route?.fallbacks.length === 3 && meta?.session) {
-    return runHrModelTask({ session_id: meta.session, stage: meta.stage ?? "voice_turn" },
+  if (route?.fallbacks.length === 3 && (meta?.interview || meta?.session)) {
+    // HR persists the interview before candidate access opens. The session is
+    // created later in Aural and its callback can still be waiting for HR sync.
+    const identity = meta.interview ? { interview_id: meta.interview } : { session_id: meta.session };
+    return runHrModelTask({ ...identity, stage: meta.stage ?? "voice_turn" },
       saved => callRelayRequest(prompt, maxTokens, meta, saved));
   }
   return callRelayRequest(prompt, maxTokens, meta, route);

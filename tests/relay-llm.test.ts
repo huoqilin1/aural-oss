@@ -135,7 +135,7 @@ test("failure alerts retain known validation codes but never arbitrary provider 
   const originalFetch=globalThis.fetch;
   try {
     await withEnvAsync({ZHIPU_API_KEY:"z-test",KIMI_API_KEY:"k-test",DEEPSEEK_API_KEY:"d-test",HR_MODEL_CONTROL_URL:undefined},async()=>{
-      for(const [message,expected] of [["question_anchor_invalid","question_anchor_invalid"],["private synthetic provider payload","Error"]]){
+      for(const [message,expected] of [["question_anchor_invalid","question_anchor_invalid"],["LLM API 429","http_429"],["LLM API 401","http_401"],["private synthetic provider payload","Error"]]){
         globalThis.fetch=(async()=>{throw new Error(message);}) as typeof fetch;
         await assert.rejects(relayLlm.callRelayLLM("synthetic",undefined,{stage:"test"},{primary:"zhipu",fallbacks:["kimi","deepseek","doubao"]}), (error:unknown)=>{
           assert.ok(error instanceof relayLlm.AllFourModelsFailed);

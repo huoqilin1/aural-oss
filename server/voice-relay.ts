@@ -772,6 +772,7 @@ async function summarizeQuestion(
   isZh: boolean,
   llmRoute?: RelayLlmRoute,
   sessionId?: string,
+  interviewId?: string,
 ): Promise<string> {
   if (transcript.length === 0) return "";
 
@@ -783,6 +784,7 @@ async function summarizeQuestion(
     const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), undefined, {
       stage: "q-summary",
       session: sessionId,
+      interview: interviewId,
     }, llmRoute);
     log.info(`Q summary: "${result.slice(0, 100)}..."`);
     return result;
@@ -1505,6 +1507,7 @@ async function handleBrowserConnection(
   let sortedQuestions = [...ctx.questions].sort((a, b) => a.order - b.order);
   let questionRefreshInFlight = false;
   let pendingProgressiveTransition = false;
+  let responseGenerationBlocked = false;
 
   function normalizeDynamicQuestions(rows: unknown): typeof sortedQuestions {
     if (!Array.isArray(rows)) return [];
@@ -2318,7 +2321,7 @@ async function handleBrowserConnection(
     const currentQ = sortedQuestions[currentQuestionIndex];
     const transcriptSnapshot = [...questionTranscript];
     if (transcriptSnapshot.length > 0) {
-      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId)
+      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId)
         .then((summary) => questionSummaries.push(summary))
         .catch(log.error);
     }
@@ -2598,6 +2601,7 @@ async function handleBrowserConnection(
     let response = deterministicMetricFollowUp || await callRelayLLM(prompt, undefined, {
       stage: "interview-turn",
       session: ctxSessionId,
+      interview: ctx.interviewId,
       question: currentQuestionIndex + 1,
     }, llmRoute);
     // A fast spoken/chat "next" can move the question while this call is pending.
@@ -2852,6 +2856,7 @@ async function handleBrowserConnection(
       return;
     }
     if (interviewDone || browserWs.readyState !== WebSocket.OPEN) { isTransitioning = false; return; }
+    responseGenerationBlocked = false;
 
     // Only wait when the candidate reaches the final currently available
     // progressive question. If a conditional transition Q2 already exists,
@@ -2928,7 +2933,7 @@ async function handleBrowserConnection(
         log.info(`→ Q${currentQuestionIndex + 1}/${sortedQuestions.length}: ${nextQ.text.slice(0, 60)}...`);
         const previousQuestionIndex = currentQuestionIndex - 1;
         const summaryPromise = transcriptSnapshot.length > 0
-          ? summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId)
+          ? summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId)
           : Promise.resolve("");
         const [, summary] = await Promise.all([
           speakAndHandle(transition, { trackInTranscript: false }),
@@ -2943,6 +2948,7 @@ async function handleBrowserConnection(
             isZh,
             llmRoute,
             ctxSessionId,
+            ctx.interviewId,
           );
           questionSummaries.push(lastSummary);
         }
@@ -3016,6 +3022,7 @@ async function handleBrowserConnection(
           isZh,
           llmRoute,
           ctxSessionId,
+          ctx.interviewId,
         );
         questionSummaries.push(summary);
       }
@@ -3291,6 +3298,7 @@ async function handleBrowserConnection(
         const response = await generateControlledResponse({ forceSkip: userWantsSkip });
 
         if (!response || userResponseGeneration !== transitionGeneration || interviewDone || browserWs.readyState !== WebSocket.OPEN) return;
+        responseGenerationBlocked = false;
 
         let shouldTransition = response.includes(NEXT_TOKEN);
         let shouldGoPrev = response.includes(PREV_TOKEN);
@@ -3348,6 +3356,7 @@ async function handleBrowserConnection(
         }
       } catch (err) {
         log.error("Response generation failed:", err);
+        if (userResponseGeneration === transitionGeneration) markResponseGenerationBlocked();
       } finally {
         if (userResponseGeneration === transitionGeneration) generatingResponse = false;
         if (
@@ -3420,12 +3429,23 @@ async function handleBrowserConnection(
     }
   }
   /** 静默计时:先问是否答完,绝不直接切题(王总 2026-08-21) */
+  function markResponseGenerationBlocked() {
+    if (!isOprunRecruitmentInterview || interviewDone) return;
+    responseGenerationBlocked = true;
+    clearSilenceAutoSkip();
+    silenceConfirmPending = false;
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({ type: "error",
+        message: "面试暂时无法继续，请联系招聘负责人。已收到的回答会保留。" }));
+    }
+  }
+
   function armSilenceAutoSkip() {
     clearSilenceAutoSkip();
-    if (interviewDone || endingInterview || pendingProgressiveTransition) return;
+    if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
     silenceAutoSkipTimer = setTimeout(() => {
       silenceAutoSkipTimer = null;
-      if (interviewDone || endingInterview || pendingProgressiveTransition) return;
+      if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
       // 小君还在说话/出题/切题时,顺延再看(不打断小君)
       if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
         armSilenceAutoSkip();
@@ -3454,10 +3474,10 @@ async function handleBrowserConnection(
   /** 询问后继续沉默：招聘面试继续留在原题，绝不把沉默当成回答。 */
   function armSilenceConfirm() {
     clearSilenceAutoSkip();
-    if (interviewDone || endingInterview || !silenceConfirmPending) return;
+    if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked || !silenceConfirmPending) return;
     silenceAutoSkipTimer = setTimeout(() => {
       silenceAutoSkipTimer = null;
-      if (interviewDone || endingInterview || !silenceConfirmPending) return;
+      if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked || !silenceConfirmPending) return;
       if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
         armSilenceConfirm();
         return;
@@ -3493,7 +3513,7 @@ async function handleBrowserConnection(
 
   /** AFK 守卫:页面开着但人不在,空转两题后诚实收尾,不留全空回答记录 */
   async function abandonForInactivity() {
-    if (interviewDone || endingInterview || pendingProgressiveTransition) return;
+    if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
     if (!ownsPersistedSession()) {
       interviewDone = true;
       endingInterview = true;

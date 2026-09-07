@@ -89,6 +89,29 @@ test("actual inactivity termination persists the current answer before publishin
   assert.ok(order.indexOf("terminal") < order.indexOf("notify"));
 });
 
+test("a failed system response cannot become candidate inactivity through a stale silence timer", async () => {
+  const timers: Array<() => void> = [];
+  const messages: Array<{type:string;message:string}> = [];
+  const sandbox = relayFunctions("voice-relay.ts", ["markResponseGenerationBlocked", "armSilenceAutoSkip", "armSilenceConfirm", "abandonForInactivity"], {
+    interviewDone:false, endingInterview:false, isOprunRecruitmentInterview:true,
+    clearSilenceAutoSkip:()=>{}, silenceAutoSkipTimer:null, silenceConfirmPending:true,
+    SILENCE_ASK_MS:100, SILENCE_CONFIRM_MS:100,
+    setTimeout:(callback:()=>void)=>{timers.push(callback);return timers.length;},
+    browserWs:{readyState:1,send:(text:string)=>messages.push(JSON.parse(text))}, WebSocket:{OPEN:1},
+    ownsPersistedSession:()=>{throw new Error("a system failure must not abandon the candidate");},
+  });
+  vm.runInContext("armSilenceAutoSkip(); armSilenceConfirm(); markResponseGenerationBlocked()",sandbox);
+  assert.equal(timers.length,2);
+  assert.equal(sandbox.responseGenerationBlocked,true);
+  assert.equal(sandbox.silenceConfirmPending,false);
+  assert.equal(messages[0].type,"error");
+  assert.doesNotMatch(messages[0].message,/409|HR_model|provider|重试次数/);
+  for (const callback of timers) callback();
+  vm.runInContext("armSilenceAutoSkip(); armSilenceConfirm()",sandbox);
+  await vm.runInContext("abandonForInactivity()",sandbox);
+  assert.equal(timers.length,2);
+});
+
 test("recruitment answer-done is not an interview-end command, including appended ASR", () => {
   for (const phrase of ["我答完了。", "我做完了。", "我的交付是台账和完整的手续，没有依据的数字不补充。我答完了。", "That's all.", "I'm done."]) {
     assert.equal(isUserEndRequest(phrase, { isRecruitmentInterview: true }), false, phrase);
@@ -346,7 +369,7 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
   }
   visit(source);
   assert.equal(found.size, names.length);
-  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
+  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
   vm.runInContext(ts.transpileModule(Array.from(found.values()).join("\n"), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, sandbox);
   return sandbox;
 }
@@ -419,7 +442,7 @@ test("primary actual transition preserves the answer until ACK and allows retry 
     userTurnsOnCurrentQ:1, lastResponseWasCorrection:false, cachedWhiteboardDescription:"",
     whiteboardDirty:false, latestWhiteboardImage:null, recentAgentResponses:[], pendingLastQuestionTimeout:null,
     refreshDynamicQuestions:async()=>{}, isZh:true, summarizeQuestion:async()=>"summary",
-    speakAndHandle:async()=>{}, llmRoute:{}, ctxSessionId:"synthetic-session", questionSummaries:[], runQueuedManualTransition:()=>false,
+    speakAndHandle:async()=>{}, llmRoute:{}, ctx:{interviewId:"synthetic-interview"}, ctxSessionId:"synthetic-session", questionSummaries:[], runQueuedManualTransition:()=>false,
   });
   const failed = vm.runInContext("handleTransition()", sandbox);
   assert.equal(sandbox.currentQuestionIndex, 1);

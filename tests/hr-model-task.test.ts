@@ -22,13 +22,14 @@ test("durable failure stops repeated calls and a new HR-approved round recovers"
     assert.ok(new Headers(options?.headers).get("X-HR-Model-Signature"));
     if (body.action === "failure") {
       if (networkDown) throw new Error("synthetic_network_down");
+      assert.ok(body.attempts.every((attempt:{error:string})=>attempt.error === "http_429"));
       if (body.round === round) state = "halted";
     }
     return Response.json({ success: true, task_key: "aural:1", round, state, route });
   }) as typeof fetch;
   try {
     const identity = { session_id: "synthetic-session", stage: "voice_turn" };
-    const failure = Object.assign(new Error("all_models_failed"), { attempts: ["zhipu", "kimi", "deepseek", "doubao"].map(provider => ({ provider, model: "synthetic", state: "failed", error: "TimeoutError" })) });
+    const failure = Object.assign(new Error("all_models_failed"), { attempts: ["zhipu", "kimi", "deepseek", "doubao"].map(provider => ({ provider, model: "synthetic", state: "failed", error: "LLM API 429" })) });
     await assert.rejects(runHrModelTask(identity, async () => { calls++; throw failure; }));
     for (let index = 0; index < 10; index++) {
       await assert.rejects(runHrModelTask(identity, async () => { calls++; return "must not run"; }), HrTaskHalted);

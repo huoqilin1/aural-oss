@@ -25,7 +25,14 @@ async function control(body: unknown): Promise<Control> {
   }
   url.pathname = url.pathname.replace(/model-policy$/, "model-task");
   const timestamp = String(Math.floor(Date.now() / 1000));
-  const raw = JSON.stringify(body);
+  // Older queued failures used spaces in the known HTTP error code. Normalize
+  // only that fixed code so the existing durable event can pass HR validation.
+  const event = body as Partial<Event>;
+  const payload = event.action === "failure" && Array.isArray(event.attempts)
+    ? { ...event, attempts: event.attempts.map(attempt => ({ ...attempt,
+        error: attempt.error.replace(/^LLM API ([1-5][0-9]{2})$/, "http_$1") })) }
+    : body;
+  const raw = JSON.stringify(payload);
   const signature = createHmac("sha256", secret).update(`${timestamp}\nPOST\n${url.pathname}\n${raw}`).digest("hex");
   const response = await fetch(url, { method: "POST", body: raw, redirect: "error", cache: "no-store",
     headers: { "Content-Type": "application/json", "X-HR-Model-Timestamp": timestamp, "X-HR-Model-Signature": signature }, signal: AbortSignal.timeout(5000) });
