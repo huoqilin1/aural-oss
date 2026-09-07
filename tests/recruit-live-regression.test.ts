@@ -199,13 +199,28 @@ test("deferred inactivity recovery preserves active speech and never replays an 
       isOprunRecruitmentInterview:true,queuedUserUtteranceWhileGenerating:"",pendingUserUtteranceWhileSuppressed:"当前回答",
       pendingAsrFinalText:"",mergeAsrSegments,questionTranscript:[],
       looksLikeAssistantPlaybackEcho:()=>mode==="echo",isDuplicateUserFinal:()=>mode==="duplicate",
-      lastUserAudioActivityAt:Date.now(),ASR_ACTIVE_SPEECH_HOLD_MS:60000,
+      lastUserAudioActivityAt:mode==="active"?Date.now():0,ASR_ACTIVE_SPEECH_HOLD_MS:60000,
       armSilenceAutoSkip:()=>rearmed++,handleUserUtterance:()=>{throw new Error("must not replay");},
     });
     assert.equal(await vm.runInContext("recoverDeferredUserTurnBeforeInactivity()",sandbox),mode==="active");
     assert.equal(rearmed,mode==="active"?1:0);
     assert.equal(sandbox.pendingUserUtteranceWhileSuppressed,"当前回答");
   }
+});
+
+test("ongoing microphone speech without any ASR text cannot become candidate inactivity", async () => {
+  let rearmed=0;
+  const sandbox=relayFunctions("voice-relay.ts",["recoverDeferredUserTurnBeforeInactivity"],{
+    isOprunRecruitmentInterview:true,queuedUserUtteranceWhileGenerating:"",pendingUserUtteranceWhileSuppressed:"",
+    pendingAsrFinalText:"",asrAccumulator:"",heldBargeInInterimText:"",mergeAsrSegments,
+    questionTranscript:[],looksLikeAssistantPlaybackEcho:()=>false,isDuplicateUserFinal:()=>false,
+    lastUserAudioActivityAt:Date.now(),ASR_ACTIVE_SPEECH_HOLD_MS:60000,
+    armSilenceAutoSkip:()=>rearmed++,handleUserUtterance:()=>{throw new Error("no words may be invented");},
+  });
+  assert.equal(await vm.runInContext("recoverDeferredUserTurnBeforeInactivity()",sandbox),true);
+  assert.equal(rearmed,1);
+  sandbox.lastUserAudioActivityAt=0;
+  assert.equal(await vm.runInContext("recoverDeferredUserTurnBeforeInactivity()",sandbox),false);
 });
 
 test("optional closing silence sends a farewell only when all eight scored answers exist", async () => {
@@ -484,7 +499,7 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
   }
   visit(source);
   assert.equal(found.size, names.length);
-  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, isTransitioning:false, generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false, suppressAsrResults:false, asrAccumulator:"",heldBargeInInterimText:"",clearHeldBargeInInterim:()=>{}, recoverDeferredUserTurnBeforeInactivity:async()=>false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
+  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, isTransitioning:false, generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false, suppressAsrResults:false, asrAccumulator:"",heldBargeInInterimText:"",clearHeldBargeInInterim:()=>{}, logVoiceInputProgress:()=>{}, recoverDeferredUserTurnBeforeInactivity:async()=>false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
   vm.runInContext(ts.transpileModule(Array.from(found.values()).join("\n"), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, sandbox);
   return sandbox;
 }

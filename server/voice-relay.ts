@@ -1360,6 +1360,8 @@ async function handleBrowserConnection(
   let pendingAsrFinalStartedAt = 0;
   let pendingAsrFinalLastChangedAt = 0;
   let lastUserAudioActivityAt = 0;
+  let receivedMicrophoneFrames = 0;
+  let receivedActiveMicrophoneFrames = 0;
   let asrSessionFirstSpeechAt = 0;
   let lastAsrStuckRotationAt = 0;
   let consecutiveDuplicateSkips = 0;
@@ -1771,6 +1773,7 @@ async function handleBrowserConnection(
   }
 
   function noteIncomingAudioActivity(pcm: Buffer) {
+    receivedMicrophoneFrames++;
     if (pcm.length < 2) return;
 
     let sumSq = 0;
@@ -1784,8 +1787,15 @@ async function handleBrowserConnection(
 
     const rms = Math.sqrt(sumSq / samples);
     if (rms >= ASR_AUDIO_ACTIVITY_RMS_THRESHOLD) {
+      receivedActiveMicrophoneFrames++;
       lastUserAudioActivityAt = Date.now();
     }
+  }
+
+  function logVoiceInputProgress(reason: string) {
+    if (!isOprunRecruitmentInterview) return;
+    const audioAgeMs = lastUserAudioActivityAt > 0 ? Date.now() - lastUserAudioActivityAt : -1;
+    log.info(`Voice input progress: session=${ctxSessionId} q=${currentQuestionIndex + 1} reason=${reason} audio_frames=${receivedMicrophoneFrames} active_frames=${receivedActiveMicrophoneFrames} audio_age_ms=${audioAgeMs} asr_alive=${asrAlive} asr_open=${asrWs?.readyState === WebSocket.OPEN} suppressed=${suppressAsrResults}`);
   }
 
   function shouldHoldPendingAsrFinalForActiveSpeech(finalText: string): boolean {
@@ -3470,6 +3480,7 @@ async function handleBrowserConnection(
       }
       silenceAskCount += 1;
       silenceConfirmPending = true;
+      logVoiceInputProgress("silence_prompt");
       log.info(`候选人静默 ${SILENCE_ASK_MS / 1000}s,小君询问是否答完(第 ${silenceAskCount} 次)`);
       void speakText(bt(isZh, SPOKEN.silenceAsk())).catch((err) =>
         log.error("静默询问 TTS 失败:", err),
@@ -3521,6 +3532,13 @@ async function handleBrowserConnection(
   /** AFK 守卫:页面开着但人不在,空转两题后诚实收尾,不留全空回答记录 */
   async function recoverDeferredUserTurnBeforeInactivity(): Promise<boolean> {
     if (!isOprunRecruitmentInterview) return false;
+    // Raw microphone speech is activity even if the recognizer has not
+    // produced a first token yet. Never wait for text to protect a speaker.
+    if (lastUserAudioActivityAt > 0
+      && Date.now() - lastUserAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS) {
+      armSilenceAutoSkip();
+      return true;
+    }
     const deferred = mergeAsrSegments(queuedUserUtteranceWhileGenerating,
       mergeAsrSegments(pendingUserUtteranceWhileSuppressed,
         mergeAsrSegments(pendingAsrFinalText, mergeAsrSegments(asrAccumulator, heldBargeInInterimText)))).trim();
@@ -3528,11 +3546,6 @@ async function handleBrowserConnection(
       || isDuplicateUserFinal(deferred)) return false;
 
     // A final waiting in our own queue is a response, not candidate inactivity.
-    // Keep the normal speech-settling guard; never cut off ongoing speech.
-    if (Date.now() - lastUserAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS) {
-      armSilenceAutoSkip();
-      return true;
-    }
     const isChatInput = queuedUserUtteranceIsChat;
     log.info(`Deferred candidate turn state: session=${ctxSessionId} q=${currentQuestionIndex + 1} suppressed=${suppressAsrResults} suppressed_chars=${pendingUserUtteranceWhileSuppressed.length} final_chars=${pendingAsrFinalText.length} queued_chars=${queuedUserUtteranceWhileGenerating.length} interim_chars=${asrAccumulator.length} barge_chars=${heldBargeInInterimText.length}`);
     queuedUserUtteranceWhileGenerating = "";
@@ -3581,6 +3594,7 @@ async function handleBrowserConnection(
       queueFarewellAndEnd("Optional closing conversation finished after silence");
       return;
     }
+    logVoiceInputProgress("inactivity_finalization");
     endingInterview = true;
     clearSilenceAutoSkip();
     cancelTts();
@@ -3696,6 +3710,7 @@ async function handleBrowserConnection(
         && !ttsSpeaking
         && browserWs.readyState === WebSocket.OPEN
       ) {
+        logVoiceInputProgress("input_ready");
         browserWs.send(JSON.stringify({ type: "input_ready" }));
       }
     } catch (err) {
@@ -4029,6 +4044,7 @@ async function handleBrowserConnection(
         }
 
         browserWs.send(JSON.stringify({ type: "session_reconnected" }));
+        logVoiceInputProgress("input_reconnected");
         browserWs.send(JSON.stringify({ type: "input_ready" }));
         log.info(`ASR auto-reconnect succeeded on attempt ${attempt}`);
         return;
