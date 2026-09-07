@@ -24,6 +24,7 @@ import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
+import { createAsrInitialConnectQueue } from "./asr-initial-connect-queue";
 import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentControlOnly, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
 import type { RelayLlmRoute } from "../src/lib/relay-llm-route";
 import {
@@ -812,10 +813,13 @@ log.info(`Listening on ws://localhost:${RELAY_PORT}`);
 
 // 方案B(2026-09-03):ASR 并发连接配额有限(生产实测约 20 路)。20 路同场
 // 切题时各会话独立断开/重连,新旧连接短暂叠加会瞬时冲破配额,被拒的会话
-// 卡在重连循环。全局串行化所有 connectAsr 并强制最小间隔,消除叠加窗口。
+// 卡在重连循环。替换已有连接时串行化并保持最小间隔，首次连接另用有界并发。
 let asrConnectChain: Promise<void> = Promise.resolve();
 let asrLastConnectAt = 0;
 const ASR_CONNECT_MIN_INTERVAL_MS = 1500;
+// New sessions have no old ASR socket to overlap. Four bounded handshakes
+// keep their greeting independent of the serialized replacement queue.
+const scheduleInitialAsrConnect = createAsrInitialConnectQueue(4);
 function scheduleAsrConnect(task: () => Promise<void>): Promise<void> {
   const run = async () => {
     const waitMs = asrLastConnectAt + ASR_CONNECT_MIN_INTERVAL_MS - Date.now();
@@ -1323,6 +1327,8 @@ async function handleBrowserConnection(
   // ── ASR state ──────────────────────────────────────────────────
   let asrWs: WebSocket | null = null;
   let asrAlive = false;
+  let asrConnectionAttempted = false;
+  let asrConnectPending: Promise<void> | null = null;
   let asrAudioSeq = 1;
   let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -3516,7 +3522,8 @@ async function handleBrowserConnection(
   async function recoverDeferredUserTurnBeforeInactivity(): Promise<boolean> {
     if (!isOprunRecruitmentInterview) return false;
     const deferred = mergeAsrSegments(queuedUserUtteranceWhileGenerating,
-      mergeAsrSegments(pendingUserUtteranceWhileSuppressed, pendingAsrFinalText)).trim();
+      mergeAsrSegments(pendingUserUtteranceWhileSuppressed,
+        mergeAsrSegments(pendingAsrFinalText, mergeAsrSegments(asrAccumulator, heldBargeInInterimText)))).trim();
     if (deferred.length < 2 || looksLikeAssistantPlaybackEcho(deferred, questionTranscript)
       || isDuplicateUserFinal(deferred)) return false;
 
@@ -3527,10 +3534,12 @@ async function handleBrowserConnection(
       return true;
     }
     const isChatInput = queuedUserUtteranceIsChat;
-    log.info(`Deferred candidate turn state: session=${ctxSessionId} q=${currentQuestionIndex + 1} suppressed=${suppressAsrResults} suppressed_chars=${pendingUserUtteranceWhileSuppressed.length} final_chars=${pendingAsrFinalText.length} queued_chars=${queuedUserUtteranceWhileGenerating.length}`);
+    log.info(`Deferred candidate turn state: session=${ctxSessionId} q=${currentQuestionIndex + 1} suppressed=${suppressAsrResults} suppressed_chars=${pendingUserUtteranceWhileSuppressed.length} final_chars=${pendingAsrFinalText.length} queued_chars=${queuedUserUtteranceWhileGenerating.length} interim_chars=${asrAccumulator.length} barge_chars=${heldBargeInInterimText.length}`);
     queuedUserUtteranceWhileGenerating = "";
     queuedUserUtteranceIsChat = false;
     pendingUserUtteranceWhileSuppressed = "";
+    asrAccumulator = "";
+    clearHeldBargeInInterim();
     clearPendingAsrFinal();
     silenceAskCount = 0;
     silenceConfirmPending = false;
@@ -3565,6 +3574,13 @@ async function handleBrowserConnection(
       return;
     }
     if (await recoverDeferredUserTurnBeforeInactivity()) return;
+    // The optional closing conversation is not a ninth scored question.
+    // Silence here can finish only after all eight scored answers exist.
+    if (isOprunRecruitmentInterview && currentQuestionIndex >= 8
+      && hasEightScoredAnswers(recruitmentAnsweredQuestions)) {
+      queueFarewellAndEnd("Optional closing conversation finished after silence");
+      return;
+    }
     endingInterview = true;
     clearSilenceAutoSkip();
     cancelTts();
@@ -3718,7 +3734,16 @@ async function handleBrowserConnection(
   }
 
   async function connectAsr() {
-    await scheduleAsrConnect(connectAsrUngated);
+    if (asrConnectPending) return await asrConnectPending;
+    const schedule = asrConnectionAttempted ? scheduleAsrConnect : scheduleInitialAsrConnect;
+    asrConnectionAttempted = true;
+    const operation = schedule(connectAsrUngated);
+    asrConnectPending = operation;
+    try {
+      await operation;
+    } finally {
+      if (asrConnectPending === operation) asrConnectPending = null;
+    }
   }
 
   async function connectAsrUngated() {

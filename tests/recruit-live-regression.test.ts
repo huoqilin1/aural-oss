@@ -7,6 +7,55 @@ import { evaluateTranscriptManualAdvance, hasRecruitmentAnswer, isUserEndRequest
 import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentSpeechIntent, recruitmentControlOnly } from "../src/lib/voice/recruitment-turn-policy";
 import { shouldBlockRecruitmentCompletion } from "../src/lib/voice/completion-auto-close";
 import { createAnswerCommitGate } from "../server/answer-commit-gate";
+import { createAsrInitialConnectQueue } from "../server/asr-initial-connect-queue";
+
+test("twenty first ASR handshakes use four bounded slots and failures release their slots", async () => {
+  const schedule=createAsrInitialConnectQueue(4);
+  const releases:Array<()=>void>=[];
+  const started:number[]=[];
+  let active=0,peak=0;
+  const tasks=Array.from({length:20},(_,index)=>schedule(async()=>{
+    started.push(index);active++;peak=Math.max(peak,active);
+    await new Promise<void>(resolve=>releases.push(resolve));
+    active--;
+    if(index===3)throw new Error("injected handshake failure");
+    return index;
+  }));
+  const all=Promise.allSettled(tasks);
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(started,[0,1,2,3]);
+  for(let index=0;index<20;index++){
+    assert.ok(releases[index],"a failed connection stranded the queue");
+    releases[index]();
+    await new Promise(resolve=>setImmediate(resolve));
+  }
+  const results=await all;
+  assert.equal(peak,4);
+  assert.deepEqual(started,Array.from({length:20},(_,i)=>i));
+  assert.equal(results.filter(r=>r.status==="rejected").length,1);
+  assert.equal(active,0);
+});
+
+test("actual ASR connection joins concurrent calls and retains throttling for later attempts", async () => {
+  for(const failFirst of [false,true]){
+    const events:string[]=[];let release:()=>void=()=>{};
+    let calls=0;
+    const sandbox=relayFunctions("voice-relay.ts",["connectAsr"],{
+      asrConnectPending:null,asrConnectionAttempted:false,
+      scheduleInitialAsrConnect:(task:()=>Promise<void>)=>{events.push("initial");return task();},
+      scheduleAsrConnect:(task:()=>Promise<void>)=>{events.push("replacement");return task();},
+      connectAsrUngated:async()=>{calls++;if(calls===1){await new Promise<void>(resolve=>{release=resolve;});if(failFirst)throw new Error("injected first failure");}},
+    });
+    const first=vm.runInContext("connectAsr()",sandbox);
+    const joined=vm.runInContext("connectAsr()",sandbox);
+    const settled=Promise.allSettled([first,joined]);
+    assert.equal(calls,1);release();await settled;
+    assert.equal(sandbox.asrConnectPending,null);
+    await vm.runInContext("connectAsr()",sandbox);
+    assert.equal(calls,2);
+    assert.deepEqual(events,["initial","replacement"]);
+  }
+});
 
 test("completion preflight retains late messages and serializes subsequent saves", async () => {
   const source = ts.createSourceFile("use-voice.ts", readFileSync(new URL("../src/hooks/use-voice.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
@@ -113,8 +162,8 @@ test("a failed system response cannot become candidate inactivity through a stal
 });
 
 test("actual inactivity path processes a deferred answer or done command without abandoning", async () => {
-  for (const buffer of ["pendingUserUtteranceWhileSuppressed", "pendingAsrFinalText", "queuedUserUtteranceWhileGenerating"]) {
-    for (const answer of ["我负责核对合同，异常交给负责人复核。", "答完了，没有了，请继续。"]){
+  for (const buffer of ["pendingUserUtteranceWhileSuppressed", "pendingAsrFinalText", "queuedUserUtteranceWhileGenerating", "asrAccumulator", "heldBargeInInterimText"]) {
+    for (const answer of ["我负责核对合同，异常交给负责人复核。", "答完了，没有了，请继续。", "我没有其他问题了，可以结束面试，谢谢。"]){
       const processed:string[]=[];
       const sent:Array<{type:string;text:string}>=[];
       const noop=()=>{};
@@ -138,6 +187,7 @@ test("actual inactivity path processes a deferred answer or done command without
       assert.equal(sandbox.pendingAsrFinalText,"");
       assert.equal(sandbox.pendingUserUtteranceWhileSuppressed,"");
       assert.equal(sandbox.queuedUserUtteranceWhileGenerating,"");
+      assert.equal(sandbox.asrAccumulator,"");
     }
   }
 });
@@ -155,6 +205,25 @@ test("deferred inactivity recovery preserves active speech and never replays an 
     assert.equal(await vm.runInContext("recoverDeferredUserTurnBeforeInactivity()",sandbox),mode==="active");
     assert.equal(rearmed,mode==="active"?1:0);
     assert.equal(sandbox.pendingUserUtteranceWhileSuppressed,"当前回答");
+  }
+});
+
+test("optional closing silence sends a farewell only when all eight scored answers exist", async () => {
+  for (const answered of [7,8]) {
+    const events:string[]=[];
+    const noop=()=>{};
+    const sandbox=relayFunctions("voice-relay.ts",["abandonForInactivity"],{
+      interviewDone:false,endingInterview:false,ownsPersistedSession:()=>true,
+      isOprunRecruitmentInterview:true,currentQuestionIndex:8,lastUserAudioActivityAt:0,
+      recruitmentAnsweredQuestions:new Set(Array.from({length:answered},(_,i)=>i)),hasEightScoredAnswers,
+      queueFarewellAndEnd:()=>events.push("farewell"),
+      clearSilenceAutoSkip:noop,cancelTts:noop,clearPendingAsrFinal:noop,
+      answerCommitGate:{request:async()=>true},ctxSessionId:"local-closing",liveSessions:new Map(),
+      persistSessionStatus:async(_sid:string,status:string)=>{events.push(status);return true;},
+      browserWs:{readyState:1,send:noop},WebSocket:{OPEN:1},log:{info:noop,warn:noop,error:noop},
+    });
+    await vm.runInContext("abandonForInactivity()",sandbox);
+    assert.deepEqual(events,answered===8?["farewell"]:["ABANDONED"]);
   }
 });
 
@@ -415,7 +484,7 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
   }
   visit(source);
   assert.equal(found.size, names.length);
-  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, isTransitioning:false, generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false, suppressAsrResults:false, recoverDeferredUserTurnBeforeInactivity:async()=>false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
+  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, isTransitioning:false, generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false, suppressAsrResults:false, asrAccumulator:"",heldBargeInInterimText:"",clearHeldBargeInInterim:()=>{}, recoverDeferredUserTurnBeforeInactivity:async()=>false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
   vm.runInContext(ts.transpileModule(Array.from(found.values()).join("\n"), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, sandbox);
   return sandbox;
 }
