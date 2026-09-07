@@ -22,7 +22,6 @@ const log = createLogger("api/v1/generate-questions");
 // Coalesce concurrent requests in this process. The HR task gate separately
 // persists the route, halted state and manually approved recovery round.
 const generationInFlight = new Map<string, number>();
-const GENERATION_LOCK_TTL_MS = 180_000;
 
 // Generate Q3-Q8 behind the already persisted scored opening and anchored Q2.
 // Each saved provider is attempted once; invalid questions fail validation
@@ -106,6 +105,7 @@ function buildRecruitPrompt(opts: {
   expertExamples?: Array<{ question?: string; answer?: string }>;
   preserveOpening?: boolean;
   preserveDimensions?: string[];
+  requestedDimensions?: string[];
   questionSpecVersion?: string;
   roleType?: string;
 }) {
@@ -119,6 +119,7 @@ function buildRecruitPrompt(opts: {
     expertExamples,
     preserveOpening,
     preserveDimensions = [],
+    requestedDimensions,
     questionSpecVersion = "",
     roleType = "nontechnical_core",
   } = opts;
@@ -126,7 +127,8 @@ function buildRecruitPrompt(opts: {
   const evidenceV11 = isEvidenceV11(questionSpecVersion);
   const preserved = new Set(preserveDimensions);
   if (preserveOpening) preserved.add(dimensions[0]);
-  const remaining = dimensions.filter((dimension) => !preserved.has(dimension));
+  const remaining = dimensions.filter((dimension) => !preserved.has(dimension)
+    && (!requestedDimensions || requestedDimensions.includes(dimension)));
   const expertBlock =
     expertExamples && expertExamples.length
       ? expertExamples
@@ -169,7 +171,7 @@ function buildRecruitPrompt(opts: {
       content: `你是一位资深的招聘一面出题官。请为一位候选人设计 AI 一面（结构化岗位面试）的题目。全部用中文。
 
 要求:
-1. 题目契约版本为 ${questionSpecVersion || "legacy"}。系统已固定写入的维度为 ${Array.from(preserved).join(", ") || "无"}；只生成剩余 ${remaining.length} 道主问题，严禁重复固定题。
+1. 题目契约版本为 ${questionSpecVersion || "legacy"}。系统已固定写入的维度为 ${Array.from(preserved).join(", ") || "无"}；本次只生成 ${remaining.length} 道主问题，dimension 按顺序为 ${remaining.join(", ")}，严禁重复固定题或生成本批之外的维度。
 2. ${blueprintInstruction}
 3. 每题都要结合岗位或简历中的具体证据；简历没有的信息不得臆造。岗位题与简历题的目标配比为 ${jobQuestions}:${resumeQuestions}，但必须服从当前题目契约的固定八维结构。
 4. 题目整体难度为中等：能区分真做过的人和背概念的人，但不刻意刁难。
@@ -181,7 +183,7 @@ ${expertBlock ? `
 只输出合法 JSON,不要 markdown、不要解释:
 {
   "questions": [
-    { "order": 0, "text": "题面", "dimension": "${dimensions[0]}" }
+    { "order": 0, "text": "题面", "dimension": "${remaining[0] || dimensions[0]}" }
   ]
 }`,
     },
@@ -294,7 +296,7 @@ export async function POST(
 
   const lockNow = Date.now();
   const lockStarted = generationInFlight.get(interviewId);
-  if (lockStarted && lockNow - lockStarted < GENERATION_LOCK_TTL_MS) {
+  if (lockStarted !== undefined) {
     return Response.json({ data: { count: 0, skipped: "generation_in_progress" } });
   }
   generationInFlight.set(interviewId, lockNow);
@@ -373,13 +375,39 @@ export async function POST(
     messages.push({ role: "user", content: JSON.stringify(Object.fromEntries(
       Array.from(anchors).filter(([dimension]) => !preserveDimensions.includes(dimension)))) });
   }
+  const { data: initialRows, error: initialError } = await supabaseAdmin
+    .from("questions").select("description,text").eq("interviewId", interviewId);
+  if (initialError) return apiError("INTERNAL_ERROR", initialError.message, 500);
+  const persistedDimensions = new Set((initialRows ?? []).map(row => String(row.description || "").replace(/^oprun_dimension:/, "")));
+  if (preserveDimensions.some(dimension => !persistedDimensions.has(dimension))) {
+    return apiError("CONFLICT", "Preserved questions are missing", 409);
+  }
+  const remainingDimensions = selectedDimensions.filter(dimension => !preserveDimensions.includes(dimension) && !persistedDimensions.has(dimension));
+  const incremental = evidenceV11 && preserveDimensions.includes("core_experience") && preserveDimensions.includes("project_ownership");
+  const batches = incremental && remainingDimensions.length
+    ? Array.from({ length: Math.ceil(remainingDimensions.length / 2) }, (_, index) => remainingDimensions.slice(index * 2, index * 2 + 2))
+    : [remainingDimensions];
+  const normalizeQuestion = (text: string) => text.toLocaleLowerCase().replace(/[\s，。！？、；：,.!?;:()（）【】\[\]"“”'‘’]/g, "");
+  const persistedTexts = new Set((initialRows ?? []).map(row => normalizeQuestion(String(row.text || ""))));
+  let createdCount = 0;
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+  const batchDimensions = batches[batchIndex];
   let generated: { questions: Array<{ text: string; dimension: string }> };
   try {
-    const response = await generateGovernedText({ interview_id: interviewId, stage: "interview.generate_questions" }, messages, text => {
+    const batchMessages = buildRecruitPrompt({ jobTitle, jobDescription, resumeText, durationMinutes,
+      resumeQuestions, jobQuestions, expertExamples, preserveOpening,
+      preserveDimensions: Array.from(persistedDimensions), requestedDimensions: batchDimensions,
+      questionSpecVersion: contractVersion, roleType });
+    if (evidenceV11) {
+      batchMessages.push(messages[messages.length - 2]);
+      batchMessages.push({ role: "user", content: JSON.stringify(Object.fromEntries(
+        Array.from(anchors).filter(([dimension]) => batchDimensions.includes(dimension)))) });
+    }
+    const response = batchDimensions.length ? await generateGovernedText({ interview_id: interviewId, stage: "interview.generate_questions" }, batchMessages, text => {
       const value = parseJsonSafe(text) as { questions?: Array<{ text?: unknown; dimension?: unknown }> };
       if (!Array.isArray(value?.questions)) throw new Error("invalid_question_response");
-      const seen = new Set<string>();
-      const needed = selectedDimensions.filter(dimension => !preserveDimensions.includes(dimension));
+      const seen = new Set(persistedTexts);
+      const needed = batchDimensions;
       for (const dimension of needed) {
         const matches = value.questions.filter(question => question.dimension === dimension);
         if (matches.length !== 1 || typeof matches[0].text !== "string" || !isCandidateFacingQuestionText(matches[0].text)) {
@@ -397,7 +425,7 @@ export async function POST(
         if (seen.has(normalized)) throw new Error("duplicate_scored_question");
         seen.add(normalized);
       }
-    });
+    }) : '{"questions":[]}';
     generated = parseJsonSafe(response) as typeof generated;
   } catch (error) {
     log.error("Recruitment question generation stopped", error instanceof Error ? error.name : "model_error");
@@ -499,9 +527,9 @@ export async function POST(
       return key && isCandidateFacingQuestionText(text) ? [[key, text] as const] : [];
     }),
   );
-  const usedQuestionTexts = new Set<string>();
+  const usedQuestionTexts = new Set(persistedTexts);
   const questions = blueprint
-    .filter((item) => !preserveDimensions.includes(item.key))
+    .filter((item) => batchDimensions.includes(item.key))
     .map((item) => {
     const generatedText = generatedByDimension.get(item.key);
     const selectedAnchors = anchors.get(item.key);
@@ -584,7 +612,7 @@ export async function POST(
     timeLimitSeconds: question.seconds,
   }));
   // 候选人反问环节(2026-06-27 王总拍板):一面最后让候选人问小君;小君收集问题、不追问候选人(probeOnShort=false),答疑交给二面 HR
-  if (!existingDimensions.has("candidate_questions")) rows.push({
+  if (batchIndex === batches.length - 1 && !existingDimensions.has("candidate_questions")) rows.push({
     interviewId,
     order: nextOrder++,
     text: "最后,你有没有什么想了解的?关于岗位、团队、公司,想问的都可以说出来,我会记下来,二面的时候 HR 会当面跟你详细解答。",
@@ -596,9 +624,7 @@ export async function POST(
     timeLimitSeconds: 90,
   });
 
-  if (rows.length === 0) {
-    return Response.json({ data: { count: 0 } });
-  }
+  if (rows.length === 0) continue;
 
   const { data: created, error } = await supabaseAdmin
     .from("questions")
@@ -609,7 +635,13 @@ export async function POST(
     return apiError("INTERNAL_ERROR", error.message, 500);
   }
 
-  return Response.json({ data: { count: created?.length ?? 0 } });
+  createdCount += created?.length ?? 0;
+  for (const row of rows) {
+    persistedTexts.add(normalizeQuestion(row.text));
+    persistedDimensions.add(row.description.replace(/^oprun_dimension:/, ""));
+  }
+  }
+  return Response.json({ data: { count: createdCount } });
   } finally {
     generationInFlight.delete(interviewId);
   }

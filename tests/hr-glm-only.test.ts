@@ -3,9 +3,16 @@ import test from "node:test";
 import { mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { generateGovernedText, callRelayLLM, AllFourModelsFailed } from "../server/relay-llm";
+import { generateGovernedText, callRelayLLM, AllFourModelsFailed, safeRelayFailure } from "../server/relay-llm";
 import { HrTaskHalted } from "../server/hr-model-task";
 import { flushHrUsage } from "../server/hr-model-usage-outbox";
+
+test("anchor failure metadata keeps only fixed cause and dimension without payloads", () => {
+  const code = "question_job_anchor_missing_problem_solving";
+  assert.equal(safeRelayFailure(new Error(code)), code);
+  assert.equal(safeRelayFailure(new Error("question_job_anchor_missing_private_payload")), "Error");
+  assert.equal(safeRelayFailure(new Error(code + ": private payload")), "Error");
+});
 
 for (const split of [false, true]) test(`model routing preserves one-pass halt with split=${split}`, async () => {
   const root=await mkdtemp(join(tmpdir(),"hr-glm-only-"));

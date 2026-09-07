@@ -191,7 +191,8 @@ test("evidence v12 generator uses the scored self-intro and seven evidence dimen
 test("progressive generation preserves Q1 and optional fallback Q2 safely", () => {
   assert.match(generationRoute, /const preserveOpening = body\.preserveOpening === true/);
   assert.match(generationRoute, /const preserveDimensions = Array\.isArray/);
-  assert.match(generationRoute, /preserveDimensions\.includes\(item\.key\)/);
+  // Preservation across incremental writes is exercised by incremental-question-route.test.ts.
+  assert.match(generationRoute, /batchDimensions\.includes\(item\.key\)/);
   assert.match(generationRoute, /generateGovernedText\(/);
   assert.doesNotMatch(generationRoute, /withGenerationBudget\(/);
   assert.doesNotMatch(generationRoute, /generated = \{ questions: \[\] \}/);

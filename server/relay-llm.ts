@@ -449,10 +449,11 @@ export class AllFourModelsFailed extends Error {
   }
 }
 
-function safeRelayFailure(error: unknown): string {
+export function safeRelayFailure(error: unknown): string {
   if (!(error instanceof Error)) return "provider_error";
   const http = /^LLM API ([1-5][0-9]{2})$/.exec(error.message);
   if (http) return `http_${http[1]}`;
+  if (/^question_(?:anchor_source_missing|resume_anchor_missing|job_anchor_missing|role_mismatch)_(?:core_experience|project_ownership|core_skill_evidence|result_authenticity|job_work_sample|problem_solving|ai_learning_boundary|collaboration_motivation_stability)$/.test(error.message)) return error.message;
   if (/^(?:invalid_question_response|missing_or_invalid_scored_question|question_anchor_invalid|duplicate_scored_question|empty_response|invalid_summary_response|report_storage_failed)$/.test(error.message)) return error.message;
   return error.name;
 }

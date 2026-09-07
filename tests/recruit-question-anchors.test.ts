@@ -51,8 +51,8 @@ test("actual generation prompt selects work evidence and actual provider validat
   });
   const code=source.slice(source.indexOf("const LEGACY_RECRUIT_DIMENSIONS"),source.indexOf("async function interviewAccessError"))
     +source.slice(source.indexOf("function buildRecruitPrompt"),source.indexOf("export async function POST"))
-    +source.slice(source.indexOf("  const anchorKeywords:"),source.indexOf("  let generated:"))
-    +`\nconst selectedDimensions=recruitDimensions(contractVersion);globalThis.check=${validator};globalThis.input=messages;globalThis.pairs=Object.fromEntries(anchors);`;
+    +source.slice(source.indexOf("  const anchorKeywords:"),source.indexOf("  const { data: initialRows"))
+    +`\nconst selectedDimensions=recruitDimensions(contractVersion);const batchDimensions=selectedDimensions.filter(d=>!preserveDimensions.includes(d));const persistedTexts=new Set();globalThis.check=${validator};globalThis.input=messages;globalThis.pairs=Object.fromEntries(anchors);`;
   vm.runInContext(ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context);
   const input=context.input as Array<{role:string;content:string}>;
   assert.equal(input.at(-2)?.role,"system");
