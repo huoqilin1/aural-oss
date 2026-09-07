@@ -703,6 +703,14 @@ function installFunctionalRelayMocks(
                   sessionId: event.sessionId ?? "functional-session",
                 }),
               });
+              // A connected socket is not an ASR-ready input turn. These
+              // full-interview mocks have no opening TTS, so confirm input
+              // separately just as the real relay does after its greeting.
+              if (window.__functionalScenarioId?.startsWith("recruitment-eight-question")) {
+                setTimeout(() => {
+                  if (this.readyState !== 3) this.onmessage?.({ data: JSON.stringify({ type: "input_ready" }) });
+                }, 60);
+              }
               setTimeout(()=>this.scheduleSpokenAnswer(),200);
               return;
             }

@@ -484,8 +484,11 @@ test("candidate input stays unavailable until the relay confirms ASR readiness",
     0,
     "Question change, TTS completion, and reconnect alone must not claim ASR readiness",
   );
+  assert.equal(await page.getByText("正在听取回答，慢慢来", { exact: true }).count(), 0,
+    "The candidate status must also wait for ASR input readiness");
 
   await waitForText(page, "🎤 正在听,请说", 5_000, true);
+  await waitForText(page, "正在听取回答，慢慢来", 5_000, true);
   await context.close();
 });
 

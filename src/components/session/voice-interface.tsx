@@ -1625,7 +1625,7 @@ export function VoiceInterface({
             ? `${aiName} 正在思考…`
             : voice.isTransitioning
               ? `${aiName} 正在准备下一题`
-              : voice.isListening
+              : voice.isListening && voice.isInputReady
                 ? "正在听取回答，慢慢来"
                 : "面试进行中";
 
