@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readBrowserPreference, writeBrowserPreference } from "../src/lib/browser-storage";
 
 import {
   hasPersistedRecruitmentStart,
@@ -39,4 +40,34 @@ test("blocked browser storage fails closed without blocking interview entry", ()
 
   assert.equal(hasPersistedRecruitmentStart(blockedStorage, "session-a"), false);
   assert.doesNotThrow(() => persistRecruitmentStart(blockedStorage, "session-a"));
+});
+
+test("optional preferences survive denied storage property access", () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const deniedWindow = Object.defineProperty({}, "localStorage", {
+    get() { throw new Error("Storage access denied"); },
+  });
+  Object.defineProperty(globalThis, "window", {configurable: true, value: deniedWindow});
+  try {
+    assert.equal(readBrowserPreference("language"), null);
+    assert.doesNotThrow(() => writeBrowserPreference("language", "zh"));
+  } finally {
+    if (original) Object.defineProperty(globalThis, "window", original);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
+});
+
+test("optional preferences still persist when storage is available", () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true, value: {localStorage: memoryStorage()},
+  });
+  try {
+    assert.equal(readBrowserPreference("language"), null);
+    writeBrowserPreference("language", "zh");
+    assert.equal(readBrowserPreference("language"), "zh");
+  } finally {
+    if (original) Object.defineProperty(globalThis, "window", original);
+    else Reflect.deleteProperty(globalThis, "window");
+  }
 });

@@ -1,5 +1,7 @@
 "use client";
 
+import { readBrowserPreference, writeBrowserPreference } from "@/lib/browser-storage";
+
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 
 type AppLocale = "en" | "zh";
@@ -452,7 +454,7 @@ const AppLocaleContext = createContext<AppLocaleContextValue | null>(null);
 
 function resolveInitialLocale(): AppLocale {
   if (typeof window === "undefined") return "en";
-  const stored = window.localStorage.getItem(STORAGE_KEY);
+  const stored = readBrowserPreference(STORAGE_KEY);
   if (stored === "zh" || stored === "en") return stored;
   return window.navigator.language.toLowerCase().startsWith("zh") ? "zh" : "en";
 }
@@ -480,7 +482,7 @@ export function AppLocaleProvider({ children }: { children: React.ReactNode }) {
       setLocale: (next) => {
         setLocaleState(next);
         if (typeof window !== "undefined") {
-          window.localStorage.setItem(STORAGE_KEY, next);
+          writeBrowserPreference(STORAGE_KEY, next);
         }
       },
       t: (key, params) =>
