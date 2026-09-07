@@ -3,6 +3,19 @@ const PHONE_OR_EMAIL_PATTERN = /(?:1[3-9]\d{9}|[\w.+-]+@[\w-]+(?:\.[\w-]+)+|http
 const INCOMPLETE_ANCHOR_PATTERN = /^(?:年以上|年经验|及以上|以上学历|相关经验)/;
 const EXPLICIT_RECRUIT_ANCHOR_PATTERN = /(?:简历中|你的简历|你在简历|你提到|你写到|你曾在|你负责的|你参与的|你过往的|你已有的|你目前的|简历尚未|材料中)/i;
 
+/** Expand only explicit references selected by the model; never append missing facts. */
+export function renderRecruitQuestionAnchorReferences(
+  question: string,
+  anchors: { resume: string; job: string } | undefined,
+): string {
+  if (!question.includes("{{")) return question;
+  if (!anchors?.resume || !anchors.job || !question.includes("{{resume}}") || !question.includes("{{job}}")
+    || /\{\{|\}\}/.test(question.replace(/\{\{(?:resume|job)\}\}/g, ""))) {
+    throw new Error("question_anchor_invalid");
+  }
+  return question.replace(/\{\{(resume|job)\}\}/g, (_match, key: "resume" | "job") => anchors[key]);
+}
+
 function stripRecruitAnchorBullet(value: string): string {
   return value
     .replace(/^[\s\-–—•·*#>]+/, "")

@@ -14,7 +14,7 @@ const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.Modu
 function harness() {
   const rows: Row[] = dimensions.slice(0, 2).map((dimension, order) => ({ id: `fixed-${order}`, order, text: `固定题${order}`, description: `oprun_dimension:${dimension}` }));
   const requested: string[][] = [];
-  let failSecond = false, holdSecond = false, invalid = false, failSave = false, clock = 1000;
+  let failSecond = false, holdSecond = false, invalid = false, references = false, failSave = false, clock = 1000;
   let release = () => {}, reached = () => {};
   const blocked = new Promise<void>(resolve => { release = resolve; });
   const second = new Promise<void>(resolve => { reached = resolve; });
@@ -46,7 +46,7 @@ function harness() {
         requested.push(Object.keys(selected));
         if (requested.length === 2) { reached(); if (holdSecond) await blocked; if (failSecond) throw new ModelFailure(); }
         const value = JSON.stringify({ questions: Object.entries(selected).map(([dimension, pair]) => ({ dimension,
-          text: invalid ? "请说明工作经历？" : `你在简历中写到“${pair.resume}”，岗位要求“${pair.job}”，请说明${questions[dimensions.indexOf(dimension) - 2]}的实际证据？` })) });
+          text: invalid ? "请说明工作经历？" : `你在简历中写到“${references ? "{{resume}}" : pair.resume}”，岗位要求“${references ? "{{job}}" : pair.job}”，请说明${questions[dimensions.indexOf(dimension) - 2]}的实际证据？` })) });
         validate(value); return value;
       },
     },
@@ -59,7 +59,7 @@ function harness() {
     jobTitle: "客户经理", jobDescription: "负责客户项目交付与风险核验", resumeText: "负责客户项目交付，使用业务工具核验结果并协作复盘",
     roleType: "nontechnical_core", questionSpecVersion: "recruit-interview-v12", preserveOpening: true, preserveDimensions: dimensions.slice(0, 2),
   }) }), { params: Promise.resolve({ id: "interview" }) });
-  return { rows, requested, request, second, release, setHold: () => { holdSecond = true; }, setFail: (value: boolean) => { failSecond = value; }, setSaveFail: () => { failSave = true; }, setInvalid: () => { invalid = true; }, advanceClock: () => { clock += 181000; } };
+  return { rows, requested, request, second, release, setHold: () => { holdSecond = true; }, setFail: (value: boolean) => { failSecond = value; }, setReferences: () => { references = true; }, setSaveFail: () => { failSave = true; }, setInvalid: () => { invalid = true; }, advanceClock: () => { clock += 181000; } };
 }
 
 test("actual route saves Q3/Q4 before later generation and coalesces even after old lock TTL", async () => {
@@ -91,6 +91,17 @@ test("failed later batch preserves early questions and a later permitted call ge
 test("unanchored generated questions are rejected before any new rows are saved", async () => {
   const h = harness(); h.setInvalid();
   assert.equal((await h.request()).status, 503); assert.equal(h.rows.length, 2);
+});
+
+test("actual route saves expanded source references rather than template markers", async () => {
+  const h = harness(); h.setReferences();
+  assert.equal((await h.request()).status, 200);
+  assert.equal(h.rows.length, 9);
+  for (const row of h.rows.slice(2, 8)) {
+    assert.ok(row.text.includes("负责客户项目交付"));
+    assert.ok(row.text.includes("风险核验"));
+    assert.ok(!row.text.includes("{{"));
+  }
 });
 
 test("storage failure stops later paid batches and cannot return success", async () => {

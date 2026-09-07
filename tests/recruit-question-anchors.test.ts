@@ -13,6 +13,7 @@ import {
   selectRecruitAnchor,
   completeRecruitAnchor,
   recruitQuestionAnchorFailure,
+  renderRecruitQuestionAnchorReferences,
 } from "../src/lib/recruit-question-anchors";
 
 test("job anchors prefer responsibilities over unrelated numeric experience requirements", () => {
@@ -33,6 +34,18 @@ test("question failures distinguish missing anchors and wrong role without discl
   assert.equal(recruitQuestionAnchorFailure(valid+"请写SQL查询",anchors,true),null);
 });
 
+test("explicit anchor references preserve source exactly and never repair missing references", () => {
+  const pair = { resume: "使用工具核对结果，处理40%差异$&", job: "3年以上招聘经验" };
+  const draft = "你的简历写到“{{resume}}”，岗位要求“{{job}}”，请说明迁移依据？";
+  const rendered = renderRecruitQuestionAnchorReferences(draft, pair);
+  assert.ok(rendered.includes(pair.resume)); assert.ok(rendered.includes(pair.job));
+  assert.equal(recruitQuestionAnchorFailure(rendered, pair, false), null);
+  assert.equal(renderRecruitQuestionAnchorReferences("请介绍经历？", pair), "请介绍经历？");
+  assert.throws(() => renderRecruitQuestionAnchorReferences("{{resume}}，请介绍经历？", pair), /question_anchor_invalid/);
+  assert.throws(() => renderRecruitQuestionAnchorReferences(draft + "{{invented}}", pair), /question_anchor_invalid/);
+  assert.throws(() => renderRecruitQuestionAnchorReferences(draft, undefined), /question_anchor_invalid/);
+});
+
 test("actual generation prompt selects work evidence and actual provider validator rejects broken questions", () => {
   const source=readFileSync("src/app/api/v1/interviews/[id]/generate-questions/route.ts","utf8");
   const tree=ts.createSourceFile("route.ts",source,ts.ScriptTarget.Latest,true);
@@ -43,7 +56,7 @@ test("actual generation prompt selects work evidence and actual provider validat
   }
   visit(tree);assert.ok(validator);
   const context=vm.createContext({
-    selectRecruitAnchor,recruitAnchorTerms,recruitQuestionAnchorFailure,ensureExplicitRecruitAnchorLead,
+    selectRecruitAnchor,recruitAnchorTerms,recruitQuestionAnchorFailure,ensureExplicitRecruitAnchorLead,renderRecruitQuestionAnchorReferences,
     jobTitle:"政企商务",jobDescription:"拓展地方政府客户并推动合同落地\n3-5年商务/BD经验",
     resumeText:"使用销售台账复核每笔退款记录",durationMinutes:22,resumeQuestions:4,jobQuestions:4,
     expertExamples:[],preserveOpening:true,preserveDimensions:["core_experience","project_ownership"],
