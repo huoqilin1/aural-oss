@@ -3443,7 +3443,7 @@ async function handleBrowserConnection(
   function armSilenceAutoSkip() {
     clearSilenceAutoSkip();
     if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
-    silenceAutoSkipTimer = setTimeout(() => {
+    silenceAutoSkipTimer = setTimeout(async () => {
       silenceAutoSkipTimer = null;
       if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
       // 小君还在说话/出题/切题时,顺延再看(不打断小君)
@@ -3451,6 +3451,7 @@ async function handleBrowserConnection(
         armSilenceAutoSkip();
         return;
       }
+      if (await recoverDeferredUserTurnBeforeInactivity()) return;
       if (silenceAskCount >= MAX_SILENT_ASKS_PER_QUESTION) {
         if (isOprunRecruitmentInterview) {
           log.warn("正式计分题两次提醒后仍无回应,标记面试未完成,绝不跳题");
@@ -3512,8 +3513,49 @@ async function handleBrowserConnection(
   }
 
   /** AFK 守卫:页面开着但人不在,空转两题后诚实收尾,不留全空回答记录 */
+  async function recoverDeferredUserTurnBeforeInactivity(): Promise<boolean> {
+    if (!isOprunRecruitmentInterview) return false;
+    const deferred = mergeAsrSegments(queuedUserUtteranceWhileGenerating,
+      mergeAsrSegments(pendingUserUtteranceWhileSuppressed, pendingAsrFinalText)).trim();
+    if (deferred.length < 2 || looksLikeAssistantPlaybackEcho(deferred, questionTranscript)
+      || isDuplicateUserFinal(deferred)) return false;
+
+    // A final waiting in our own queue is a response, not candidate inactivity.
+    // Keep the normal speech-settling guard; never cut off ongoing speech.
+    if (Date.now() - lastUserAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS) {
+      armSilenceAutoSkip();
+      return true;
+    }
+    const isChatInput = queuedUserUtteranceIsChat;
+    log.info(`Deferred candidate turn state: session=${ctxSessionId} q=${currentQuestionIndex + 1} suppressed=${suppressAsrResults} suppressed_chars=${pendingUserUtteranceWhileSuppressed.length} final_chars=${pendingAsrFinalText.length} queued_chars=${queuedUserUtteranceWhileGenerating.length}`);
+    queuedUserUtteranceWhileGenerating = "";
+    queuedUserUtteranceIsChat = false;
+    pendingUserUtteranceWhileSuppressed = "";
+    clearPendingAsrFinal();
+    silenceAskCount = 0;
+    silenceConfirmPending = false;
+    suppressAsrResults = false;
+    log.info(`Recovering deferred candidate turn before inactivity: session=${ctxSessionId} q=${currentQuestionIndex + 1} chars=${deferred.length}`);
+    if (browserWs.readyState === WebSocket.OPEN) browserWs.send(JSON.stringify({
+      type: "asr_ended", text: deferred, questionIndex: currentQuestionIndex,
+      ...(isChatInput ? { source: "chat" } : {}),
+    }));
+    try {
+      await handleUserUtterance(deferred, isChatInput ? { isChatInput: true } : undefined);
+    } catch {
+      log.error("Deferred candidate turn recovery failed");
+      markResponseGenerationBlocked();
+    }
+    armSilenceAutoSkip();
+    return true;
+  }
+
   async function abandonForInactivity() {
     if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
+    if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+      armSilenceAutoSkip();
+      return;
+    }
     if (!ownsPersistedSession()) {
       interviewDone = true;
       endingInterview = true;
@@ -3522,6 +3564,7 @@ async function handleBrowserConnection(
       cancelTts();
       return;
     }
+    if (await recoverDeferredUserTurnBeforeInactivity()) return;
     endingInterview = true;
     clearSilenceAutoSkip();
     cancelTts();

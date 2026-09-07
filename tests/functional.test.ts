@@ -210,6 +210,10 @@ before(async () => {
       : undefined);
   browser = await chromium.launch({
     headless: true,
+    // Component scenarios mount an already-started interview, without the
+    // real notice-page click that authorizes audio playback. Allow their
+    // synthetic audio contexts to run; onboarding has its own click tests.
+    ...(componentOnly ? { args: ["--autoplay-policy=no-user-gesture-required"] } : {}),
     ...(systemChrome ? { executablePath: systemChrome } : {}),
   });
 });
@@ -772,7 +776,19 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
     async () => (await page.getByTestId("parent-complete").textContent()) === "true",
     15_000,
     "Expected completion only after the eighth answer was saved",
-  );
+  ).catch(async (error) => {
+    const sent = await readRelaySentMessages(page);
+    console.error("[completion-diagnostic]", JSON.stringify({
+      scenario,
+      recordingWrites,
+      saves: saveBodies.map((body) => {
+        const b = body as {complete?:boolean;validateOnly?:boolean;currentQuestionIndex?:number;messages?:Array<{role:string}>};
+        return {complete:b.complete,validateOnly:b.validateOnly,index:b.currentQuestionIndex,users:b.messages?.filter(m=>m.role==="user").length};
+      }),
+      sentTypes: sent.map(m=>m.type),
+    }));
+    throw error;
+  });
   const sent = await readRelaySentMessages(page);
   assert.equal(sent.filter((message) => message.type === "text_input").length, 8);
   assert.equal(sent.filter((message) => message.type === "next_question").length, scenario.endsWith("progress-retry") ? 8 : 7);

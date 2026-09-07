@@ -112,6 +112,52 @@ test("a failed system response cannot become candidate inactivity through a stal
   assert.equal(timers.length,2);
 });
 
+test("actual inactivity path processes a deferred answer or done command without abandoning", async () => {
+  for (const buffer of ["pendingUserUtteranceWhileSuppressed", "pendingAsrFinalText", "queuedUserUtteranceWhileGenerating"]) {
+    for (const answer of ["我负责核对合同，异常交给负责人复核。", "答完了，没有了，请继续。"]){
+      const processed:string[]=[];
+      const sent:Array<{type:string;text:string}>=[];
+      const noop=()=>{};
+      const sandbox=relayFunctions("voice-relay.ts", ["abandonForInactivity","recoverDeferredUserTurnBeforeInactivity"], {
+        interviewDone:false,endingInterview:false,ownsPersistedSession:()=>true,
+        isOprunRecruitmentInterview:true,currentQuestionIndex:1,ctxSessionId:"offline-inactivity",
+        queuedUserUtteranceWhileGenerating:"",pendingUserUtteranceWhileSuppressed:"",pendingAsrFinalText:"",
+        queuedUserUtteranceIsChat:false,lastUserAudioActivityAt:0,ASR_ACTIVE_SPEECH_HOLD_MS:1000,
+        mergeAsrSegments,questionTranscript:[],looksLikeAssistantPlaybackEcho:()=>false,isDuplicateUserFinal:()=>false,
+        clearPendingAsrFinal:()=>{sandbox.pendingAsrFinalText="";},
+        armSilenceAutoSkip:noop,log:{info:noop,error:noop},
+        browserWs:{readyState:1,send:(s:string)=>sent.push(JSON.parse(s))},WebSocket:{OPEN:1},
+        handleUserUtterance:async(s:string)=>processed.push(s),
+        persistSessionStatus:()=>{throw new Error("buffered speech must not be abandoned");},
+      });
+      sandbox[buffer]=answer;
+      await vm.runInContext("abandonForInactivity()",sandbox);
+      assert.deepEqual(processed,[answer]);
+      assert.equal(sent[0].text,answer);
+      assert.equal(sandbox.endingInterview,false);
+      assert.equal(sandbox.pendingAsrFinalText,"");
+      assert.equal(sandbox.pendingUserUtteranceWhileSuppressed,"");
+      assert.equal(sandbox.queuedUserUtteranceWhileGenerating,"");
+    }
+  }
+});
+
+test("deferred inactivity recovery preserves active speech and never replays an echo or duplicate", async () => {
+  for (const mode of ["active", "echo", "duplicate"]) {
+    let rearmed=0;
+    const sandbox=relayFunctions("voice-relay.ts",["recoverDeferredUserTurnBeforeInactivity"],{
+      isOprunRecruitmentInterview:true,queuedUserUtteranceWhileGenerating:"",pendingUserUtteranceWhileSuppressed:"当前回答",
+      pendingAsrFinalText:"",mergeAsrSegments,questionTranscript:[],
+      looksLikeAssistantPlaybackEcho:()=>mode==="echo",isDuplicateUserFinal:()=>mode==="duplicate",
+      lastUserAudioActivityAt:Date.now(),ASR_ACTIVE_SPEECH_HOLD_MS:60000,
+      armSilenceAutoSkip:()=>rearmed++,handleUserUtterance:()=>{throw new Error("must not replay");},
+    });
+    assert.equal(await vm.runInContext("recoverDeferredUserTurnBeforeInactivity()",sandbox),mode==="active");
+    assert.equal(rearmed,mode==="active"?1:0);
+    assert.equal(sandbox.pendingUserUtteranceWhileSuppressed,"当前回答");
+  }
+});
+
 test("recruitment answer-done is not an interview-end command, including appended ASR", () => {
   for (const phrase of ["我答完了。", "我做完了。", "我的交付是台账和完整的手续，没有依据的数字不补充。我答完了。", "That's all.", "I'm done."]) {
     assert.equal(isUserEndRequest(phrase, { isRecruitmentInterview: true }), false, phrase);
@@ -369,7 +415,7 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
   }
   visit(source);
   assert.equal(found.size, names.length);
-  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
+  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, isTransitioning:false, generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false, suppressAsrResults:false, recoverDeferredUserTurnBeforeInactivity:async()=>false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
   vm.runInContext(ts.transpileModule(Array.from(found.values()).join("\n"), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, sandbox);
   return sandbox;
 }
