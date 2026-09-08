@@ -98,6 +98,16 @@ test("actual generation prompt selects work evidence and actual provider validat
   // Distinct dimension wording is required independently from correct anchors.
   questions.forEach((q,i)=>{q.text+=`请选择第${i+1}种情境分析。`;});
   context.check(JSON.stringify({questions}));
+  const numbered=structuredClone(questions);numbered[0].text="Q3: "+numbered[0].text;
+  context.check(JSON.stringify({questions:numbered}));
+  context.numbered=JSON.stringify({questions:numbered});
+  assert.equal(vm.runInContext('parseRecruitQuestions(numbered).questions[0].text',context),questions[0].text);
+  assert.equal(vm.runInContext('candidateQuestionTextFailure("面对材料口径冲突，你会如何处理，依据是什么。")',context),null);
+  assert.equal(vm.runInContext('candidateQuestionTextFailure("这批材料已全部整理完毕。")',context),"candidate_text_not_question");
+  const internal=structuredClone(questions);internal[0].text+="请按本轮出题规则作答。";
+  assert.throws(()=>context.check(JSON.stringify({questions:internal})),/candidate_text_instruction/);
+  const embedded=structuredClone(questions);embedded[0].text+=" 第3题 请继续。";
+  assert.throws(()=>context.check(JSON.stringify({questions:embedded})),/candidate_text_number_label/);
   const keyed=Object.fromEntries(questions.map(({dimension,text})=>[dimension,{text}]));
   context.check(JSON.stringify({questions:keyed}));
   const missingKey=structuredClone(keyed);delete missingKey.core_skill_evidence;

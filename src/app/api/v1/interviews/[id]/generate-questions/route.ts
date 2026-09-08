@@ -89,14 +89,19 @@ function recruitJobFacts(value: string): string {
 
 function parseRecruitQuestions(raw: string): { questions: Array<{ dimension: unknown; text: unknown }> } {
   const value = parseJsonSafe(raw) as { questions?: unknown };
-  if (Array.isArray(value?.questions)) return value as ReturnType<typeof parseRecruitQuestions>;
+  const normalize = (question: { dimension: unknown; text: unknown }) => ({ ...question,
+    // Remove only a cosmetic leading question number, never source quotations,
+    // embedded instructions, topic headings or substantive question content.
+    text: typeof question.text === "string" ? question.text.replace(/^\s*(?:第\s*[一二三四五六七八1-8]\s*题|Q\s*[1-8])(?:\s*[:：、.．]\s*|\s*\r?\n\s*)/i, "").trim() : question.text,
+  });
+  if (Array.isArray(value?.questions)) return { questions: value.questions.map(normalize) };
   if (!value?.questions || typeof value.questions !== "object") throw new Error("invalid_question_response");
   const known = new Set<string>([...LEGACY_RECRUIT_DIMENSIONS, ...EVIDENCE_V11_RECRUIT_DIMENSIONS]);
   const questions = Object.entries(value.questions).map(([dimension, item]) => {
     if (!known.has(dimension) || !item || typeof item !== "object" || Array.isArray(item)) {
       throw new Error("invalid_question_response");
     }
-    return { dimension, text: (item as { text?: unknown }).text };
+    return normalize({ dimension, text: (item as { text?: unknown }).text });
   });
   return { questions };
 }
@@ -240,13 +245,18 @@ ${expertBlock}
   ];
 }
 
-function isCandidateFacingQuestionText(value: string): boolean {
+function candidateQuestionTextFailure(value: string): string | null {
   const text = value.replace(/\s+/g, " ").trim();
-  if (!text || text.length > 420) return false;
-  if (/(?:^|[（(\s])(?:第\s*[一二三四五六七八九十\d]+\s*题|Q\s*\d+)|dimension|题目契约|完整题目蓝图|本轮出题规则|系统固定|计分规则|AI评价权重|出题官|严禁|不得为了凑比例/i.test(text)) {
-    return false;
-  }
-  return /[？?]|请|说说|谈谈|说明|还原|分析|推演|介绍/.test(text);
+  if (!text) return "empty";
+  if (text.length > 420) return "too_long";
+  if (/(?:^|[（(\s])(?:第\s*[一二三四五六七八九十\d]+\s*题|Q\s*\d+)/i.test(text)) return "candidate_text_number_label";
+  if (/dimension|题目契约|完整题目蓝图|本轮出题规则|系统固定|计分规则|AI评价权重|出题官|严禁|不得为了凑比例/i.test(text)) return "candidate_text_instruction";
+  return /[？?]|请|说说|谈谈|说明|还原|分析|推演|介绍|如何|怎样|怎么|什么|哪些|为什么|是否|能不能|给出|列出|描述|解释|展示|演示/.test(text)
+    ? null : "candidate_text_not_question";
+}
+
+function isCandidateFacingQuestionText(value: string): boolean {
+  return candidateQuestionTextFailure(value) === null;
 }
 
 export async function POST(
@@ -454,9 +464,13 @@ export async function POST(
         if (typeof matches[0].text !== "string") throw new Error(`missing_or_invalid_scored_question_${dimension}_text_type`);
         const selected = anchors.get(dimension);
         const question = evidenceV11 ? renderRecruitQuestionAnchorReferences(matches[0].text, selected) : matches[0].text;
-        if (!isCandidateFacingQuestionText(question)) {
-          const reason = !question.trim() ? "empty" : question.replace(/\s+/g, " ").trim().length > 420 ? "too_long" : "candidate_text";
-          throw new Error(`missing_or_invalid_scored_question_${dimension}_${reason}`);
+        const textFailure = candidateQuestionTextFailure(question);
+        if (textFailure) {
+          log.warn("Question text rejected", { dimension, reason: textFailure,
+            markers: ["dimension", "题目契约", "完整题目蓝图", "本轮出题规则", "系统固定", "计分规则", "AI评价权重", "出题官", "严禁", "不得为了凑比例"]
+              .filter(marker => question.toLocaleLowerCase().includes(marker.toLocaleLowerCase())),
+          });
+          throw new Error(`missing_or_invalid_scored_question_${dimension}_${textFailure}`);
         }
         const anchorFailure = evidenceV11 && dimension !== "core_experience"
           ? recruitQuestionAnchorFailure(question, selected, isTechnicalRole) : null;

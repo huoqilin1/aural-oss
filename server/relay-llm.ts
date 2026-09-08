@@ -483,7 +483,7 @@ export function safeRelayFailure(error: unknown): string {
   if (http) return `http_${http[1]}` + (http[2] ? `_code_${http[2]}` : "")
     + (http[3] ? `_retry_after_${http[3]}` : "");
   if (/^question_(?:anchor_source_missing|resume_anchor_missing|job_anchor_missing|role_mismatch)_(?:core_experience|project_ownership|core_skill_evidence|result_authenticity|job_work_sample|problem_solving|ai_learning_boundary|collaboration_motivation_stability)$/.test(error.message)) return error.message;
-  if (/^missing_or_invalid_scored_question_(?:core_experience|project_ownership|core_skill_evidence|result_authenticity|job_work_sample|problem_solving|ai_learning_boundary|collaboration_motivation_stability)_(?:count_[0-9]{1,3}|text_type|empty|too_long|candidate_text)$/.test(error.message)) return error.message;
+  if (/^missing_or_invalid_scored_question_(?:core_experience|project_ownership|core_skill_evidence|result_authenticity|job_work_sample|problem_solving|ai_learning_boundary|collaboration_motivation_stability)_(?:count_[0-9]{1,3}|text_type|empty|too_long|candidate_text(?:_number_label|_instruction|_not_question)?)$/.test(error.message)) return error.message;
   if (/^(?:invalid_question_response|missing_or_invalid_scored_question|question_anchor_invalid|duplicate_scored_question|empty_response|invalid_summary_response|report_storage_failed)$/.test(error.message)) return error.message;
   return error.name;
 }
