@@ -55,6 +55,29 @@ afterEach(() => {
   relayLlm.resetRelayLlmCacheForTests();
 });
 
+test("HTTP failures retain numeric provider diagnostics without private message text", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    await withEnvAsync({ ZHIPU_API_KEY: "synthetic", RECRUIT_GLM_ONLY: "1",
+      RECRUIT_TEST_MODEL_ROUTING: "0", HR_MODEL_CONTROL_URL: undefined }, async () => {
+      for (const code of ["1302", "1310", "1313", "private-secret-value"]) {
+        globalThis.fetch = (async () => Response.json(
+          { error: { code, message: "private resume and credential text" } },
+          { status: 429, headers: { "Retry-After": "30" } },
+        )) as typeof fetch;
+        await assert.rejects(relayLlm.callRelayLLM("synthetic", undefined, { stage: "test" },
+          { primary: "zhipu", fallbacks: [] }), (error: unknown) => {
+          assert.ok(error instanceof relayLlm.AllFourModelsFailed);
+          assert.equal(error.attempts[0].error,
+            `http_429${/^\d+$/.test(code) ? `_code_${code}` : ""}_retry_after_30`);
+          assert.ok(!JSON.stringify(error.attempts).includes("private"));
+          return true;
+        });
+      }
+    });
+  } finally { globalThis.fetch = previousFetch; }
+});
+
 test("reasoning live turns and background generation retain a bounded reasoning deadline", async () => {
   const originalFetch = globalThis.fetch;
   const originalTimeout = AbortSignal.timeout;

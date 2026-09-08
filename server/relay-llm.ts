@@ -402,8 +402,18 @@ async function callOpenAICompatible(
   });
 
   if (!res.ok) {
-    await res.body?.cancel();
-    throw new Error(`LLM API ${res.status}`);
+    // Preserve only bounded numeric diagnostics, never provider message text.
+    let providerCode = "";
+    try {
+      const failure = await res.json();
+      const code = String(failure?.error?.code ?? "");
+      if (/^[0-9]{3,6}$/.test(code)) providerCode = code;
+    } catch { /* A non-JSON error still retains the HTTP status. */ }
+    const retry = res.headers.get("retry-after") ?? "";
+    const retrySeconds = /^[0-9]{1,5}$/.test(retry) ? Number(retry) : null;
+    throw new Error(`LLM API ${res.status}`
+      + (providerCode ? ` code=${providerCode}` : "")
+      + (retrySeconds !== null && retrySeconds <= 86400 ? ` retry_after=${retrySeconds}` : ""));
   }
 
   const data = await res.json();
@@ -451,8 +461,9 @@ export class AllFourModelsFailed extends Error {
 
 export function safeRelayFailure(error: unknown): string {
   if (!(error instanceof Error)) return "provider_error";
-  const http = /^LLM API ([1-5][0-9]{2})$/.exec(error.message);
-  if (http) return `http_${http[1]}`;
+  const http = /^LLM API ([1-5][0-9]{2})(?: code=([0-9]{3,6}))?(?: retry_after=([0-9]{1,5}))?$/.exec(error.message);
+  if (http) return `http_${http[1]}` + (http[2] ? `_code_${http[2]}` : "")
+    + (http[3] ? `_retry_after_${http[3]}` : "");
   if (/^question_(?:anchor_source_missing|resume_anchor_missing|job_anchor_missing|role_mismatch)_(?:core_experience|project_ownership|core_skill_evidence|result_authenticity|job_work_sample|problem_solving|ai_learning_boundary|collaboration_motivation_stability)$/.test(error.message)) return error.message;
   if (/^(?:invalid_question_response|missing_or_invalid_scored_question|question_anchor_invalid|duplicate_scored_question|empty_response|invalid_summary_response|report_storage_failed)$/.test(error.message)) return error.message;
   return error.name;
