@@ -184,5 +184,9 @@ Provide a structured analysis as VALID JSON ONLY (use only standard ASCII double
     }
   }
 
+  // Strict chat APIs require a user turn even when all evidence is in system.
+  if (!result.some(message => message.role === "user")) {
+    result.push({ role: "user", content: "Generate the interview report from the supplied evidence, following the required JSON schema. Return JSON only." });
+  }
   return result;
 }

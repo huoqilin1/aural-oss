@@ -144,3 +144,13 @@ test("follow-up prompt gives final refinement when no turns remain", () => {
   assert.match(system, /FINAL follow-up turn/);
   assert.match(system, /shouldContinue/);
 });
+
+
+import { buildSummaryPrompt } from "../src/lib/ai/prompts/summary";
+test("text-only report includes a user turn for strict chat APIs", () => {
+    const messages = buildSummaryPrompt("Synthetic report", [{role:"user",content:"Synthetic project evidence"}], null, null, null, "zh");
+    assert.equal(messages[0].role, "system");
+    assert.ok(String(messages[0].content).includes("Synthetic project evidence"));
+    assert.equal(messages.at(-1)?.role, "user");
+    assert.match(String(messages.at(-1)?.content), /JSON/);
+});
