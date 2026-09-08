@@ -40,14 +40,14 @@ test("actual TTS keeps inactivity paused until browser playback, and transport t
     let release:(result:string)=>void=()=>{};
     const events:any[]=[];
     const sandbox=relayFunctions("voice-relay.ts",["speakText"],{
-      currentQuestionIndex:2,ctx:{language:"zh",clientPlaybackReceipt:true},
+      currentQuestionIndex:2,ctxSessionId:"local-playback",ctx:{language:"zh",clientPlaybackReceipt:true},
       cancelTts:()=>{},getTtsOptions:()=>({}),getTtsAuth:()=>({}),
       AbortController,WebSocket:{OPEN:1},interviewDone:false,
       browserWs:{readyState:1,send:(data:any)=>{if(typeof data==="string")events.push(JSON.parse(data));},close:()=>events.push({type:"closed"})},
       synthesizeSpeech:async function*(){yield {type:"audio",audio:Buffer.alloc(48)};yield {type:"done"};},
       setTimeout:(callback:()=>void)=>{callback();return 0;},clearTimeout:()=>{},
       waitForBrowserPlayback:()=>new Promise(resolve=>{release=resolve;}),
-      log:{error:()=>{},warn:()=>{}},
+      log:{error:()=>{},warn:()=>{},info:()=>{}},
     });
     const pending=vm.runInContext("speakText('本地测试问题')",sandbox);
     await new Promise(resolve=>setImmediate(resolve));
