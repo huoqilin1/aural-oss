@@ -7,6 +7,7 @@ import * as anchors from "../src/lib/recruit-question-anchors";
 
 type Row = { id?: string; order: number; text: string; description: string; [key: string]: unknown };
 const dimensions = ["core_experience", "project_ownership", "core_skill_evidence", "result_authenticity", "job_work_sample", "problem_solving", "ai_learning_boundary", "collaboration_motivation_stability"];
+const batches = [dimensions.slice(2,3), dimensions.slice(3,5), dimensions.slice(5,7), dimensions.slice(7)];
 const questions = ["技能使用", "成果口径", "现场工作样例", "问题排查", "AI学习验证", "职业动机"];
 const source = fs.readFileSync("src/app/api/v1/interviews/[id]/generate-questions/route.ts", "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
@@ -63,25 +64,25 @@ function harness(keyed = false) {
   return { rows, requested, request, second, release, setHold: () => { holdSecond = true; }, setFail: (value: boolean) => { failSecond = value; }, setReferences: () => { references = true; }, setSaveFail: () => { failSave = true; }, setInvalid: () => { invalid = true; }, advanceClock: () => { clock += 181000; } };
 }
 
-test("dimension-keyed provider responses persist all three incremental pairs with their exact dimensions", async () => {
+test("dimension-keyed provider responses persist urgent Q3 and all later dimensions", async () => {
   const h = harness(true); h.setReferences();
   assert.equal((await h.request()).status, 200);
   assert.deepEqual(h.rows.slice(0,8).map(row=>row.description),dimensions.map(d=>`oprun_dimension:${d}`));
-  assert.deepEqual(h.requested,[dimensions.slice(2,4),dimensions.slice(4,6),dimensions.slice(6)]);
+  assert.deepEqual(h.requested,batches);
   assert.equal(h.rows.length,9);
 });
 
-test("actual route saves Q3/Q4 before later generation and coalesces even after old lock TTL", async () => {
+test("actual route saves Q3 without waiting for Q4 and coalesces even after old lock TTL", async () => {
   const h = harness(); h.setHold();
   const pending = h.request(); await h.second;
-  assert.equal(h.rows.length, 4);
-  assert.deepEqual(h.rows.map(row => row.description), dimensions.slice(0, 4).map(d => `oprun_dimension:${d}`));
+  assert.equal(h.rows.length, 3);
+  assert.deepEqual(h.rows.map(row => row.description), dimensions.slice(0, 3).map(d => `oprun_dimension:${d}`));
   h.advanceClock();
   const duplicate = await h.request();
   assert.equal((await duplicate.json()).data.skipped, "generation_in_progress");
   assert.equal(h.requested.length, 2);
   h.release(); assert.equal((await pending).status, 200);
-  assert.deepEqual(h.requested, [dimensions.slice(2, 4), dimensions.slice(4, 6), dimensions.slice(6)]);
+  assert.deepEqual(h.requested, batches);
   assert.equal(h.rows.length, 9);
   assert.equal(h.rows.at(-1)!.description, "oprun_dimension:candidate_questions");
   assert.equal(h.rows[0].id, "fixed-0"); assert.equal(h.rows[1].id, "fixed-1");
@@ -89,11 +90,11 @@ test("actual route saves Q3/Q4 before later generation and coalesces even after 
 
 test("failed later batch preserves early questions and a later permitted call generates only missing dimensions", async () => {
   const h = harness(); h.setFail(true);
-  assert.equal((await h.request()).status, 503); assert.equal(h.rows.length, 4);
+  assert.equal((await h.request()).status, 503); assert.equal(h.rows.length, 3);
   const preserved = JSON.stringify(h.rows);
   h.setFail(false); assert.equal((await h.request()).status, 200);
-  assert.equal(JSON.stringify(h.rows.slice(0, 4)), preserved);
-  assert.deepEqual(h.requested.slice(2), [dimensions.slice(4, 6), dimensions.slice(6)]);
+  assert.equal(JSON.stringify(h.rows.slice(0, 3)), preserved);
+  assert.deepEqual(h.requested.slice(2), batches.slice(1));
   assert.equal(h.rows.length, 9);
 });
 
@@ -126,5 +127,5 @@ test("missing preserved questions fail before generation and a complete set is i
   const before = JSON.stringify(complete.rows);
   const again = await complete.request(); assert.equal(again.status, 200);
   assert.equal((await again.json()).data.count, 0);
-  assert.equal(JSON.stringify(complete.rows), before); assert.equal(complete.requested.length, 3);
+  assert.equal(JSON.stringify(complete.rows), before); assert.equal(complete.requested.length, 4);
 });

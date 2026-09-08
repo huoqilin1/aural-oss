@@ -77,6 +77,16 @@ function parseJsonSafe(raw: string): unknown {
   }
 }
 
+function recruitJobFacts(value: string): string {
+  // HR's historical wrapper mixes job evidence with whole-interview instructions.
+  // The route owns those instructions; only actual job facts belong in anchors.
+  const header = value.match(/^\s*【岗位职责】\r?\n/);
+  const boundary = value.indexOf("【本轮出题规则】");
+  return header && boundary >= header[0].length
+    ? value.slice(header[0].length, boundary).trim()
+    : value;
+}
+
 function parseRecruitQuestions(raw: string): { questions: Array<{ dimension: unknown; text: unknown }> } {
   const value = parseJsonSafe(raw) as { questions?: unknown };
   if (Array.isArray(value?.questions)) return value as ReturnType<typeof parseRecruitQuestions>;
@@ -126,7 +136,7 @@ function buildRecruitPrompt(opts: {
 }) {
   const {
     jobTitle,
-    jobDescription,
+    jobDescription: suppliedJobDescription,
     resumeText,
     durationMinutes,
     resumeQuestions,
@@ -138,6 +148,7 @@ function buildRecruitPrompt(opts: {
     questionSpecVersion = "",
     roleType = "nontechnical_core",
   } = opts;
+  const jobDescription = recruitJobFacts(suppliedJobDescription);
   const dimensions = recruitDimensions(questionSpecVersion);
   const evidenceV11 = isEvidenceV11(questionSpecVersion);
   const preserved = new Set(preserveDimensions);
@@ -259,8 +270,8 @@ export async function POST(
 
   const jobTitle =
     typeof body.jobTitle === "string" ? body.jobTitle.trim() : "";
-  const jobDescription =
-    typeof body.jobDescription === "string" ? body.jobDescription : "";
+  const jobDescription = recruitJobFacts(
+    typeof body.jobDescription === "string" ? body.jobDescription : "");
   const resumeText =
     typeof body.resumeText === "string" ? body.resumeText : "";
   const durationMinutes =
@@ -404,8 +415,11 @@ export async function POST(
   }
   const remainingDimensions = selectedDimensions.filter(dimension => !preserveDimensions.includes(dimension) && !persistedDimensions.has(dimension));
   const incremental = evidenceV11 && preserveDimensions.includes("core_experience") && preserveDimensions.includes("project_ownership");
+  const urgentQ3 = incremental && remainingDimensions[0] === "core_skill_evidence";
+  const laterDimensions = urgentQ3 ? remainingDimensions.slice(1) : remainingDimensions;
   const batches = incremental && remainingDimensions.length
-    ? Array.from({ length: Math.ceil(remainingDimensions.length / 2) }, (_, index) => remainingDimensions.slice(index * 2, index * 2 + 2))
+    ? [...(urgentQ3 ? [[remainingDimensions[0]]] : []),
+      ...Array.from({ length: Math.ceil(laterDimensions.length / 2) }, (_, index) => laterDimensions.slice(index * 2, index * 2 + 2))]
     : [remainingDimensions];
   const normalizeQuestion = (text: string) => text.toLocaleLowerCase().replace(/[\s，。！？、；：,.!?;:()（）【】\[\]"“”'‘’]/g, "");
   const persistedTexts = new Set((initialRows ?? []).map(row => normalizeQuestion(String(row.text || ""))));

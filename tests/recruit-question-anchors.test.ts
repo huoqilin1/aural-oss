@@ -69,6 +69,13 @@ test("actual generation prompt selects work evidence and actual provider validat
     +`\nconst selectedDimensions=recruitDimensions(contractVersion);const batchDimensions=selectedDimensions.filter(d=>!preserveDimensions.includes(d));const persistedTexts=new Set();globalThis.check=${validator};globalThis.input=messages;globalThis.pairs=Object.fromEntries(anchors);`;
   vm.runInContext(ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context);
   const input=context.input as Array<{role:string;content:string}>;
+  const wrapped = "【岗位职责】\n负责真实客户交付\n\n【本轮出题规则】\n总计输出八题，内部编排不得作为岗位事实";
+  context.wrapped = wrapped;
+  assert.equal(vm.runInContext('recruitJobFacts(wrapped)',context),"负责真实客户交付");
+  assert.equal(vm.runInContext('recruitJobFacts("普通岗位要求保持原样")',context),"普通岗位要求保持原样");
+  const wrappedPrompt=vm.runInContext('buildRecruitPrompt({jobTitle,jobDescription:wrapped,resumeText,durationMinutes,resumeQuestions,jobQuestions,preserveOpening,preserveDimensions,requestedDimensions:["core_skill_evidence"],questionSpecVersion:contractVersion,roleType})',context);
+  assert.ok(wrappedPrompt[1].content.includes("负责真实客户交付"));
+  assert.ok(!wrappedPrompt[1].content.includes("内部编排不得作为岗位事实"));
   // Exercise the actual prompt for each incremental pair. The JSON example
   // must include both requested dimensions, not only the first one.
   for(const requested of [["core_skill_evidence","result_authenticity"],["job_work_sample","problem_solving"],["ai_learning_boundary","collaboration_motivation_stability"]]){
