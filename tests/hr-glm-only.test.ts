@@ -16,7 +16,7 @@ test("anchor failure metadata keeps only fixed cause and dimension without paylo
 
 for (const split of [false, true]) test(`model routing preserves one-pass halt with split=${split}`, async () => {
   const root=await mkdtemp(join(tmpdir(),"hr-glm-only-"));
-  const configuration:Record<string,string>={RECRUIT_GLM_ONLY:"1",RECRUIT_TEST_MODEL_ROUTING:split?"1":"0",AURAL_RUNTIME_STATE_DIR:root,HR_MODEL_USAGE_OUTBOX:join(root,"usage"),
+  const configuration:Record<string,string>={RECRUIT_GLM_ONLY:split?"0":"1",RECRUIT_TEST_MODEL_ROUTING:"1",ZHIPU_BASE_URL:"https://open.bigmodel.cn/api/coding/paas/v4",AURAL_RUNTIME_STATE_DIR:root,HR_MODEL_USAGE_OUTBOX:join(root,"usage"),
     HR_MODEL_CONTROL_URL:"http://127.0.0.1/v1/recruit/internal/aural/model-policy",HR_MODEL_CONTROL_SECRET:"synthetic-secret",
     ZHIPU_API_KEY:"synthetic",ZHIPU_MODEL:"glm-old",RELAY_LLM_MODEL:"deepseek-v4-pro",
     KIMI_API_KEY:"synthetic",DEEPSEEK_API_KEY:"synthetic",DOUBAO_TEXT_API_KEY:"synthetic",DOUBAO_TEXT_MODEL:"synthetic-doubao"};

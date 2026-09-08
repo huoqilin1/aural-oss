@@ -41,11 +41,19 @@ export const DEFAULT_RELAY_LLM_ROUTE: RelayLlmRoute = {
 };
 
 export function recruitGlmOnlyEnabled(): boolean {
-  return !recruitTestModelRoutingEnabled() && process.env.RECRUIT_GLM_ONLY?.trim() === "1";
+  return process.env.RECRUIT_GLM_ONLY?.trim() === "1";
 }
 
 export function recruitTestModelRoutingEnabled(): boolean {
-  return process.env.RECRUIT_TEST_MODEL_ROUTING?.trim() === "1";
+  return !recruitGlmOnlyEnabled() && process.env.RECRUIT_TEST_MODEL_ROUTING?.trim() === "1";
+}
+
+export function zhipuBaseUrl(): string {
+  const base = (process.env.ZHIPU_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4").trim().replace(/\/+$/, "");
+  if (recruitGlmOnlyEnabled() && base !== "https://open.bigmodel.cn/api/coding/paas/v4") {
+    throw new Error("GLM-only mode requires the explicit Coding endpoint; standard API fallback is disabled");
+  }
+  return base;
 }
 
 export function isRelayLlmProviderId(

@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { zhipuBaseUrl } from "../../relay-llm-route";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
 import {
@@ -23,8 +24,7 @@ export class ZhipuProvider implements LLMProvider {
   constructor() {
     this.client = new OpenAI({
       apiKey: process.env.ZHIPU_API_KEY ?? "",
-      baseURL:
-        process.env.ZHIPU_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4",
+      baseURL: zhipuBaseUrl(),
     });
   }
 

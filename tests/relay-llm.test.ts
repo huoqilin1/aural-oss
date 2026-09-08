@@ -72,7 +72,7 @@ test("GLM report generation requests JSON without changing reasoning for other s
   }) as typeof fetch;
   try {
     await withEnvAsync({ ZHIPU_API_KEY: "synthetic", RECRUIT_GLM_ONLY: "1",
-      RECRUIT_TEST_MODEL_ROUTING: "0", AURAL_RUNTIME_STATE_DIR: root,
+      RECRUIT_TEST_MODEL_ROUTING: "0", ZHIPU_BASE_URL: "https://open.bigmodel.cn/api/coding/paas/v4", AURAL_RUNTIME_STATE_DIR: root,
       HR_MODEL_USAGE_OUTBOX: join(root, "usage"), HR_MODEL_CONTROL_SECRET: "synthetic",
       HR_MODEL_CONTROL_URL: "http://127.0.0.1/v1/recruit/internal/aural/model-policy",
       RELAY_LLM_DISABLE_THINKING: undefined }, async () => {
@@ -96,7 +96,7 @@ test("HTTP failures retain numeric provider diagnostics without private message 
   const previousFetch = globalThis.fetch;
   try {
     await withEnvAsync({ ZHIPU_API_KEY: "synthetic", RECRUIT_GLM_ONLY: "1",
-      RECRUIT_TEST_MODEL_ROUTING: "0", HR_MODEL_CONTROL_URL: undefined }, async () => {
+      RECRUIT_TEST_MODEL_ROUTING: "0", ZHIPU_BASE_URL: "https://open.bigmodel.cn/api/coding/paas/v4", HR_MODEL_CONTROL_URL: undefined }, async () => {
       for (const code of ["1302", "1310", "1313", "private-secret-value"]) {
         globalThis.fetch = (async () => Response.json(
           { error: { code, message: "private resume and credential text" } },

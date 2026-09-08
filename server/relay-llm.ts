@@ -47,7 +47,7 @@ function kimiRelayModel(): string {
   const configured = process.env.KIMI_MODEL?.trim();
   return !configured || configured === "kimi-latest" ? "kimi-k3" : configured;
 }
-const ZHIPU_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
+import { zhipuBaseUrl } from "../src/lib/relay-llm-route";
 const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
 const KIMI_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1";
 
@@ -198,7 +198,7 @@ function providerEndpoint(
       model: zhipuRelayModel(),
       temperature,
       apiKey,
-      baseUrl: process.env.ZHIPU_BASE_URL?.trim() || ZHIPU_DEFAULT_BASE_URL,
+      baseUrl: zhipuBaseUrl(),
       useGemini: false,
     } : null;
   }
