@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { mkdtemp } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { flushHrUsage } from "../server/hr-model-usage-outbox";
 
 import * as relayLlm from "../server/relay-llm";
 
@@ -53,6 +57,39 @@ async function withEnvAsync(
 
 afterEach(() => {
   relayLlm.resetRelayLlmCacheForTests();
+});
+
+test("GLM report generation requests JSON without changing reasoning for other stages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "glm-report-format-"));
+  const originalFetch = globalThis.fetch;
+  const bodies: Record<string, unknown>[] = [];
+  globalThis.fetch = (async (_url, options) => {
+    const path = new URL(String(_url)).pathname;
+    if (path.endsWith("/model-task")) return Response.json({ success: true, task_key: "aural:91", round: 1, state: "active", route: { primary: "zhipu", fallbacks: [] } });
+    if (path.endsWith("/model-usage")) return Response.json({ success: true, id: JSON.parse(String(options?.body)).id });
+    bodies.push(JSON.parse(String(options?.body)));
+    return Response.json({ choices: [{ message: { content: '{"summary":"Synthetic report"}' } }] });
+  }) as typeof fetch;
+  try {
+    await withEnvAsync({ ZHIPU_API_KEY: "synthetic", RECRUIT_GLM_ONLY: "1",
+      RECRUIT_TEST_MODEL_ROUTING: "0", AURAL_RUNTIME_STATE_DIR: root,
+      HR_MODEL_USAGE_OUTBOX: join(root, "usage"), HR_MODEL_CONTROL_SECRET: "synthetic",
+      HR_MODEL_CONTROL_URL: "http://127.0.0.1/v1/recruit/internal/aural/model-policy",
+      RELAY_LLM_DISABLE_THINKING: undefined }, async () => {
+      for (const stage of ["interview.voice_report", "interview.summary_report", "interview.generate_questions"]) {
+        await relayLlm.generateGovernedText({ session_id: "synthetic", stage },
+          [{ role: "user", content: "Return synthetic JSON" }], text => { JSON.parse(text); });
+      }
+      for (const body of bodies.slice(0, 2)) {
+        assert.deepEqual(body.response_format, { type: "json_object" });
+        assert.deepEqual(body.thinking, { type: "disabled" });
+      }
+      assert.equal(bodies.length, 3);
+      assert.equal(bodies[2].thinking, undefined);
+      assert.equal(bodies[2].response_format, undefined);
+      await flushHrUsage();
+    });
+  } finally { globalThis.fetch = originalFetch; }
 });
 
 test("HTTP failures retain numeric provider diagnostics without private message text", async () => {

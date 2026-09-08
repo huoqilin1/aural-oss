@@ -15,6 +15,7 @@ type RequestOptions = {
   messages?: Array<{ role: string; content: unknown }>;
   validate?: (text: string) => void;
   deep?: boolean;
+  jsonReport?: boolean;
 };
 import { createLogger } from "../src/lib/logger";
 import {
@@ -377,6 +378,12 @@ async function callOpenAICompatible(
     if (!options?.deep && endpoint.provider === "doubao") reqBody.thinking = { type: "disabled" };
     if (options?.deep && endpoint.provider === "deepseek") reqBody.thinking = { type: "enabled" };
   }
+  // Report assembly must return structured final content within its transport
+  // deadline. HR's three separately configured reasoning stages are unaffected.
+  if (options?.jsonReport && endpoint.provider === "zhipu") {
+    reqBody.response_format = { type: "json_object" };
+    reqBody.thinking = { type: "disabled" };
+  }
   const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -487,7 +494,8 @@ export async function callRelayLLM(
 
 export async function generateGovernedText(identity: TaskIdentity, messages: Array<{role: string; content: unknown}>, validate: (text: string) => void) {
   return runHrModelTask(identity, route => callRelayRequest("", undefined, { stage: identity.stage }, route,
-    { messages, validate, deep: true }));
+    { messages, validate, deep: true,
+      jsonReport: ["interview.voice_report", "interview.summary_report"].includes(identity.stage) }));
 }
 
 async function callRelayRequest(prompt: string, maxTokens?: number, meta?: RelayLlmCallMeta, route?: RelayLlmRoute, options?: RequestOptions): Promise<string> {
