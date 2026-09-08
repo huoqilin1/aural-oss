@@ -2,7 +2,7 @@ import { createHmac, randomUUID } from "node:crypto";
 
 type Admission = { success: boolean; granted: boolean };
 
-async function control(action: string, requestId: string): Promise<Admission> {
+async function control(action: string, requestId: string, priority = 0): Promise<Admission> {
   const rawUrl = process.env.HR_MODEL_CONTROL_URL?.trim();
   const secret = process.env.HR_MODEL_CONTROL_SECRET?.trim();
   if (!rawUrl || !secret) throw new Error("GLM_capacity_configuration_missing");
@@ -12,7 +12,7 @@ async function control(action: string, requestId: string): Promise<Admission> {
     throw new Error("GLM_capacity_configuration_invalid");
   }
   url.pathname = url.pathname.replace(/model-policy$/, "model-capacity");
-  const raw = JSON.stringify({ action, request_id: requestId });
+  const raw = JSON.stringify({ action, request_id: requestId, priority });
   const timestamp = String(Math.floor(Date.now() / 1000));
   const signature = createHmac("sha256", secret).update(`${timestamp}\nPOST\n${url.pathname}\n${raw}`).digest("hex");
   const response = await fetch(url, { method: "POST", body: raw, redirect: "error", cache: "no-store",
@@ -24,7 +24,7 @@ async function control(action: string, requestId: string): Promise<Admission> {
   return data;
 }
 
-export async function acquireGlmSlot(): Promise<{ signal: AbortSignal; release: () => Promise<void> }> {
+export async function acquireGlmSlot(priority: 0 | 1 = 0): Promise<{ signal: AbortSignal; release: () => Promise<void> }> {
   const controller = new AbortController();
   if (process.env.GLM_SHARED_CAPACITY_ENABLED?.trim() !== "1") return { signal: controller.signal, release: async () => {} };
   const requestId = randomUUID();
@@ -43,7 +43,7 @@ export async function acquireGlmSlot(): Promise<{ signal: AbortSignal; release: 
   };
   try {
     const deadline = Date.now() + 900_000;
-    while (!(await control("acquire", requestId)).granted) {
+    while (!(await control("acquire", requestId, priority)).granted) {
       if (Date.now() >= deadline) throw new Error("GLM_capacity_wait_timeout");
       await new Promise(resolve => setTimeout(resolve, 1000));
     }
@@ -60,8 +60,8 @@ export async function acquireGlmSlot(): Promise<{ signal: AbortSignal; release: 
   }
 }
 
-export async function withGlmSlot<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const lease = await acquireGlmSlot();
+export async function withGlmSlot<T>(operation: (signal: AbortSignal) => Promise<T>, priority: 0 | 1 = 0): Promise<T> {
+  const lease = await acquireGlmSlot(priority);
   try {
     const result = await operation(lease.signal);
     lease.signal.throwIfAborted();

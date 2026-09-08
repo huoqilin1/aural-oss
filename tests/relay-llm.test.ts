@@ -59,19 +59,25 @@ afterEach(() => {
   relayLlm.resetRelayLlmCacheForTests();
 });
 
-test("GLM report generation requests JSON without changing reasoning for other stages", async () => {
+test("GLM questions and reports request JSON while question reasoning stays unchanged", async () => {
   const root = await mkdtemp(join(tmpdir(), "glm-report-format-"));
   const originalFetch = globalThis.fetch;
   const bodies: Record<string, unknown>[] = [];
+  const priorities: number[] = [];
   globalThis.fetch = (async (_url, options) => {
     const path = new URL(String(_url)).pathname;
+    if (path.endsWith("/model-capacity")) {
+      const body = JSON.parse(String(options?.body));
+      if (body.action === "acquire") priorities.push(body.priority);
+      return Response.json({ success: true, granted: true });
+    }
     if (path.endsWith("/model-task")) return Response.json({ success: true, task_key: "aural:91", round: 1, state: "active", route: { primary: "zhipu", fallbacks: [] } });
     if (path.endsWith("/model-usage")) return Response.json({ success: true, id: JSON.parse(String(options?.body)).id });
     bodies.push(JSON.parse(String(options?.body)));
     return Response.json({ choices: [{ message: { content: '{"summary":"Synthetic report"}' } }] });
   }) as typeof fetch;
   try {
-    await withEnvAsync({ ZHIPU_API_KEY: "synthetic", RECRUIT_GLM_ONLY: "1",
+    await withEnvAsync({ ZHIPU_API_KEY: "synthetic", RECRUIT_GLM_ONLY: "1", GLM_SHARED_CAPACITY_ENABLED: "1",
       RECRUIT_TEST_MODEL_ROUTING: "0", ZHIPU_BASE_URL: "https://open.bigmodel.cn/api/coding/paas/v4", AURAL_RUNTIME_STATE_DIR: root,
       HR_MODEL_USAGE_OUTBOX: join(root, "usage"), HR_MODEL_CONTROL_SECRET: "synthetic",
       HR_MODEL_CONTROL_URL: "http://127.0.0.1/v1/recruit/internal/aural/model-policy",
@@ -86,7 +92,9 @@ test("GLM report generation requests JSON without changing reasoning for other s
       }
       assert.equal(bodies.length, 3);
       assert.equal(bodies[2].thinking, undefined);
-      assert.equal(bodies[2].response_format, undefined);
+      assert.deepEqual(bodies[2].response_format, { type: "json_object" });
+      await relayLlm.callRelayLLM("Synthetic realtime reply", undefined, { stage: "interview-turn" }, { primary: "zhipu", fallbacks: [] });
+      assert.deepEqual(priorities, [0, 0, 0, 1]);
       await flushHrUsage();
     });
   } finally { globalThis.fetch = originalFetch; }

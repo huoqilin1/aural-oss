@@ -10,7 +10,7 @@ test("GLM admission signs requests, releases after provider failure and never re
   process.env.GLM_SHARED_CAPACITY_ENABLED = "1";
   process.env.HR_MODEL_CONTROL_URL = "https://hr.example/v1/recruit/internal/aural/model-policy";
   process.env.HR_MODEL_CONTROL_SECRET = "synthetic-secret";
-  const calls: {action: string; request_id: string}[] = [];
+  const calls: {action: string; request_id: string; priority: number}[] = [];
   globalThis.fetch = (async (input, options) => {
     const url = new URL(String(input));
     assert.equal(url.pathname, "/v1/recruit/internal/aural/model-capacity");
@@ -28,7 +28,8 @@ test("GLM admission signs requests, releases after provider failure and never re
     assert.deepEqual(calls.map(c => c.action), ["acquire", "release"]);
     assert.equal(calls[0].request_id, calls[1].request_id);
     calls.length = 0;
-    const lease = await acquireGlmSlot();
+    const lease = await acquireGlmSlot(1);
+    assert.equal(calls[0].priority, 1);
     assert.equal(lease.signal.aborted, false);
     await lease.release();
     await lease.release();

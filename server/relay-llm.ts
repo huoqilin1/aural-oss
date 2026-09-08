@@ -17,6 +17,8 @@ type RequestOptions = {
   validate?: (text: string) => void;
   deep?: boolean;
   jsonReport?: boolean;
+  jsonQuestions?: boolean;
+  realtime?: boolean;
 };
 import { createLogger } from "../src/lib/logger";
 import {
@@ -386,6 +388,11 @@ async function callOpenAICompatible(
     reqBody.response_format = { type: "json_object" };
     reqBody.thinking = { type: "disabled" };
   }
+  // Questions are parsed and anchor-validated as JSON too. Constrain the
+  // transport format without changing their reasoning or relaxing validation.
+  if (options?.jsonQuestions && endpoint.provider === "zhipu") {
+    reqBody.response_format = { type: "json_object" };
+  }
   const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
@@ -459,7 +466,7 @@ async function callEndpoint(
   return endpoint.useGemini
     ? callGemini(endpoint, prompt, maxTokens)
     : endpoint.provider === "zhipu"
-      ? withGlmSlot(signal => callOpenAICompatible(endpoint, prompt, maxTokens, options, signal))
+      ? withGlmSlot(signal => callOpenAICompatible(endpoint, prompt, maxTokens, options, signal), options?.realtime ? 1 : 0)
       : callOpenAICompatible(endpoint, prompt, maxTokens, options);
 }
 
@@ -499,10 +506,12 @@ export async function callRelayLLM(
 export async function generateGovernedText(identity: TaskIdentity, messages: Array<{role: string; content: unknown}>, validate: (text: string) => void) {
   return runHrModelTask(identity, route => callRelayRequest("", undefined, { stage: identity.stage }, route,
     { messages, validate, deep: true,
-      jsonReport: ["interview.voice_report", "interview.summary_report"].includes(identity.stage) }));
+      jsonReport: ["interview.voice_report", "interview.summary_report"].includes(identity.stage),
+      jsonQuestions: identity.stage === "interview.generate_questions" }));
 }
 
 async function callRelayRequest(prompt: string, maxTokens?: number, meta?: RelayLlmCallMeta, route?: RelayLlmRoute, options?: RequestOptions): Promise<string> {
+  if (["interview-turn", "q-summary"].includes(meta?.stage ?? "")) options = { ...options, realtime: true };
   options = { ...options, deep: options?.deep || meta?.stage === "interview.generate_questions" };
   if (recruitTestModelRoutingEnabled()) {
     route = options.deep
