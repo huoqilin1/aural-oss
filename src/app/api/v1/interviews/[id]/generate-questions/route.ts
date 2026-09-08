@@ -181,12 +181,9 @@ function buildRecruitPrompt(opts: {
 ${expertBlock ? `
 7. 下面给了资深面试官(王总/凌总等专家)在本岗位问过的「经典问答范例」。请学习这些范例的提问深度、角度和挖人方式,出题向这个水准看齐——可借鉴角度,但要结合本候选人简历,不要照抄。` : ""}
 
-只输出合法 JSON,不要 markdown、不要解释:
-{
-  "questions": [
-    { "order": 0, "text": "题面", "dimension": "${remaining[0] || dimensions[0]}" }
-  ]
-}`,
+只输出合法 JSON,不要 markdown、不要解释。下面逐项列出了本批所需的全部维度，必须为每一项填写完整问题，不能省略后续项，也不能输出本批以外的题目。text只写候选人直接听到的问题，不写题号、dimension、规则说明或出题备注。
+${JSON.stringify({ questions: remaining.map((dimension, order) => ({ order,
+  text: "用完整的候选人问题替换本字段", dimension })) }, null, 2)}`,
     },
     {
       role: "user" as const,
@@ -411,12 +408,14 @@ export async function POST(
       const needed = batchDimensions;
       for (const dimension of needed) {
         const matches = value.questions.filter(question => question.dimension === dimension);
-        if (matches.length !== 1 || typeof matches[0].text !== "string") {
-          throw new Error("missing_or_invalid_scored_question");
-        }
+        if (matches.length !== 1) throw new Error(`missing_or_invalid_scored_question_${dimension}_count_${matches.length}`);
+        if (typeof matches[0].text !== "string") throw new Error(`missing_or_invalid_scored_question_${dimension}_text_type`);
         const selected = anchors.get(dimension);
         const question = evidenceV11 ? renderRecruitQuestionAnchorReferences(matches[0].text, selected) : matches[0].text;
-        if (!isCandidateFacingQuestionText(question)) throw new Error("missing_or_invalid_scored_question");
+        if (!isCandidateFacingQuestionText(question)) {
+          const reason = !question.trim() ? "empty" : question.replace(/\s+/g, " ").trim().length > 420 ? "too_long" : "candidate_text";
+          throw new Error(`missing_or_invalid_scored_question_${dimension}_${reason}`);
+        }
         const anchorFailure = evidenceV11 && dimension !== "core_experience"
           ? recruitQuestionAnchorFailure(question, selected, isTechnicalRole) : null;
         if (anchorFailure) {

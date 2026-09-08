@@ -68,6 +68,14 @@ test("actual generation prompt selects work evidence and actual provider validat
     +`\nconst selectedDimensions=recruitDimensions(contractVersion);const batchDimensions=selectedDimensions.filter(d=>!preserveDimensions.includes(d));const persistedTexts=new Set();globalThis.check=${validator};globalThis.input=messages;globalThis.pairs=Object.fromEntries(anchors);`;
   vm.runInContext(ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context);
   const input=context.input as Array<{role:string;content:string}>;
+  // Exercise the actual prompt for each incremental pair. The JSON example
+  // must include both requested dimensions, not only the first one.
+  for(const requested of [["core_skill_evidence","result_authenticity"],["job_work_sample","problem_solving"],["ai_learning_boundary","collaboration_motivation_stability"]]){
+    context.requested=requested;
+    const prompt=vm.runInContext('buildRecruitPrompt({jobTitle,jobDescription,resumeText,durationMinutes,resumeQuestions,jobQuestions,preserveOpening,preserveDimensions,requestedDimensions:requested,questionSpecVersion:contractVersion,roleType})',context);
+    const example=JSON.parse(prompt[0].content.slice(prompt[0].content.indexOf('{\n  "questions"')));
+    assert.deepEqual(example.questions.map((q:{dimension:string})=>q.dimension),requested);
+  }
   assert.equal(input.at(-2)?.role,"system");
   assert.ok(input.at(-2)?.content.includes("保留引文中的数字、年限、范围、单位和术语"));
   const pairs=JSON.parse(input.at(-1)!.content) as Record<string,{resume:string;job:string}>;
@@ -77,7 +85,11 @@ test("actual generation prompt selects work evidence and actual provider validat
   // Distinct dimension wording is required independently from correct anchors.
   questions.forEach((q,i)=>{q.text+=`请选择第${i+1}种情境分析。`;});
   context.check(JSON.stringify({questions}));
+  assert.throws(()=>context.check(JSON.stringify({questions:questions.slice(1)})),/missing_or_invalid_scored_question_core_skill_evidence_count_0/);
+  assert.throws(()=>context.check(JSON.stringify({questions:[questions[0],...questions]})),/missing_or_invalid_scored_question_core_skill_evidence_count_2/);
   const bad=structuredClone(questions);
+  bad[0].text="请说明".repeat(150);
+  assert.throws(()=>context.check(JSON.stringify({questions:bad})),/missing_or_invalid_scored_question_core_skill_evidence_too_long/);
   bad[0].text=`你在简历中写到“${pairs.core_skill_evidence.resume}”，请说明具体做法？`;
   assert.throws(()=>context.check(JSON.stringify({questions:bad})),/question_job_anchor_missing_core_skill_evidence/);
   bad[0].text=questions[0].text+"请写SQL查询";
