@@ -7,6 +7,15 @@ import { flushHrUsage } from "../server/hr-model-usage-outbox";
 
 import * as relayLlm from "../server/relay-llm";
 
+test("question validation diagnostics retain only bounded dimension and reason codes", () => {
+  const code="missing_or_invalid_scored_question_job_work_sample_too_long";
+  assert.equal(relayLlm.safeRelayFailure(new Error(code)),code);
+  const missing="missing_or_invalid_scored_question_problem_solving_count_0";
+  assert.equal(relayLlm.safeRelayFailure(new Error(missing)),missing);
+  assert.equal(relayLlm.safeRelayFailure(new Error(code+" private payload")),"Error");
+  assert.equal(relayLlm.safeRelayFailure(new Error("missing_or_invalid_scored_question_private_name_empty")),"Error");
+});
+
 function withEnv(
   vars: Record<string, string | undefined>,
   fn: () => void,
