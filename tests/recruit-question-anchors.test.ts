@@ -75,6 +75,11 @@ test("actual generation prompt selects work evidence and actual provider validat
     const prompt=vm.runInContext('buildRecruitPrompt({jobTitle,jobDescription,resumeText,durationMinutes,resumeQuestions,jobQuestions,preserveOpening,preserveDimensions,requestedDimensions:requested,questionSpecVersion:contractVersion,roleType})',context);
     const example=JSON.parse(prompt[0].content.slice(prompt[0].content.indexOf('{\n  "questions"')));
     assert.deepEqual(example.questions.map((q:{dimension:string})=>q.dimension),requested);
+    const defined=[...prompt[0].content.matchAll(/^\s*\d+\) ([a-z_]+):/gm)].map(match=>match[1]);
+    assert.deepEqual(defined,requested);
+    assert.ok(!prompt[0].content.includes("完整顺序和 dimension 必须严格如下"));
+    assert.ok(prompt[1].content.includes(`dimension 必须依次为 ${requested.join(", ")}`));
+    assert.ok(!prompt[1].content.includes("请生成这场 AI 一面的题目"));
   }
   assert.equal(input.at(-2)?.role,"system");
   assert.ok(input.at(-2)?.content.includes("保留引文中的数字、年限、范围、单位和术语"));

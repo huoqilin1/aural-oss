@@ -141,7 +141,7 @@ function buildRecruitPrompt(opts: {
           .join(`
 `)
       : "";
-  const blueprintInstruction = evidenceV11
+  const fullBlueprintInstruction = evidenceV11
     ? `完整顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:
    1) core_experience: 约2分钟计分自我介绍，梳理经历主线和岗位相关能力；
    2) project_ownership: 核验简历核心项目的本人职责、交付边界和上下游；
@@ -166,6 +166,13 @@ function buildRecruitPrompt(opts: {
    8) motivation_stability: 核验求职动机、岗位理解与稳定性。
 3. 全部用 OPEN_ENDED 类型，一题只考一个主要方向；不同题不得换一种说法重复追问同一段经历。
 4. 整场目标约 ${durationMinutes} 分钟，主问题必须独立、完整、可直接作答。`;
+  // Incremental requests must not tell the model to produce all eight dimensions.
+  // Keep the frozen rules, but include only this batch's dimension definitions.
+  const blueprintInstruction = fullBlueprintInstruction.split("\n").filter(line => {
+    const definition = line.match(/^\s*\d+\) ([a-z_]+):/);
+    return !definition || remaining.includes(definition[1]);
+  }).join("\n").replace("完整顺序和 dimension 必须严格如下，不得缺项、合并或重复方向:",
+    "本批 dimension 定义如下；编号是整场题号，不要求生成其他题。仅本批各项不得缺项、合并或重复:");
   return [
     {
       role: "system" as const,
@@ -202,7 +209,7 @@ ${expertBlock ? `
 ${expertBlock}
 --- 范例结束 ---
 ` : ""}
-请生成这场 AI 一面的题目,输出 JSON。`,
+仅生成当前批次的 ${remaining.length} 道问题，dimension 必须依次为 ${remaining.join(", ")}。已固定和其他批次的题目不要输出。输出包含 questions 数组的 JSON。`,
     },
   ];
 }
