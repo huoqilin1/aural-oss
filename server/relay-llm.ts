@@ -10,6 +10,7 @@ import { GoogleGenAI } from "@google/genai";
 import { randomUUID } from "node:crypto";
 import { runHrModelTask, type TaskIdentity } from "./hr-model-task";
 import { ensureHrUsageReady, queueHrUsage } from "./hr-model-usage-outbox";
+import { withGlmSlot } from "./glm-capacity";
 
 type RequestOptions = {
   messages?: Array<{ role: string; content: unknown }>;
@@ -356,6 +357,7 @@ async function callOpenAICompatible(
   prompt: string,
   maxTokens?: number,
   options?: RequestOptions,
+  capacitySignal?: AbortSignal,
 ): Promise<{ text: string; usage?: RelayLlmUsage }> {
   // 2026-08-20 王总指令：Token 无上限——不传 max_tokens，让模型自然收尾。
   const reqBody: Record<string, unknown> = {
@@ -393,7 +395,7 @@ async function callOpenAICompatible(
     body: JSON.stringify(reqBody),
     // Abort the actual transport, not just a Promise.race that leaves billing
     // and an in-flight request running while the fallback starts.
-    signal: AbortSignal.timeout((() => {
+    signal: AbortSignal.any([...(capacitySignal ? [capacitySignal] : []), AbortSignal.timeout((() => {
       const configured = Number(options?.deep
         ? process.env.FALLBACK_DEEP_ATTEMPT_TIMEOUT_MS
         : process.env.FALLBACK_ATTEMPT_TIMEOUT_MS);
@@ -405,7 +407,7 @@ async function callOpenAICompatible(
       return Number.isSafeInteger(configured) && configured > 0
         ? configured
         : (options?.deep || reasoningEnabled ? 180_000 : 30_000);
-    })()),
+    })())]),
   });
 
   if (!res.ok) {
@@ -456,7 +458,9 @@ async function callEndpoint(
   }
   return endpoint.useGemini
     ? callGemini(endpoint, prompt, maxTokens)
-    : callOpenAICompatible(endpoint, prompt, maxTokens, options);
+    : endpoint.provider === "zhipu"
+      ? withGlmSlot(signal => callOpenAICompatible(endpoint, prompt, maxTokens, options, signal))
+      : callOpenAICompatible(endpoint, prompt, maxTokens, options);
 }
 
 export class AllFourModelsFailed extends Error {

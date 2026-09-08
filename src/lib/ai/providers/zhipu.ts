@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { zhipuBaseUrl } from "../../relay-llm-route";
+import { acquireGlmSlot, withGlmSlot } from "../../../../server/glm-capacity";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
 import {
@@ -25,6 +26,7 @@ export class ZhipuProvider implements LLMProvider {
     this.client = new OpenAI({
       apiKey: process.env.ZHIPU_API_KEY ?? "",
       baseURL: zhipuBaseUrl(),
+      maxRetries: 0,
     });
   }
 
@@ -42,6 +44,12 @@ export class ZhipuProvider implements LLMProvider {
   async generateResponse(
     params: GenerationParams & { model?: string }
   ): Promise<LLMResponse> {
+    return withGlmSlot(signal => this.generateAdmitted(params, signal));
+  }
+
+  private async generateAdmitted(
+    params: GenerationParams & { model?: string }, signal: AbortSignal
+  ): Promise<LLMResponse> {
     const model = params.model ?? this.defaultModel;
     const request = {
       model,
@@ -52,7 +60,7 @@ export class ZhipuProvider implements LLMProvider {
         ? { thinking: { type: "disabled" } }
         : {}),
     } as unknown as ChatCompletionCreateParamsNonStreaming;
-    const response = await this.client.chat.completions.create(request);
+    const response = await this.client.chat.completions.create(request, { signal });
     const choice = response.choices[0];
     return {
       content: choice.message.content ?? "",
@@ -70,6 +78,8 @@ export class ZhipuProvider implements LLMProvider {
   async *streamResponse(
     params: GenerationParams & { model?: string }
   ): AsyncIterable<string> {
+    const lease = await acquireGlmSlot();
+    try {
     const model = params.model ?? this.defaultModel;
     const stream = await this.client.chat.completions.create({
       model,
@@ -77,12 +87,14 @@ export class ZhipuProvider implements LLMProvider {
       temperature: params.temperature ?? 0.7,
       max_tokens: params.maxTokens ?? 2048,
       stream: true,
-    });
+    }, { signal: lease.signal });
     for await (const chunk of stream) {
+      lease.signal.throwIfAborted();
       const content = chunk.choices[0]?.delta?.content;
       if (content) {
         yield content;
       }
     }
+    } finally { await lease.release(); }
   }
 }
