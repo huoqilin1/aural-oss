@@ -27,6 +27,7 @@ test("GLM admission signs requests, releases after provider failure and never re
     assert.equal(providers, 1);
     assert.deepEqual(calls.map(c => c.action), ["acquire", "release"]);
     assert.equal(calls[0].request_id, calls[1].request_id);
+    assert.equal(calls[0].priority, -1);
     calls.length = 0;
     const lease = await acquireGlmSlot(1);
     assert.equal(calls[0].priority, 1);

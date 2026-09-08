@@ -24,7 +24,7 @@ async function control(action: string, requestId: string, priority = 0): Promise
   return data;
 }
 
-export async function acquireGlmSlot(priority: 0 | 1 = 0): Promise<{ signal: AbortSignal; release: () => Promise<void> }> {
+export async function acquireGlmSlot(priority: -1 | 0 | 1 = -1): Promise<{ signal: AbortSignal; release: () => Promise<void> }> {
   const controller = new AbortController();
   if (process.env.GLM_SHARED_CAPACITY_ENABLED?.trim() !== "1") return { signal: controller.signal, release: async () => {} };
   const requestId = randomUUID();
@@ -60,7 +60,7 @@ export async function acquireGlmSlot(priority: 0 | 1 = 0): Promise<{ signal: Abo
   }
 }
 
-export async function withGlmSlot<T>(operation: (signal: AbortSignal) => Promise<T>, priority: 0 | 1 = 0): Promise<T> {
+export async function withGlmSlot<T>(operation: (signal: AbortSignal) => Promise<T>, priority: -1 | 0 | 1 = -1): Promise<T> {
   const lease = await acquireGlmSlot(priority);
   try {
     const result = await operation(lease.signal);

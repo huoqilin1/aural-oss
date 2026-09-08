@@ -466,7 +466,7 @@ async function callEndpoint(
   return endpoint.useGemini
     ? callGemini(endpoint, prompt, maxTokens)
     : endpoint.provider === "zhipu"
-      ? withGlmSlot(signal => callOpenAICompatible(endpoint, prompt, maxTokens, options, signal), options?.realtime ? 1 : 0)
+      ? withGlmSlot(signal => callOpenAICompatible(endpoint, prompt, maxTokens, options, signal), options?.realtime ? 1 : options?.jsonQuestions ? 0 : -1)
       : callOpenAICompatible(endpoint, prompt, maxTokens, options);
 }
 

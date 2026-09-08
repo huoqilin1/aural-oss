@@ -104,7 +104,7 @@ test("GLM questions and reports request JSON while question reasoning stays unch
       assert.deepEqual(bodies[2].response_format, { type: "json_object" });
       await relayLlm.callRelayLLM("Synthetic realtime reply", undefined, { stage: "interview-turn" }, { primary: "zhipu", fallbacks: [] });
       await relayLlm.callRelayLLM("Synthetic background summary", undefined, { stage: "q-summary" }, { primary: "zhipu", fallbacks: [] });
-      assert.deepEqual(priorities, [0, 0, 0, 1, 0]);
+      assert.deepEqual(priorities, [-1, -1, 0, 1, -1]);
       await flushHrUsage();
     });
   } finally { globalThis.fetch = originalFetch; }
