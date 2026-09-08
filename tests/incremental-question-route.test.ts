@@ -42,8 +42,10 @@ function harness(keyed = false) {
     "@/lib/recruit-question-anchors": anchors,
     "../../../../../../../server/hr-model-task": { HrTaskHalted: class extends Error {} },
     "../../../../../../../server/relay-llm": { AllFourModelsFailed: ModelFailure,
-      generateGovernedText: async (_identity: unknown, messages: Array<{ content: string }>, validate: (text: string) => void) => {
-        const selected = JSON.parse(messages.at(-1)!.content) as Record<string, { resume: string; job: string }>;
+      generateGovernedText: async (_identity: unknown, messages: Array<{ role:string; content: string }>, validate: (text: string) => void) => {
+        const selected = JSON.parse(messages.filter(message=>message.role==='user').at(-1)!.content) as Record<string, { resume: string; job: string }>;
+        assert.equal(messages.at(-1)!.role,'system');
+        assert.ok(messages.at(-1)!.content.includes('不得用标题、能力名称、考察点、提纲、建议或列表代替问题正文'));
         requested.push(Object.keys(selected));
         if (requested.length === 2) { reached(); if (holdSecond) await blocked; if (failSecond) throw new ModelFailure(); }
         const generated = Object.entries(selected).map(([dimension, pair]) => ({ dimension,

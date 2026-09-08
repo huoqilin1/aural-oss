@@ -46,6 +46,16 @@ test("explicit anchor references preserve source exactly and never repair missin
   assert.throws(() => renderRecruitQuestionAnchorReferences(draft, undefined), /question_anchor_invalid/);
 });
 
+test("bare anchor markers are quoted only after JSON parsing without changing source facts", () => {
+  const pair = { resume: '复核"订单"并记录40%差异$&', job: "核对合同与交付结果" };
+  const parsed = JSON.parse(JSON.stringify({ text: "你的简历写到{{resume}}，岗位要求{{job}}，请说明如何核对？" }));
+  assert.equal(renderRecruitQuestionAnchorReferences(parsed.text, pair), `你的简历写到“${pair.resume}”，岗位要求“${pair.job}”，请说明如何核对？`);
+  for (const [left, right] of [["“", "”"], ['"', '"'], ["「", "」"], ["『", "』"]]) {
+    const draft = `简历${left}{{resume}}${right}，岗位${left}{{job}}${right}，请说明？`;
+    assert.equal(renderRecruitQuestionAnchorReferences(draft, pair), `简历${left}${pair.resume}${right}，岗位${left}${pair.job}${right}，请说明？`);
+  }
+});
+
 test("actual generation prompt selects work evidence and actual provider validator rejects broken questions", () => {
   const source=readFileSync("src/app/api/v1/interviews/[id]/generate-questions/route.ts","utf8");
   const tree=ts.createSourceFile("route.ts",source,ts.ScriptTarget.Latest,true);
@@ -116,6 +126,9 @@ test("actual generation prompt selects work evidence and actual provider validat
   assert.throws(()=>context.check(JSON.stringify({questions:questions.slice(1)})),/missing_or_invalid_scored_question_core_skill_evidence_count_0/);
   assert.throws(()=>context.check(JSON.stringify({questions:[questions[0],...questions]})),/missing_or_invalid_scored_question_core_skill_evidence_count_2/);
   const bad=structuredClone(questions);
+  bad[0].text="你的简历写到";
+  Object.assign(bad[0], { "resume}}": ["正文被拆到错误字段", "不能把该字段当成有效问句"] });
+  assert.throws(()=>context.check(JSON.stringify({questions:bad})),/missing_or_invalid_scored_question_core_skill_evidence_candidate_text/);
   bad[0].text="请说明".repeat(150);
   assert.throws(()=>context.check(JSON.stringify({questions:bad})),/missing_or_invalid_scored_question_core_skill_evidence_too_long/);
   bad[0].text=`你在简历中写到“${pairs.core_skill_evidence.resume}”，请说明具体做法？`;

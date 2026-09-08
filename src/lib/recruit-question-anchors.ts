@@ -13,7 +13,13 @@ export function renderRecruitQuestionAnchorReferences(
     || /\{\{|\}\}/.test(question.replace(/\{\{(?:resume|job)\}\}/g, ""))) {
     throw new Error("question_anchor_invalid");
   }
-  return question.replace(/\{\{(resume|job)\}\}/g, (_match, key: "resume" | "job") => anchors[key]);
+  return question.replace(/\{\{(resume|job)\}\}/g, (match, key: "resume" | "job", offset: number) => {
+    const before = question[offset - 1];
+    const after = question[offset + match.length];
+    const alreadyQuoted = (before === "“" && after === "”") || (before === '"' && after === '"')
+      || (before === "「" && after === "」") || (before === "『" && after === "』");
+    return alreadyQuoted ? anchors[key] : `“${anchors[key]}”`;
+  });
 }
 
 function stripRecruitAnchorBullet(value: string): string {
