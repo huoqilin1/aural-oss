@@ -1361,6 +1361,7 @@ async function handleBrowserConnection(
   let pendingAsrFinalStartedAt = 0;
   let pendingAsrFinalLastChangedAt = 0;
   let lastUserAudioActivityAt = 0;
+  let lastListeningAudioActivityAt = 0;
   let receivedMicrophoneFrames = 0;
   let receivedActiveMicrophoneFrames = 0;
   let asrSessionFirstSpeechAt = 0;
@@ -1790,6 +1791,19 @@ async function handleBrowserConnection(
     if (rms >= ASR_AUDIO_ACTIVITY_RMS_THRESHOLD) {
       receivedActiveMicrophoneFrames++;
       lastUserAudioActivityAt = Date.now();
+      // Speech activity arrives before the ASR final. Never let a silence
+      // deadline advance or end the interview while that answer is arriving.
+      if (isOprunRecruitmentInterview && !ttsSpeaking && !suppressAsrResults) {
+        lastListeningAudioActivityAt = Date.now();
+        if (pendingLastQuestionTimeout) {
+          clearTimeout(pendingLastQuestionTimeout);
+          pendingLastQuestionTimeout = null;
+        }
+        if (finalResponseTimeout) {
+          clearTimeout(finalResponseTimeout);
+          finalResponseTimeout = null;
+        }
+      }
     }
   }
 
@@ -2235,7 +2249,8 @@ async function handleBrowserConnection(
     }
 
     if (options?.pendingTransition && !isTransitioning && !interviewDone) {
-      const isLastQuestion = currentQuestionIndex >= sortedQuestions.length - 1;
+      const isLastQuestion = currentQuestionIndex >= sortedQuestions.length - 1
+        && !shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex);
       if (isLastQuestion) {
         log.info("TTS ended on last Q — waiting 15s for user response before wrap-up");
         pendingLastQuestionTimeout = setTimeout(() => {
@@ -2820,6 +2835,8 @@ async function handleBrowserConnection(
 
   async function handleTransition(auto = false) {
     if (interviewDone) return;
+    if (auto && isOprunRecruitmentInterview && lastListeningAudioActivityAt > 0
+      && Date.now() - lastListeningAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS) return;
     if (isTransitioning) {
       if (!auto) queueManualTransition("next");
       return;

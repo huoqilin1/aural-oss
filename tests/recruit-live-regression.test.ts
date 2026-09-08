@@ -9,6 +9,53 @@ import { shouldBlockRecruitmentCompletion } from "../src/lib/voice/completion-au
 import { createAnswerCommitGate } from "../server/answer-commit-gate";
 import { createAsrInitialConnectQueue } from "../server/asr-initial-connect-queue";
 import { speakWithBackgroundSummary } from "../server/question-summary-transition";
+import { shouldWaitForQuestionExpansion } from "../src/lib/voice/dynamic-question-sync";
+
+test("progressive Q2 takes the expansion path instead of the last-question silence timer", async () => {
+  let transitions=0;
+  const sandbox=relayFunctions("voice-relay.ts", ["speakAndHandle"], {
+    speakText:async()=>true, interviewDone:false, currentQuestionIndex:1,
+    questionTranscript:[], lastAssistantMessageWallClockMs:0,
+    sortedQuestions:[{text:"Q1",description:"oprun_dimension:core_experience"},
+      {text:"Q2",description:"oprun_dimension:project_ownership"}],
+    shouldWaitForQuestionExpansion, log:{info:()=>{},error:()=>{}},
+    handleTransition:async()=>{transitions++;},
+    setTimeout:()=>{throw new Error("Q2 is not the last planned question");},
+  });
+  await vm.runInContext("speakAndHandle('谢谢',{pendingTransition:true})",sandbox);
+  assert.equal(transitions,1);
+});
+
+test("microphone speech cancels end timers before ASR final, silence does not", () => {
+  const cleared:unknown[]=[];
+  const sandbox=relayFunctions("voice-relay.ts", ["noteIncomingAudioActivity"], {
+    receivedMicrophoneFrames:0,receivedActiveMicrophoneFrames:0,lastUserAudioActivityAt:0,lastListeningAudioActivityAt:0,
+    ASR_AUDIO_ACTIVITY_RMS_THRESHOLD:0.014,isOprunRecruitmentInterview:true,
+    pendingLastQuestionTimeout:11,finalResponseTimeout:12,
+    clearTimeout:(id:unknown)=>cleared.push(id), Buffer,
+  });
+  vm.runInContext("noteIncomingAudioActivity(Buffer.alloc(640))",sandbox);
+  assert.equal(cleared.length,0);
+  sandbox.ttsSpeaking=true;
+  vm.runInContext("noteIncomingAudioActivity(Buffer.alloc(640,32))",sandbox);
+  assert.equal(cleared.length,0);
+  assert.equal(sandbox.lastListeningAudioActivityAt,0);
+  sandbox.ttsSpeaking=false;
+  vm.runInContext("noteIncomingAudioActivity(Buffer.alloc(640,32))",sandbox);
+  assert.deepEqual(cleared,[11,12]);
+  assert.equal(sandbox.pendingLastQuestionTimeout,null);
+  assert.equal(sandbox.finalResponseTimeout,null);
+});
+
+test("automatic transition cannot cut active speech when expanded questions arrive", async () => {
+  const sandbox=relayFunctions("voice-relay.ts", ["handleTransition"], {
+    interviewDone:false,isOprunRecruitmentInterview:true,lastListeningAudioActivityAt:Date.now(),
+    ASR_ACTIVE_SPEECH_HOLD_MS:5000,
+    retainDeferredAnswerBeforeTransition:()=>{throw new Error("must defer before committing or switching");},
+  });
+  await vm.runInContext("handleTransition(true)",sandbox);
+  assert.equal(sandbox.isTransitioning,false);
+});
 
 test("twenty first ASR handshakes use four bounded slots and failures release their slots", async () => {
   const schedule=createAsrInitialConnectQueue(4);
