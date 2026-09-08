@@ -4,6 +4,26 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import ts from "typescript";
 import { validateReport } from "../src/lib/ai/validate-report";
+import { extractJson } from "../src/lib/ai/extract-json";
+
+test("report parsing preserves valid JSON containing quoted evidence and code fences", () => {
+  for (const summary of [
+    'Evidence says “ownership”, with “P95”: still to verify.',
+    'A snippet ```json\\n{ "example": true }\\n``` is quoted evidence.',
+    'An escaped "quote", a backslash \\ and a newline\nare evidence.',
+  ]) {
+    const report = { summary, themes: ["evidence"] };
+    const raw = JSON.stringify(report);
+    for (const wrapped of [raw, "```json\n" + raw + "\n```", "Report:\n" + raw]) {
+      assert.deepEqual(extractJson(wrapped), report);
+    }
+  }
+});
+
+test("report parsing retains legacy repair but rejects truncated JSON", () => {
+  assert.deepEqual(extractJson('{“summary”: “Synthetic report”}'), { summary: "Synthetic report" });
+  assert.throws(() => extractJson('{"summary":"incomplete'));
+});
 
 test("report validation rejects absent or empty report bodies", () => {
   for (const value of [null, [], {}, { summary: "  " }, { summary: 12 }]) {

@@ -12,6 +12,22 @@ const log = createLogger("ai/extract-json");
  * - Unescaped newlines and quotes inside string values
  */
 export function extractJson<T = Record<string, unknown>>(raw: string): T {
+  // Parse intact JSON before any repair. Curly quotes and Markdown fences are
+  // valid evidence inside JSON strings; replacing/extracting them first can
+  // corrupt a valid report and turn a successful generation into a failure.
+  const intactCandidates = [
+    raw.trim(),
+    raw.trim().match(/^```(?:json)?\s*\n?([\s\S]*?)\n?\s*```$/)?.[1],
+    raw.match(/\{[\s\S]*\}/)?.[0],
+  ];
+  for (const candidate of intactCandidates) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as T;
+    } catch { /* Only malformed JSON proceeds to the legacy repair path. */ }
+  }
+
   // 1. Normalise smart / curly quotes to ASCII equivalents
   let text = raw
     .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"') // double
