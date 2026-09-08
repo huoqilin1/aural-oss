@@ -56,6 +56,7 @@ test("actual generation prompt selects work evidence and actual provider validat
   }
   visit(tree);assert.ok(validator);
   const context=vm.createContext({
+    log:{warn:()=>{}},
     selectRecruitAnchor,recruitAnchorTerms,recruitQuestionAnchorFailure,ensureExplicitRecruitAnchorLead,renderRecruitQuestionAnchorReferences,
     jobTitle:"政企商务",jobDescription:"拓展地方政府客户并推动合同落地\n3-5年商务/BD经验",
     resumeText:"使用销售台账复核每笔退款记录",durationMinutes:22,resumeQuestions:4,jobQuestions:4,
@@ -74,7 +75,7 @@ test("actual generation prompt selects work evidence and actual provider validat
     context.requested=requested;
     const prompt=vm.runInContext('buildRecruitPrompt({jobTitle,jobDescription,resumeText,durationMinutes,resumeQuestions,jobQuestions,preserveOpening,preserveDimensions,requestedDimensions:requested,questionSpecVersion:contractVersion,roleType})',context);
     const example=JSON.parse(prompt[0].content.slice(prompt[0].content.indexOf('{\n  "questions"')));
-    assert.deepEqual(example.questions.map((q:{dimension:string})=>q.dimension),requested);
+    assert.deepEqual(Object.keys(example.questions),requested);
     const defined=[...prompt[0].content.matchAll(/^\s*\d+\) ([a-z_]+):/gm)].map(match=>match[1]);
     assert.deepEqual(defined,requested);
     assert.ok(!prompt[0].content.includes("完整顺序和 dimension 必须严格如下"));
@@ -90,6 +91,11 @@ test("actual generation prompt selects work evidence and actual provider validat
   // Distinct dimension wording is required independently from correct anchors.
   questions.forEach((q,i)=>{q.text+=`请选择第${i+1}种情境分析。`;});
   context.check(JSON.stringify({questions}));
+  const keyed=Object.fromEntries(questions.map(({dimension,text})=>[dimension,{text}]));
+  context.check(JSON.stringify({questions:keyed}));
+  const missingKey=structuredClone(keyed);delete missingKey.core_skill_evidence;
+  assert.throws(()=>context.check(JSON.stringify({questions:missingKey})),/missing_or_invalid_scored_question_core_skill_evidence_count_0/);
+  assert.throws(()=>context.check(JSON.stringify({questions:{...keyed,unexpected:{text:"请说明"}}})),/invalid_question_response/);
   assert.throws(()=>context.check(JSON.stringify({questions:questions.slice(1)})),/missing_or_invalid_scored_question_core_skill_evidence_count_0/);
   assert.throws(()=>context.check(JSON.stringify({questions:[questions[0],...questions]})),/missing_or_invalid_scored_question_core_skill_evidence_count_2/);
   const bad=structuredClone(questions);

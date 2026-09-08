@@ -11,7 +11,7 @@ const questions = ["技能使用", "成果口径", "现场工作样例", "问题
 const source = fs.readFileSync("src/app/api/v1/interviews/[id]/generate-questions/route.ts", "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 
-function harness() {
+function harness(keyed = false) {
   const rows: Row[] = dimensions.slice(0, 2).map((dimension, order) => ({ id: `fixed-${order}`, order, text: `固定题${order}`, description: `oprun_dimension:${dimension}` }));
   const requested: string[][] = [];
   let failSecond = false, holdSecond = false, invalid = false, references = false, failSave = false, clock = 1000;
@@ -37,7 +37,7 @@ function harness() {
     "@/lib/api-key-auth": { validateApiKey: async () => ({ projectIds: ["project"] }), isAuthError: () => false,
       apiError: (code: string, message: string, status: number) => Response.json({ code, message }, { status }) },
     "@/lib/supabase/admin": { supabaseAdmin: db },
-    "@/lib/logger": { createLogger: () => ({ error() {} }) },
+    "@/lib/logger": { createLogger: () => ({ error() {}, warn() {} }) },
     "@/lib/recruit-question-anchors": anchors,
     "../../../../../../../server/hr-model-task": { HrTaskHalted: class extends Error {} },
     "../../../../../../../server/relay-llm": { AllFourModelsFailed: ModelFailure,
@@ -45,8 +45,9 @@ function harness() {
         const selected = JSON.parse(messages.at(-1)!.content) as Record<string, { resume: string; job: string }>;
         requested.push(Object.keys(selected));
         if (requested.length === 2) { reached(); if (holdSecond) await blocked; if (failSecond) throw new ModelFailure(); }
-        const value = JSON.stringify({ questions: Object.entries(selected).map(([dimension, pair]) => ({ dimension,
-          text: invalid ? "请说明工作经历？" : `你在简历中写到“${references ? "{{resume}}" : pair.resume}”，岗位要求“${references ? "{{job}}" : pair.job}”，请说明${questions[dimensions.indexOf(dimension) - 2]}的实际证据？` })) });
+        const generated = Object.entries(selected).map(([dimension, pair]) => ({ dimension,
+          text: invalid ? "请说明工作经历？" : `你在简历中写到“${references ? "{{resume}}" : pair.resume}”，岗位要求“${references ? "{{job}}" : pair.job}”，请说明${questions[dimensions.indexOf(dimension) - 2]}的实际证据？` }));
+        const value = JSON.stringify({ questions: keyed ? Object.fromEntries(generated.map(({dimension,text})=>[dimension,{text}])) : generated });
         validate(value); return value;
       },
     },
@@ -61,6 +62,14 @@ function harness() {
   }) }), { params: Promise.resolve({ id: "interview" }) });
   return { rows, requested, request, second, release, setHold: () => { holdSecond = true; }, setFail: (value: boolean) => { failSecond = value; }, setReferences: () => { references = true; }, setSaveFail: () => { failSave = true; }, setInvalid: () => { invalid = true; }, advanceClock: () => { clock += 181000; } };
 }
+
+test("dimension-keyed provider responses persist all three incremental pairs with their exact dimensions", async () => {
+  const h = harness(true); h.setReferences();
+  assert.equal((await h.request()).status, 200);
+  assert.deepEqual(h.rows.slice(0,8).map(row=>row.description),dimensions.map(d=>`oprun_dimension:${d}`));
+  assert.deepEqual(h.requested,[dimensions.slice(2,4),dimensions.slice(4,6),dimensions.slice(6)]);
+  assert.equal(h.rows.length,9);
+});
 
 test("actual route saves Q3/Q4 before later generation and coalesces even after old lock TTL", async () => {
   const h = harness(); h.setHold();

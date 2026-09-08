@@ -77,6 +77,20 @@ function parseJsonSafe(raw: string): unknown {
   }
 }
 
+function parseRecruitQuestions(raw: string): { questions: Array<{ dimension: unknown; text: unknown }> } {
+  const value = parseJsonSafe(raw) as { questions?: unknown };
+  if (Array.isArray(value?.questions)) return value as ReturnType<typeof parseRecruitQuestions>;
+  if (!value?.questions || typeof value.questions !== "object") throw new Error("invalid_question_response");
+  const known = new Set<string>([...LEGACY_RECRUIT_DIMENSIONS, ...EVIDENCE_V11_RECRUIT_DIMENSIONS]);
+  const questions = Object.entries(value.questions).map(([dimension, item]) => {
+    if (!known.has(dimension) || !item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error("invalid_question_response");
+    }
+    return { dimension, text: (item as { text?: unknown }).text };
+  });
+  return { questions };
+}
+
 async function interviewAccessError(
   auth: ApiKeyAuth,
   interviewId: string,
@@ -189,8 +203,9 @@ ${expertBlock ? `
 7. 下面给了资深面试官(王总/凌总等专家)在本岗位问过的「经典问答范例」。请学习这些范例的提问深度、角度和挖人方式,出题向这个水准看齐——可借鉴角度,但要结合本候选人简历,不要照抄。` : ""}
 
 只输出合法 JSON,不要 markdown、不要解释。下面逐项列出了本批所需的全部维度，必须为每一项填写完整问题，不能省略后续项，也不能输出本批以外的题目。text只写候选人直接听到的问题，不写题号、dimension、规则说明或出题备注。
-${JSON.stringify({ questions: remaining.map((dimension, order) => ({ order,
-  text: "用完整的候选人问题替换本字段", dimension })) }, null, 2)}`,
+questions 是以本批固定 dimension 为键的对象，每个键必须保留并填写 text；不要重新命名键，也不要把多个维度合为一题。
+${JSON.stringify({ questions: Object.fromEntries(remaining.map(dimension => [dimension,
+  { text: "用完整的候选人问题替换本字段" }])) }, null, 2)}`,
     },
     {
       role: "user" as const,
@@ -209,7 +224,7 @@ ${expertBlock ? `
 ${expertBlock}
 --- 范例结束 ---
 ` : ""}
-仅生成当前批次的 ${remaining.length} 道问题，dimension 必须依次为 ${remaining.join(", ")}。已固定和其他批次的题目不要输出。输出包含 questions 数组的 JSON。`,
+仅生成当前批次的 ${remaining.length} 道问题，dimension 必须依次为 ${remaining.join(", ")}。已固定和其他批次的题目不要输出。输出包含 questions 对象的 JSON，每个固定维度键下填写 text。`,
     },
   ];
 }
@@ -409,13 +424,19 @@ export async function POST(
         Array.from(anchors).filter(([dimension]) => batchDimensions.includes(dimension)))) });
     }
     const response = batchDimensions.length ? await generateGovernedText({ interview_id: interviewId, stage: "interview.generate_questions" }, batchMessages, text => {
-      const value = parseJsonSafe(text) as { questions?: Array<{ text?: unknown; dimension?: unknown }> };
+      const value = parseRecruitQuestions(text);
       if (!Array.isArray(value?.questions)) throw new Error("invalid_question_response");
       const seen = new Set(persistedTexts);
       const needed = batchDimensions;
       for (const dimension of needed) {
         const matches = value.questions.filter(question => question.dimension === dimension);
-        if (matches.length !== 1) throw new Error(`missing_or_invalid_scored_question_${dimension}_count_${matches.length}`);
+        if (matches.length !== 1) {
+          log.warn("Question dimension mismatch", {
+            expected: needed,
+            returned: value.questions.map(question => selectedDimensions.includes(String(question.dimension)) ? String(question.dimension) : "unknown"),
+          });
+          throw new Error(`missing_or_invalid_scored_question_${dimension}_count_${matches.length}`);
+        }
         if (typeof matches[0].text !== "string") throw new Error(`missing_or_invalid_scored_question_${dimension}_text_type`);
         const selected = anchors.get(dimension);
         const question = evidenceV11 ? renderRecruitQuestionAnchorReferences(matches[0].text, selected) : matches[0].text;
@@ -434,7 +455,7 @@ export async function POST(
         seen.add(normalized);
       }
     }) : '{"questions":[]}';
-    generated = parseJsonSafe(response) as typeof generated;
+    generated = parseRecruitQuestions(response) as typeof generated;
   } catch (error) {
     log.error("Recruitment question generation stopped", error instanceof Error ? error.name : "model_error");
     const code = error instanceof AllFourModelsFailed || error instanceof HrTaskHalted ? "ALL_MODELS_FAILED" : "PREPARATION_UNAVAILABLE";
