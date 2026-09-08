@@ -19,6 +19,7 @@
  * Usage:  npx tsx server/voice-relay.ts
  */
 import { randomUUID } from "crypto";
+import { speakWithBackgroundSummary } from "./question-summary-transition";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
@@ -791,7 +792,7 @@ async function summarizeQuestion(
     return result;
   } catch (err) {
     log.error("LLM summarization failed:", err);
-    return bt(isZh, PROMPTS.summaryError);
+    return t;
   }
 }
 
@@ -2948,14 +2949,12 @@ async function handleBrowserConnection(
 
         log.info(`→ Q${currentQuestionIndex + 1}/${sortedQuestions.length}: ${nextQ.text.slice(0, 60)}...`);
         const previousQuestionIndex = currentQuestionIndex - 1;
-        const summaryPromise = transcriptSnapshot.length > 0
-          ? summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId)
-          : Promise.resolve("");
-        const [, summary] = await Promise.all([
-          speakAndHandle(transition, { trackInTranscript: false }),
-          summaryPromise,
-        ]);
-        questionSummaries[previousQuestionIndex] = summary;
+        await speakWithBackgroundSummary(
+          questionSummaries, previousQuestionIndex,
+          transcriptSnapshot.map(entry => `${entry.role}: ${entry.text}`).join("\n"),
+          () => summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId),
+          () => speakAndHandle(transition, { trackInTranscript: false }),
+        );
       } else {
         if (transcriptSnapshot.length > 0) {
           const lastSummary = await summarizeQuestion(

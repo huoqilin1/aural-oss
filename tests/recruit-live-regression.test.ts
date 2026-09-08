@@ -8,6 +8,7 @@ import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentSpeechIntent
 import { shouldBlockRecruitmentCompletion } from "../src/lib/voice/completion-auto-close";
 import { createAnswerCommitGate } from "../server/answer-commit-gate";
 import { createAsrInitialConnectQueue } from "../server/asr-initial-connect-queue";
+import { speakWithBackgroundSummary } from "../server/question-summary-transition";
 
 test("twenty first ASR handshakes use four bounded slots and failures release their slots", async () => {
   const schedule=createAsrInitialConnectQueue(4);
@@ -553,7 +554,7 @@ test("backup relay real completion gate recovers incomplete state and permits ei
   }
 });
 
-test("primary actual transition preserves the answer until ACK and allows retry after save failure", async () => {
+test("primary actual transition preserves the answer until ACK and reopens input without waiting for summary", { timeout: 5000 }, async () => {
   const events: Record<string, unknown>[] = [];
   const gate = createAnswerCommitGate((e) => events.push(e), 1000);
   const noop = () => {};
@@ -571,7 +572,7 @@ test("primary actual transition preserves the answer until ACK and allows retry 
     disconnectAsr:noop, cancelTts:noop, generatingResponse:false, asrAccumulator:"",
     userTurnsOnCurrentQ:1, lastResponseWasCorrection:false, cachedWhiteboardDescription:"",
     whiteboardDirty:false, latestWhiteboardImage:null, recentAgentResponses:[], pendingLastQuestionTimeout:null,
-    refreshDynamicQuestions:async()=>{}, isZh:true, summarizeQuestion:async()=>"summary",
+    refreshDynamicQuestions:async()=>{}, isZh:true, summarizeQuestion:()=>new Promise<string>(()=>{}), speakWithBackgroundSummary,
     speakAndHandle:async()=>{}, llmRoute:{}, ctx:{interviewId:"synthetic-interview"}, ctxSessionId:"synthetic-session", questionSummaries:[], runQueuedManualTransition:()=>false,
   });
   const failed = vm.runInContext("handleTransition()", sandbox);
@@ -589,6 +590,8 @@ test("primary actual transition preserves the answer until ACK and allows retry 
   gate.acknowledge({...events.at(-1),ok:true});
   await retry;
   assert.equal(sandbox.currentQuestionIndex, 2);
+  assert.equal(sandbox.isTransitioning, false);
+  assert.equal(sandbox.questionSummaries[1], "user: 我不会报未经核验的数据，我负责招聘台账。");
   assert.equal(events.filter((e)=>e.type==="question_change").length, 1);
   gate.close();
 });

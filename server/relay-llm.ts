@@ -511,7 +511,7 @@ export async function generateGovernedText(identity: TaskIdentity, messages: Arr
 }
 
 async function callRelayRequest(prompt: string, maxTokens?: number, meta?: RelayLlmCallMeta, route?: RelayLlmRoute, options?: RequestOptions): Promise<string> {
-  if (["interview-turn", "q-summary"].includes(meta?.stage ?? "")) options = { ...options, realtime: true };
+  if (meta?.stage === "interview-turn") options = { ...options, realtime: true };
   options = { ...options, deep: options?.deep || meta?.stage === "interview.generate_questions" };
   if (recruitTestModelRoutingEnabled()) {
     route = options.deep
