@@ -11,9 +11,12 @@ import { chromium, type Browser, type BrowserContext, type BrowserContextOptions
 import { buildFunctionalComponent } from "./functional-component-browser";
 
 const componentOnly = process.env.AURAL_FUNCTIONAL_COMPONENT_ONLY === "1";
+const simulationCount = Number(process.env.AURAL_LOCAL_CONCURRENCY || (process.env.AURAL_LOCAL_TWENTY === "1" ? "20" : "0"));
+assert.ok([0, 10, 15, 20].includes(simulationCount), "Supported local simulation sizes are 10, 15 or 20");
 let mountComponent: ((context: BrowserContext) => Promise<void>) | undefined;
 async function newContext(options: BrowserContextOptions) {
-  const context = await browser.newContext(options);
+  const selected = simulationBrowsers.length ? simulationBrowsers[simulationBrowserCursor++ % simulationBrowsers.length] : browser;
+  const context = await selected.newContext(options);
   if (mountComponent) await mountComponent(context);
   return context;
 }
@@ -26,6 +29,8 @@ type RelayConnection = {
 };
 
 let browser: Browser;
+const simulationBrowsers: Browser[] = [];
+let simulationBrowserCursor = 0;
 let serverProcess: ChildProcess | undefined;
 let baseUrl = "";
 
@@ -208,18 +213,24 @@ before(async () => {
       && existsSync("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe")
       ? "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
       : undefined);
-  browser = await chromium.launch({
+  const launchOptions = {
     headless: true,
     // Component scenarios mount an already-started interview, without the
     // real notice-page click that authorizes audio playback. Allow their
     // synthetic audio contexts to run; onboarding has its own click tests.
-    ...(componentOnly ? { args: ["--autoplay-policy=no-user-gesture-required"] } : {}),
+    ...((componentOnly || simulationCount) ? { args: ["--autoplay-policy=no-user-gesture-required"] } : {}),
     ...(systemChrome ? { executablePath: systemChrome } : {}),
-  });
+  };
+  browser = await chromium.launch(launchOptions);
+  if (simulationCount) {
+    simulationBrowsers.push(browser);
+    for (let index = 1; index < Math.ceil(simulationCount / 5); index++) simulationBrowsers.push(await chromium.launch(launchOptions));
+  }
 });
 
 after(async () => {
-  await browser?.close();
+  await Promise.all(simulationBrowsers.map(instance => instance.close()));
+  if (!simulationBrowsers.length) await browser?.close();
   if (serverProcess) await stopProcess(serverProcess);
 });
 
@@ -718,10 +729,11 @@ test("a late ASR final from the previous question is not saved twice", async () 
   await context.close();
 });
 
-for (const scenario of ["recruitment-eight-question", "recruitment-eight-question-premature", "recruitment-eight-question-save-retry", "recruitment-eight-question-progress-retry"]) {
-test(`recruitment completes only after eight distinct scored answers: ${scenario}`, async () => {
+async function runEightQuestionScenario(scenario: string, ready?: () => Promise<void>, progress?: (stage: string, question: number) => void) {
   const context = await newContext({ locale: "zh-CN" });
   const page = await context.newPage();
+  const browserErrors: string[] = [];
+  page.on("console", message => { if (message.type() === "error") browserErrors.push(message.text().slice(0, 300)); });
   const saveBodies: unknown[] = [];
   let failedCompletion = false;
   let failedProgress = false;
@@ -769,7 +781,14 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
     5_000,
   );
 
+  if (ready) {
+    await waitForText(page, "第 1 / 8 题", 10_000);
+    await waitForText(page, "正在听取回答，慢慢来", 10_000, true);
+    await ready();
+  }
+
   for (let question = 1; question <= 8; question += 1) {
+    progress?.("read_question", question);
     await waitForText(page, `第 ${question} / 8 题`, 10_000);
     // A question_change arrives just before the relay's input_ready handshake.
     // Wait for the real candidate-input state so the harness cannot submit into
@@ -777,12 +796,14 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
     await waitForText(page, "正在听取回答，慢慢来", 10_000, true);
     assert.equal(await page.getByTestId("parent-complete").textContent(), "false");
 
+    progress?.("open_input", question);
     await page.getByRole("button", { name: "打开文字输入", exact: true }).click();
     const input = page.getByRole("textbox");
     await input.fill(
       `第${question}题回答：我负责资料核对和入职引导，我不会报未经核验的数据。这是本人的职责、执行步骤、结果数据和验证方法。`,
     );
     await input.press("Enter");
+    progress?.("input_submitted", question);
     await page.getByRole("button", { name: "关闭文字输入", exact: true }).click();
 
     if (question === 2 && scenario.endsWith("premature")) {
@@ -804,6 +825,7 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
         10_000,
         `Expected next-question control after answer ${question}`,
       );
+      progress?.("advance", question);
       await nextButton.click();
       if (question === 2 && scenario.endsWith("progress-retry")) {
         await waitForText(page, "刚才的回答暂未保存成功", 8_000);
@@ -816,6 +838,7 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
     }
   }
 
+  progress?.("finish", 8);
   if (scenario.endsWith("save-retry")) {
     await waitForCondition(async () => failedCompletion && (await readRelayConnections(page)).length >= 2, 15_000);
     assert.equal(await page.getByTestId("parent-complete").textContent(), "false");
@@ -836,6 +859,7 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
     const sent = await readRelaySentMessages(page);
     console.error("[completion-diagnostic]", JSON.stringify({
       scenario,
+      browserErrors,
       recordingWrites,
       saves: saveBodies.map((body) => {
         const b = body as {complete?:boolean;validateOnly?:boolean;currentQuestionIndex?:number;messages?:Array<{role:string}>};
@@ -859,9 +883,40 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
   assert.equal(completionWrites.length, 1);
   assert.equal(recordingWrites, 1);
 
+  progress?.("passed", 8);
   await context.close();
+}
+
+for (const scenario of ["recruitment-eight-question", "recruitment-eight-question-premature", "recruitment-eight-question-save-retry", "recruitment-eight-question-progress-retry"]) {
+test(`recruitment completes only after eight distinct scored answers: ${scenario}`, async () => {
+  await runEightQuestionScenario(scenario);
 });
 }
+
+// Explicit local simulation gate. Mocks verify UI/save behavior, not live GLM or database capacity.
+test(`${simulationCount} concurrent local interview simulations finish all eight answers`, { skip: !simulationCount, timeout: 240_000 }, async () => {
+  let readyCount = 0;
+  let release!: () => void;
+  const barrier = new Promise<void>(resolve => { release = resolve; });
+  const watchdog = setTimeout(() => release(), 60_000);
+  const ready = async () => {
+    readyCount++;
+    if (readyCount === simulationCount) release();
+    await barrier;
+    assert.equal(readyCount, simulationCount, "All browser sessions must overlap before answering");
+  };
+  const scenarios = ["recruitment-eight-question", "recruitment-eight-question-premature", "recruitment-eight-question-save-retry", "recruitment-eight-question-progress-retry"];
+  try {
+    const stages = new Map<number, {stage: string; question: number}>();
+    const results = await Promise.allSettled(Array.from({length: simulationCount}, (_, i) => runEightQuestionScenario(scenarios[i % scenarios.length], ready, (stage, question) => {
+      stages.set(i + 1, {stage, question});
+      console.log("LOCAL_PROGRESS", JSON.stringify({session: i + 1, stage, question, at: Date.now()}));
+    })));
+    const failures = results.flatMap((result, index) => result.status === "rejected" ? [{session: index + 1, ...stages.get(index + 1), error: String(result.reason)}] : []);
+    console.log("LOCAL_CONCURRENCY_RESULT", JSON.stringify({requested: simulationCount, browsers: simulationBrowsers.length, ready: readyCount, passed: results.length - failures.length, failed: failures.length, failures, providerCalls: 0, persistence: "mocked"}));
+    assert.equal(failures.length, 0, JSON.stringify(failures));
+  } finally { clearTimeout(watchdog); }
+});
 
 test("voice completion shows the farewell, waits for final save, and only then notifies the parent", async () => {
   const context = await newContext({ locale: "en-US" });
