@@ -503,6 +503,23 @@ test("candidate input stays unavailable until the relay confirms ASR readiness",
   await context.close();
 });
 
+test("browser playback receipt waits for real AudioContext playback before acknowledging", async () => {
+  const context = await newContext({ locale: "zh-CN" });
+  const page = await context.newPage();
+  await page.goto(`${baseUrl}/functional-tests/voice?language=zh-CN&scenario=recruitment-entry&playbackReceipt=1`);
+  await waitForText(page,"面试须知",10_000,true);
+  await page.getByText("我已阅读并同意以上面试须知",{exact:true}).click();
+  await page.getByRole("button",{name:"开始面试",exact:true}).click();
+  await waitForCondition(async()=>await page.evaluate(()=>!!sessionStorage.getItem("__functionalPlaybackAckAt")),10_000);
+  const delayMs=await page.evaluate(()=>Number(sessionStorage.getItem("__functionalPlaybackAckAt"))-Number(sessionStorage.getItem("__functionalPlaybackSentAt")));
+  assert.ok(delayMs>=1_300,`Acknowledged before 1.5 seconds of audio played: ${delayMs} ms`);
+  const sent=await readRelaySentMessages(page);
+  const init=sent.find(message=>message.type==="init");
+  assert.equal((init?.context as Record<string,unknown>)?.clientPlaybackReceipt,true);
+  assert.equal(sent.filter(message=>message.type==="playback_complete").length,1);
+  await context.close();
+});
+
 test("recruitment notice has one start action then auto-connects camera and microphone", async () => {
   const context = await newContext({ locale: "zh-CN" });
   const page = await context.newPage();

@@ -580,6 +580,19 @@ function installFunctionalRelayMocks(
       }
 
       if (parsed) {
+        if (new URLSearchParams(window.location.search).has("playbackReceipt")) {
+          if (parsed.type === "init") {
+            setTimeout(() => {
+              const emit = (message: Record<string, unknown>) => this.onmessage?.({data:JSON.stringify(message)});
+              emit({type:"tts_text",questionIndex:0,data:{text:"这是本地播放确认测试。"}});
+              window.sessionStorage.setItem("__functionalPlaybackSentAt",String(Date.now()));
+              this.onmessage?.({data:new Int16Array(36_000).buffer}); // 1.5 seconds at 24 kHz.
+              emit({type:"playback_receipt_request",receiptId:"local-playback",questionIndex:0});
+            },500);
+          } else if (parsed.type === "playback_complete") {
+            window.sessionStorage.setItem("__functionalPlaybackAckAt",String(Date.now()));
+          }
+        }
         const sentMessages = [
           ...(window.__functionalRelaySentMessages ?? []),
           parsed,

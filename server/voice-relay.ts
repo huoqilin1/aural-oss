@@ -19,6 +19,7 @@
  * Usage:  npx tsx server/voice-relay.ts
  */
 import { randomUUID } from "crypto";
+import { waitForBrowserPlayback } from "./browser-playback-receipt";
 import { speakWithBackgroundSummary } from "./question-summary-transition";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
@@ -276,6 +277,7 @@ if (!ASR_ACCESS_TOKEN && !ASR_API_KEY) {
 // ── Interview context type ──────────────────────────────────────────
 
 interface InterviewContext {
+  clientPlaybackReceipt?: boolean;
   interviewId?: string;
   /** 真实会话 ID(tRPC 建的 sessions 行):relay 据此做服务端收尾落库 */
   sessionId?: string;
@@ -2177,7 +2179,7 @@ async function handleBrowserConnection(
       log.error("TTS unavailable after retry — delivering text-only fallback");
     }
 
-    // Wait for client-side playback to finish before declaring TTS done.
+    // Legacy clients only support an estimate; current clients confirm playback below.
     // Audio is PCM int16 @ 24kHz = 48000 bytes/sec.
     if (completed && !abortController.signal.aborted) {
       const playbackDurationMs = (totalAudioBytes / 48000) * 1000;
@@ -2192,13 +2194,27 @@ async function handleBrowserConnection(
       }
     }
 
+    let playbackDelivered = true;
+    if ((completed || degradedTextOnly) && !abortController.signal.aborted && ctx.clientPlaybackReceipt === true) {
+      const receiptStartedAt = Date.now();
+      const receipt = await waitForBrowserPlayback(browserWs, speakingQuestionIndex, abortController.signal);
+      log.info(`Browser playback receipt session=${ctxSessionId || "none"} question=${speakingQuestionIndex + 1} result=${receipt} wait_ms=${Date.now() - receiptStartedAt}`);
+      playbackDelivered = receipt === "played";
+      if (receipt === "timeout") {
+        // Transport/playback failure must never become candidate inactivity.
+        log.warn("Browser playback receipt timed out; retaining incomplete session for reconnect");
+        interviewDone = true;
+        browserWs.close(1011, "playback receipt timeout");
+      }
+    }
+
     if (ttsAbortController === abortController) {
       ttsSpeaking = false;
       currentTtsText = "";
       ttsAbortController = null;
     }
 
-    const delivered = (completed || degradedTextOnly) && !abortController.signal.aborted;
+    const delivered = (completed || degradedTextOnly) && playbackDelivered && !abortController.signal.aborted;
     if (delivered && browserWs.readyState === WebSocket.OPEN) {
       sendTranscriptTextOnce();
       browserWs.send(JSON.stringify({ type: "tts_ended", questionIndex: speakingQuestionIndex }));

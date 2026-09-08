@@ -10,6 +10,75 @@ import { createAnswerCommitGate } from "../server/answer-commit-gate";
 import { createAsrInitialConnectQueue } from "../server/asr-initial-connect-queue";
 import { speakWithBackgroundSummary } from "../server/question-summary-transition";
 import { shouldWaitForQuestionExpansion } from "../src/lib/voice/dynamic-question-sync";
+import { waitForBrowserPlayback } from "../server/browser-playback-receipt";
+import { EventEmitter } from "node:events";
+import type { WebSocket } from "ws";
+
+test("playback receipt ignores stale/other-question packets and releases listeners on receipt, abort, close and timeout", async () => {
+  for (const outcome of ["played", "abort", "close", "timeout"] as const) {
+    const socket = Object.assign(new EventEmitter(), {readyState:1, send:(_data:string)=>{}});
+    let request: any;
+    socket.send = (data:string) => { request=JSON.parse(data); };
+    const controller=new AbortController();
+    let settled=false;
+    const pending=waitForBrowserPlayback(socket as unknown as WebSocket,2,controller.signal,30).then(result=>{settled=true;return result;});
+    socket.emit("message",Buffer.from(JSON.stringify({type:"playback_complete",receiptId:"stale",questionIndex:2})),false);
+    socket.emit("message",Buffer.from(JSON.stringify({type:"playback_complete",receiptId:request.receiptId,questionIndex:1})),false);
+    await Promise.resolve();
+    assert.equal(settled,false);
+    if(outcome==="played") socket.emit("message",Buffer.from(JSON.stringify({...request,type:"playback_complete"})),false);
+    if(outcome==="abort") controller.abort();
+    if(outcome==="close") socket.emit("close");
+    assert.equal(await pending,outcome==="played"?"played":outcome==="timeout"?"timeout":"cancelled");
+    assert.equal(socket.listenerCount("message"),0);
+    assert.equal(socket.listenerCount("close"),0);
+  }
+});
+
+test("actual TTS keeps inactivity paused until browser playback, and transport timeout never becomes candidate inactivity", async () => {
+  for(const result of ["played","timeout","cancelled"]){
+    let release:(result:string)=>void=()=>{};
+    const events:any[]=[];
+    const sandbox=relayFunctions("voice-relay.ts",["speakText"],{
+      currentQuestionIndex:2,ctx:{language:"zh",clientPlaybackReceipt:true},
+      cancelTts:()=>{},getTtsOptions:()=>({}),getTtsAuth:()=>({}),
+      AbortController,WebSocket:{OPEN:1},interviewDone:false,
+      browserWs:{readyState:1,send:(data:any)=>{if(typeof data==="string")events.push(JSON.parse(data));},close:()=>events.push({type:"closed"})},
+      synthesizeSpeech:async function*(){yield {type:"audio",audio:Buffer.alloc(48)};yield {type:"done"};},
+      setTimeout:(callback:()=>void)=>{callback();return 0;},clearTimeout:()=>{},
+      waitForBrowserPlayback:()=>new Promise(resolve=>{release=resolve;}),
+      log:{error:()=>{},warn:()=>{}},
+    });
+    const pending=vm.runInContext("speakText('本地测试问题')",sandbox);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(sandbox.ttsSpeaking,true,"server elapsed audio duration must not start silence while delivery is pending");
+    assert.equal(events.some(e=>e.type==="tts_ended"),false);
+    release(result);
+    assert.equal(await pending,result==="played");
+    assert.equal(events.some(e=>e.type==="tts_ended"),result==="played");
+    assert.equal(sandbox.interviewDone,result==="timeout");
+    assert.equal(events.some(e=>e.type==="closed"),result==="timeout");
+  }
+});
+
+test("actual browser acknowledges only after both scheduled sources and jitter queue drain", () => {
+  const source=ts.createSourceFile("voice",readFileSync(new URL("../src/hooks/use-voice.ts",import.meta.url),"utf8"),ts.ScriptTarget.Latest,true);
+  let callback="";
+  function visit(node:ts.Node){
+    if(ts.isVariableDeclaration(node)&&node.name.getText(source)==="acknowledgePlayedAudio"&&node.initializer&&ts.isCallExpression(node.initializer))callback=node.initializer.arguments[0].getText(source);
+    ts.forEachChild(node,visit);
+  }
+  visit(source);assert.ok(callback);
+  const events:any[]=[];
+  const sandbox=vm.createContext({pendingPlaybackReceiptRef:{current:{receiptId:"test",questionIndex:2}},audioSourcesRef:{current:[{}]},queuedAudioSamplesRef:{current:8},relayConnectorRef:{current:{sendJson:(event:any)=>events.push(event)}}});
+  vm.runInContext(ts.transpileModule(`const acknowledge = ${callback}`,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,sandbox);
+  vm.runInContext("acknowledge()",sandbox);assert.equal(events.length,0);
+  sandbox.audioSourcesRef.current=[];
+  vm.runInContext("acknowledge()",sandbox);assert.equal(events.length,0);
+  sandbox.queuedAudioSamplesRef.current=0;
+  vm.runInContext("acknowledge();acknowledge()",sandbox);
+  assert.equal(events.length,1);assert.equal(events[0].type,"playback_complete");
+});
 
 test("progressive Q2 takes the expansion path instead of the last-question silence timer", async () => {
   let transitions=0;

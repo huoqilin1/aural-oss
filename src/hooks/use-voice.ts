@@ -288,8 +288,17 @@ export function useVoice({
     firstQueuedAudioAtRef.current = null;
   }, [clearPlaybackFlushTimer]);
 
+  const pendingPlaybackReceiptRef = useRef<{ receiptId: string; questionIndex: number } | null>(null);
+  const acknowledgePlayedAudio = useCallback(() => {
+    const receipt = pendingPlaybackReceiptRef.current;
+    if (!receipt || audioSourcesRef.current.length || queuedAudioSamplesRef.current) return;
+    pendingPlaybackReceiptRef.current = null;
+    relayConnectorRef.current?.sendJson({ type: "playback_complete", ...receipt });
+  }, []);
+
   /** Stop all currently playing audio sources and notify recording mixer */
   const interruptPlayback = useCallback(() => {
+    pendingPlaybackReceiptRef.current = null;
     clearQueuedAudio();
     for (const source of audioSourcesRef.current) {
       try {
@@ -387,9 +396,10 @@ export function useVoice({
         queuedAudioSamplesRef.current === 0
       ) {
         setState((s) => ({ ...s, isSpeaking: false }));
+        acknowledgePlayedAudio();
       }
     };
-  }, [clearPlaybackFlushTimer, scheduleQueuedAudioFlush]);
+  }, [clearPlaybackFlushTimer, scheduleQueuedAudioFlush, acknowledgePlayedAudio]);
 
   /** Queue incoming int16 PCM audio chunk and flush through a small jitter buffer. */
   const playAudio = useCallback(
@@ -511,6 +521,7 @@ export function useVoice({
           type: "init",
           context: {
             ...interviewContext,
+            clientPlaybackReceipt: true,
             startQuestionIndex: currentQuestionIndexRef.current,
           },
         }),
@@ -797,6 +808,14 @@ export function useVoice({
           break;
         }
 
+        case "playback_receipt_request":
+          if (typeof msg.receiptId === "string" && Number(msg.questionIndex) === currentQuestionIndexRef.current) {
+            pendingPlaybackReceiptRef.current = { receiptId: msg.receiptId, questionIndex: Number(msg.questionIndex) };
+            flushQueuedAudio(true);
+            acknowledgePlayedAudio();
+          }
+          break;
+
         case "tts_sentence_end":
           break;
 
@@ -1054,6 +1073,8 @@ export function useVoice({
     [
       clearAsrProcessingTimer,
       extractText,
+      flushQueuedAudio,
+      acknowledgePlayedAudio,
       interruptPlayback,
       onAIResponse,
       onError,
