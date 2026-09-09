@@ -93,7 +93,11 @@ export async function runHrModelTask<T>(identity: TaskIdentity, operation: (rout
     return result;
   } catch (error) {
     const attempts = (error as { attempts?: Attempt[] })?.attempts;
-    if (Array.isArray(attempts) && attempts.length === state.route.fallbacks.length + 1) {
+    const boundedOverload = state.route.primary === "zhipu" && state.route.fallbacks.length === 0
+      && Array.isArray(attempts) && attempts.length >= 1 && attempts.length <= 3
+      && attempts.every(item => item.provider === "zhipu" && item.model === "glm-5.3")
+      && attempts.slice(0, -1).every(item => item.error === "http_429_code_1305");
+    if (Array.isArray(attempts) && (boundedOverload || attempts.length === state.route.fallbacks.length + 1)) {
       const event: Event = { ...identity, id: randomUUID(), action: "failure", round: state.round, attempts };
       // Stop locally even if the network fails before HR acknowledges the event.
       const temporary = join(haltDirectory, randomUUID() + ".tmp");

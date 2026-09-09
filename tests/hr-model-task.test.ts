@@ -60,3 +60,26 @@ test("durable failure stops repeated calls and a new HR-approved round recovers"
     keys.forEach((key, index) => { if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index]; });
   }
 });
+
+
+test("three bounded GLM overload attempts still persist a local and remote halt", async()=>{
+ const keys=["AURAL_RUNTIME_STATE_DIR","HR_MODEL_CONTROL_URL","HR_MODEL_CONTROL_SECRET"];
+ const saved=keys.map(k=>process.env[k]);const original=globalThis.fetch;
+ process.env.AURAL_RUNTIME_STATE_DIR=await mkdtemp(join(tmpdir(),"overload-halt-"));
+ process.env.HR_MODEL_CONTROL_URL="http://127.0.0.1/v1/recruit/internal/aural/model-policy";
+ process.env.HR_MODEL_CONTROL_SECRET="synthetic";
+ let state="active",calls=0;let acknowledged!:()=>void;
+ const ack=new Promise<void>(resolve=>{acknowledged=resolve;});
+ globalThis.fetch=(async(_url,options)=>{
+  const body=JSON.parse(String(options?.body));
+  if(body.action==="failure"){assert.equal(body.attempts.length,3);state="halted";acknowledged();}
+  return Response.json({success:true,task_key:"aural:1305",round:1,state,route:{primary:"zhipu",fallbacks:[]}});
+ }) as typeof fetch;
+ try{
+  const failure=Object.assign(new Error("all_models_failed"),{attempts:Array.from({length:3},()=>({provider:"zhipu",model:"glm-5.3",state:"failed",error:"http_429_code_1305"}))});
+  const identity={interview_id:"overload",stage:"interview.generate_questions"};
+  await assert.rejects(runHrModelTask(identity,async()=>{calls++;throw failure;}));
+  await assert.rejects(runHrModelTask(identity,async()=>{calls++;return "invalid";}),HrTaskHalted);
+  await ack;assert.equal(calls,1);
+ }finally{globalThis.fetch=original;keys.forEach((k,i)=>{if(saved[i]===undefined)delete process.env[k];else process.env[k]=saved[i];});}
+});

@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { runHrModelTask, type TaskIdentity } from "./hr-model-task";
 import { ensureHrUsageReady, queueHrUsage } from "./hr-model-usage-outbox";
 import { withGlmSlot } from "./glm-capacity";
+import { GlmPreOutputOverload, overloadDelay, waitForGlm } from "./glm-overload-retry";
 
 type RequestOptions = {
   messages?: Array<{ role: string; content: unknown }>;
@@ -19,6 +20,7 @@ type RequestOptions = {
   jsonReport?: boolean;
   jsonQuestions?: boolean;
   realtime?: boolean;
+  signal?: AbortSignal;
 };
 import { createLogger } from "../src/lib/logger";
 import {
@@ -402,7 +404,7 @@ async function callOpenAICompatible(
     body: JSON.stringify(reqBody),
     // Abort the actual transport, not just a Promise.race that leaves billing
     // and an in-flight request running while the fallback starts.
-    signal: AbortSignal.any([...(capacitySignal ? [capacitySignal] : []), AbortSignal.timeout((() => {
+    signal: AbortSignal.any([...(capacitySignal ? [capacitySignal] : []), ...(options?.signal ? [options.signal] : []), AbortSignal.timeout((() => {
       const configured = Number(options?.deep
         ? process.env.FALLBACK_DEEP_ATTEMPT_TIMEOUT_MS
         : process.env.FALLBACK_ATTEMPT_TIMEOUT_MS);
@@ -420,13 +422,20 @@ async function callOpenAICompatible(
   if (!res.ok) {
     // Preserve only bounded numeric diagnostics, never provider message text.
     let providerCode = "";
+    let noOutputOrUsage = false;
     try {
       const failure = await res.json();
+      noOutputOrUsage = Boolean(failure?.error) && (!failure?.choices || (Array.isArray(failure.choices) && failure.choices.length === 0)) && !failure?.usage && !failure?.content && !failure?.reasoning_content;
       const code = String(failure?.error?.code ?? "");
       if (/^[0-9]{3,6}$/.test(code)) providerCode = code;
     } catch { /* A non-JSON error still retains the HTTP status. */ }
     const retry = res.headers.get("retry-after") ?? "";
     const retrySeconds = /^[0-9]{1,5}$/.test(retry) ? Number(retry) : null;
+    if (recruitGlmOnlyEnabled() && endpoint.provider === "zhipu"
+        && endpoint.baseUrl === "https://open.bigmodel.cn/api/coding/paas/v4"
+        && res.status === 429 && providerCode === "1305" && noOutputOrUsage) {
+      throw new GlmPreOutputOverload(retry === "" ? 0 : retrySeconds ?? 91);
+    }
     throw new Error(`LLM API ${res.status}`
       + (providerCode ? ` code=${providerCode}` : "")
       + (retrySeconds !== null && retrySeconds <= 86400 ? ` retry_after=${retrySeconds}` : ""));
@@ -504,9 +513,9 @@ export async function callRelayLLM(
   return callRelayRequest(prompt, maxTokens, meta, route);
 }
 
-export async function generateGovernedText(identity: TaskIdentity, messages: Array<{role: string; content: unknown}>, validate: (text: string) => void) {
+export async function generateGovernedText(identity: TaskIdentity, messages: Array<{role: string; content: unknown}>, validate: (text: string) => void, signal?: AbortSignal) {
   return runHrModelTask(identity, route => callRelayRequest("", undefined, { stage: identity.stage }, route,
-    { messages, validate, deep: true,
+    { messages, validate, signal, deep: true,
       jsonReport: ["interview.voice_report", "interview.summary_report"].includes(identity.stage),
       jsonQuestions: identity.stage === "interview.generate_questions" }));
 }
@@ -545,46 +554,56 @@ async function callRelayRequest(prompt: string, maxTokens?: number, meta?: Relay
 
   for (let i = 0; i < candidates.length; i++) {
     const endpoint = candidates[i]!;
-    const startedAt = new Date().toISOString();
-    let recordedUsage: RelayLlmUsage | undefined;
-    let outcome: "success" | "failed" | "empty" = "failed";
-    try {
-      const { text, usage } = await callEndpoint(endpoint, prompt, maxTokens, options);
-      recordedUsage = usage;
-      if (!text.trim()) { outcome = "empty"; throw new Error("empty_response"); }
-      options?.validate?.(text);
-      outcome = "success";
-      endpointCooldowns.delete(endpointKey(endpoint));
-      const latencyMs = Date.now() - startMs;
-      // Token 分类账：每笔调用一行，stage 区分环节（turn/summarize/generate…），
-      // 供"每场消耗多少、花在哪"的看板汇总。
-      log.info(
-        `relay-llm usage: stage=${meta?.stage ?? "unlabeled"} session=${meta?.session ?? "-"} ` +
-        `q=${meta?.question ?? "-"} model=${endpoint.model} ` +
-        `tokens_in=${usage?.promptTokens ?? "?"} tokens_out=${usage?.completionTokens ?? "?"} ` +
-        `latency_ms=${latencyMs}${i > 0 ? ` recovered_from=${candidates[0]!.model}` : ""}`,
-      );
-      return text;
-    } catch (err) {
-      lastError = err;
-      attempts.push({ provider: endpoint.provider ?? "legacy", model: endpoint.model,
-        state: "failed", error: safeRelayFailure(err) });
-      endpointCooldowns.set(
-        endpointKey(endpoint),
-        Date.now() + failureCooldownMs(err),
-      );
-      const next = candidates[i + 1];
-      if (next) {
-        log.warn(
-          `Relay LLM failed for ${endpoint.model}, falling back to ${next.model}`,
-          safeRelayFailure(err),
+    let waitedMs = 0;
+    for (let retryIndex = 0; retryIndex < 3; retryIndex++) {
+      options?.signal?.throwIfAborted();
+      let retryDelay: number | null = null;
+      const startedAt = new Date().toISOString();
+      let recordedUsage: RelayLlmUsage | undefined;
+      let outcome: "success" | "failed" | "empty" = "failed";
+      try {
+        const { text, usage } = await callEndpoint(endpoint, prompt, maxTokens, options);
+        recordedUsage = usage;
+        if (!text.trim()) { outcome = "empty"; throw new Error("empty_response"); }
+        options?.validate?.(text);
+        outcome = "success";
+        endpointCooldowns.delete(endpointKey(endpoint));
+        const latencyMs = Date.now() - startMs;
+        // Token 分类账：每笔调用一行，stage 区分环节（turn/summarize/generate…），
+        // 供"每场消耗多少、花在哪"的看板汇总。
+        log.info(
+          `relay-llm usage: stage=${meta?.stage ?? "unlabeled"} session=${meta?.session ?? "-"} ` +
+          `q=${meta?.question ?? "-"} model=${endpoint.model} ` +
+          `tokens_in=${usage?.promptTokens ?? "?"} tokens_out=${usage?.completionTokens ?? "?"} ` +
+          `latency_ms=${latencyMs}${i > 0 ? ` recovered_from=${candidates[0]!.model}` : ""}`,
         );
+        return text;
+      } catch (err) {
+        lastError = err;
+        retryDelay = recruitGlmOnlyEnabled() && endpoint.provider === "zhipu" && !recordedUsage
+          ? overloadDelay(err, retryIndex, waitedMs) : null;
+        attempts.push({ provider: endpoint.provider ?? "legacy", model: endpoint.model,
+          state: "failed", error: safeRelayFailure(err) });
+        endpointCooldowns.set(
+          endpointKey(endpoint),
+          Date.now() + failureCooldownMs(err),
+        );
+        const next = candidates[i + 1];
+        if (next) {
+          log.warn(
+            `Relay LLM failed for ${endpoint.model}, falling back to ${next.model}`,
+            safeRelayFailure(err),
+          );
+        }
+      } finally {
+        if (metered) await queueHrUsage({ call_id: callId, provider: endpoint.provider ?? "legacy", model: endpoint.model,
+          scene: meta?.stage ?? "unclassified", started_at: startedAt, status: outcome,
+          usage: recordedUsage ? { prompt_tokens: recordedUsage.promptTokens, completion_tokens: recordedUsage.completionTokens,
+            prompt_cache_hit_tokens: recordedUsage.cachedInputTokens } : null });
       }
-    } finally {
-      if (metered) await queueHrUsage({ call_id: callId, provider: endpoint.provider ?? "legacy", model: endpoint.model,
-        scene: meta?.stage ?? "unclassified", started_at: startedAt, status: outcome,
-        usage: recordedUsage ? { prompt_tokens: recordedUsage.promptTokens, completion_tokens: recordedUsage.completionTokens,
-          prompt_cache_hit_tokens: recordedUsage.cachedInputTokens } : null });
+      if (retryDelay === null) break;
+      waitedMs += retryDelay;
+      await waitForGlm(retryDelay, options?.signal);
     }
   }
 
