@@ -20,6 +20,7 @@
  */
 import { randomUUID } from "crypto";
 import { waitForBrowserPlayback } from "./browser-playback-receipt";
+import { createAsrAudioReplayBuffer } from "./asr-audio-replay";
 import { speakWithBackgroundSummary } from "./question-summary-transition";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
@@ -1332,6 +1333,9 @@ async function handleBrowserConnection(
   let asrAlive = false;
   let asrConnectionAttempted = false;
   let asrConnectPending: Promise<void> | null = null;
+  const asrAudioReplay = createAsrAudioReplayBuffer();
+  let asrProtocolFailureQuestion = -1;
+  let asrProtocolFailures = 0;
   let asrAudioSeq = 1;
   let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -1438,7 +1442,7 @@ async function handleBrowserConnection(
   let unansweredQuestionsStreak = 0;
   /** Wall time when the latest assistant line was appended to questionTranscript (split-noise heuristic). */
   let lastAssistantMessageWallClockMs = 0;
-  const recentAcceptedUserFinals: RecentAsrFinal[] = [];
+  const recentAcceptedUserFinals: Array<RecentAsrFinal & { questionIndex: number }> = [];
   let consumedRecruitmentControlKey = "";
   function recruitmentControlKey(text: string): string {
     if (!isOprunRecruitmentInterview || !recruitmentControlOnly(text)) return "";
@@ -1451,13 +1455,13 @@ async function handleBrowserConnection(
     if (!finalText) return;
 
     const last = recentAcceptedUserFinals[recentAcceptedUserFinals.length - 1];
-    if (last && shouldSuppressAnsweredAsrFinal(last.text, finalText)) {
+    if (last && last.questionIndex === currentQuestionIndex && shouldSuppressAnsweredAsrFinal(last.text, finalText)) {
       last.text = mergeAsrSegments(last.text, finalText);
       last.at = Date.now();
       return;
     }
 
-    recentAcceptedUserFinals.push({ text: finalText, at: Date.now() });
+    recentAcceptedUserFinals.push({ text: finalText, at: Date.now(), questionIndex: currentQuestionIndex });
     while (recentAcceptedUserFinals.length > 8) recentAcceptedUserFinals.shift();
   }
 
@@ -1467,9 +1471,19 @@ async function handleBrowserConnection(
       return false;
     }
 
+    // Similar wording is common across scored questions. Once the new prompt
+    // has played and fresh microphone speech arrived, a prior question cannot
+    // make this answer a replay. With no fresh speech, keep the cross-question
+    // guard against delayed old ASR finals.
+    const freshQuestionSpeech = !isTransitioning && !generatingResponse && !suppressAsrResults && !ttsSpeaking
+      && lastAssistantMessageWallClockMs > 0
+      && lastListeningAudioActivityAt > lastAssistantMessageWallClockMs;
+    const comparableFinals = freshQuestionSpeech
+      ? recentAcceptedUserFinals.filter((entry) => entry.questionIndex === currentQuestionIndex)
+      : recentAcceptedUserFinals;
     return shouldSuppressRecentAsrFinal(
       text,
-      recentAcceptedUserFinals,
+      comparableFinals,
       Date.now(),
       {
         ttlMs: ASR_RECENT_FINAL_REPLAY_TTL_MS,
@@ -3133,6 +3147,12 @@ async function handleBrowserConnection(
       const hasAssistantAfter = questionTranscript.slice(lastUserIdx + 1).some(e => e.role === "assistant");
 
       if (hasAssistantAfter) {
+        // A candidate can genuinely repeat or refine similar wording after a
+        // follow-up. Only delayed recognition without fresh listening speech
+        // should be discarded as the previously answered turn.
+        if (!isTransitioning && !generatingResponse && !suppressAsrResults && !ttsSpeaking
+          && lastAssistantMessageWallClockMs > 0
+          && lastListeningAudioActivityAt > lastAssistantMessageWallClockMs) return false;
         const lastUserText = questionTranscript[lastUserIdx].text;
         if (shouldSuppressAnsweredAsrFinal(lastUserText, userText)) {
           const merged = mergeAsrSegments(lastUserText, userText);
@@ -3256,6 +3276,7 @@ async function handleBrowserConnection(
     // A second final can arrive while we're still in handleUserUtterance (LLM/TTS).
     // The client has already received asr_ended — queue and run after this cycle finishes.
     // 候选人开口:取消"询问后确认切题",留在本题继续听,重置 AFK 计数与静默询问计数
+    asrAudioReplay.acknowledge(currentQuestionIndex);
     clearSilenceAutoSkip();
     silenceAskCount = 0;
     silenceConfirmPending = false;
@@ -3495,7 +3516,7 @@ async function handleBrowserConnection(
       silenceAutoSkipTimer = null;
       if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
       // 小君还在说话/出题/切题时,顺延再看(不打断小君)
-      if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+      if (!asrAlive || isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
         armSilenceAutoSkip();
         return;
       }
@@ -3528,7 +3549,7 @@ async function handleBrowserConnection(
     silenceAutoSkipTimer = setTimeout(() => {
       silenceAutoSkipTimer = null;
       if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked || !silenceConfirmPending) return;
-      if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+      if (!asrAlive || isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
         armSilenceConfirm();
         return;
       }
@@ -3606,7 +3627,7 @@ async function handleBrowserConnection(
 
   async function abandonForInactivity() {
     if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
-    if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+    if (!asrAlive || isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
       armSilenceAutoSkip();
       return;
     }
@@ -3847,12 +3868,14 @@ async function handleBrowserConnection(
     asrAlive = true;
     armSilenceAutoSkip();
 
+    const connectedAsrWs = asrWs;
     asrWs.on("message", (data: Buffer) => {
+      if (asrWs !== connectedAsrWs) return;
       try {
         const resp = parseAsrResponse(Buffer.from(data));
 
         if (resp.errorCode != null) {
-          log.error(`ASR error: ${resp.errorCode} ${resp.errorMessage}`);
+          handleAsrProtocolError(resp.errorCode);
           return;
         }
 
@@ -4024,6 +4047,7 @@ async function handleBrowserConnection(
     });
 
     asrWs.on("close", (code: number, reason: Buffer) => {
+      if (asrWs !== connectedAsrWs) return;
       const reasonStr = reason?.toString() || "";
       log.warn(`ASR WS closed (code=${code}, reason="${reasonStr}")`);
       asrAlive = false;
@@ -4052,6 +4076,26 @@ async function handleBrowserConnection(
   const MAX_RECONNECT_ATTEMPTS = 3;
   const RECONNECT_DELAY_MS = 1000;
 
+  function handleAsrProtocolError(code: number) {
+    if (!asrAlive || interviewDone) return;
+    asrAlive = false;
+    clearSilenceAutoSkip();
+    if (asrProtocolFailureQuestion !== currentQuestionIndex) {
+      asrProtocolFailureQuestion = currentQuestionIndex;
+      asrProtocolFailures = 0;
+    }
+    asrProtocolFailures++;
+    log.warn(`ASR protocol failure session=${ctxSessionId || "none"} question=${currentQuestionIndex + 1} code=${code} attempt=${asrProtocolFailures}`);
+    if (asrProtocolFailures >= MAX_RECONNECT_ATTEMPTS) {
+      // An unavailable recognizer is not evidence that a candidate left.
+      interviewDone = true;
+      browserWs.close(1011, "speech recognition unavailable");
+    }
+    // The existing close handler reconnects, including while the old socket
+    // would otherwise remain OPEN and reject every subsequent audio packet.
+    asrWs?.terminate();
+  }
+
   async function autoReconnectAsr(): Promise<void> {
     browserWs.send(JSON.stringify({ type: "session_reconnecting" }));
 
@@ -4066,6 +4110,14 @@ async function handleBrowserConnection(
 
       try {
         await connectAsr();
+
+        const replay = asrAudioReplay.snapshot(currentQuestionIndex);
+        if (replay === null) throw new Error("Unacknowledged speech exceeds safe replay capacity");
+        for (const pcm of replay) {
+          if (!asrWs || asrWs.readyState !== WebSocket.OPEN || !asrAlive) throw new Error("ASR disconnected during replay");
+          asrAudioSeq++;
+          asrWs.send(buildBigModelAudioRequest(pcm, asrAudioSeq));
+        }
 
         if (!keepAliveInterval) {
           keepAliveInterval = setInterval(() => {
@@ -4149,6 +4201,9 @@ async function handleBrowserConnection(
       if (msg.type === "audio" && msg.data) {
         const pcm = Buffer.from(msg.data, "hex");
         noteIncomingAudioActivity(pcm);
+        if (!isTransitioning && !ttsSpeaking && !suppressAsrResults && !interviewDone) {
+          asrAudioReplay.append(currentQuestionIndex, pcm);
+        }
         if (!asrAlive || isTransitioning || !asrWs || asrWs.readyState !== WebSocket.OPEN) return;
         asrAudioSeq++;
         asrWs.send(buildBigModelAudioRequest(pcm, asrAudioSeq));

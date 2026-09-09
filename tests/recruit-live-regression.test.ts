@@ -13,6 +13,111 @@ import { shouldWaitForQuestionExpansion } from "../src/lib/voice/dynamic-questio
 import { waitForBrowserPlayback } from "../server/browser-playback-receipt";
 import { EventEmitter } from "node:events";
 import type { WebSocket } from "ws";
+import { shouldSuppressRecentAsrFinal, shouldSuppressAnsweredAsrFinal } from "../server/voice-relay-helpers";
+import { createAsrAudioReplayBuffer } from "../server/asr-audio-replay";
+
+test("ASR recovery retains unacknowledged PCM, separates questions and refuses truncated replay", () => {
+  const buffer=createAsrAudioReplayBuffer(6);
+  buffer.append(2,Buffer.from([1,2]));buffer.append(2,Buffer.from([3,4]));
+  assert.deepEqual(Buffer.concat(buffer.snapshot(2)!),Buffer.from([1,2,3,4]));
+  assert.equal(buffer.snapshot(2)!.length,2,"failed recovery must retain audio for the next bounded attempt");
+  assert.deepEqual(buffer.snapshot(3),[]);
+  buffer.acknowledge(2);assert.deepEqual(buffer.snapshot(2),[]);
+  buffer.append(3,Buffer.alloc(7));assert.equal(buffer.snapshot(3),null);
+  buffer.append(4,Buffer.from([8]));assert.deepEqual(Buffer.concat(buffer.snapshot(4)!),Buffer.from([8]));
+});
+
+test("protocol errors retire an OPEN recognizer once and bound recovery without candidate inactivity", () => {
+  const events:string[]=[];
+  const sandbox=relayFunctions("voice-relay.ts",["handleAsrProtocolError"],{
+    currentQuestionIndex:6,ctxSessionId:"local-asr",asrProtocolFailureQuestion:-1,asrProtocolFailures:0,
+    interviewDone:false,MAX_RECONNECT_ATTEMPTS:3,
+    clearSilenceAutoSkip:()=>events.push("clear"),asrWs:{terminate:()=>events.push("retire")},
+    browserWs:{close:()=>events.push("disconnect")},log:{warn:()=>{}},
+  });
+  vm.runInContext("handleAsrProtocolError(55000000);handleAsrProtocolError(45000081)",sandbox);
+  assert.equal(sandbox.asrAlive,false);assert.equal(sandbox.asrProtocolFailures,1);
+  assert.deepEqual(events,["clear","retire"]);
+  for(let i=0;i<2;i++){sandbox.asrAlive=true;vm.runInContext("handleAsrProtocolError(55000000)",sandbox);}
+  assert.equal(sandbox.interviewDone,true);assert.equal(sandbox.asrProtocolFailures,3);
+  assert.equal(events.filter(e=>e==="disconnect").length,1);
+});
+
+test("recognizer unavailable pauses actual inactivity finalization", async () => {
+  let held=0;
+  const sandbox=relayFunctions("voice-relay.ts",["abandonForInactivity"],{
+    interviewDone:false,endingInterview:false,asrAlive:false,
+    armSilenceAutoSkip:()=>{held++;},ownsPersistedSession:()=>{throw new Error("must not finalize without recognizer");},
+  });
+  await vm.runInContext("abandonForInactivity()",sandbox);assert.equal(held,1);
+});
+
+test("actual ASR reconnect replays buffered speech before reopening input", async () => {
+  const buffer=createAsrAudioReplayBuffer();buffer.append(6,Buffer.from([1,2]));
+  const events:string[]=[];
+  const sandbox=relayFunctions("voice-relay.ts",["autoReconnectAsr"],{
+    currentQuestionIndex:6,interviewDone:false,asrAudioReplay:buffer,
+    MAX_RECONNECT_ATTEMPTS:3,RECONNECT_DELAY_MS:1000,asrAudioSeq:1,keepAliveInterval:null,
+    browserWs:{readyState:1,send:(data:string)=>events.push(JSON.parse(data).type)},WebSocket:{OPEN:1},
+    connectAsr:async()=>{events.push("connect");buffer.append(6,Buffer.from([3,4]));},
+    asrWs:{readyState:1,send:(data:string)=>events.push(data)},
+    buildBigModelAudioRequest:(pcm:Buffer)=>`pcm:${pcm.toString('hex')}`,
+    setTimeout:(callback:()=>void)=>{callback();return 0;},setInterval:()=>1,
+    log:{info:()=>{},warn:()=>{}},
+  });
+  await vm.runInContext("autoReconnectAsr()",sandbox);
+  assert.deepEqual(events,["session_reconnecting","connect","pcm:0102","pcm:0304","session_reconnected","input_ready"]);
+  assert.equal(buffer.snapshot(6)!.length,2,"do not discard audio before recognition acknowledges it");
+});
+
+test("new-question microphone speech survives similar prior wording while delayed ASR replays remain suppressed", () => {
+  const previous="我会先核对任务的目标和交付要求，再列出执行步骤，然后整理数据并检查结果，最后记录问题。";
+  const incoming="我会先核对任务的目标和交付要求，再列出执行步骤，然后制作验收表，并请负责人确认完成标准。";
+  assert.equal(shouldSuppressAnsweredAsrFinal(previous,incoming),true,"fixture must reproduce fuzzy cross-question suppression");
+  const now=Date.now();
+  const sandbox=relayFunctions("voice-relay.ts",["shouldSuppressRecentUserFinalReplay"],{
+    questionTranscript:[],currentQuestionIndex:4,
+    recentAcceptedUserFinals:[{text:previous,at:now-10_000,questionIndex:3}],
+    lastAssistantMessageWallClockMs:now-5000,lastListeningAudioActivityAt:now-1000,
+    shouldSuppressRecentAsrFinal,ASR_RECENT_FINAL_REPLAY_TTL_MS:90000,ASR_RECENT_FINAL_REPLAY_MIN_UNITS:8,
+  });
+  sandbox.incoming=incoming;
+  assert.equal(vm.runInContext("shouldSuppressRecentUserFinalReplay(incoming)",sandbox),false);
+  sandbox.lastListeningAudioActivityAt=now-6000;
+  assert.equal(vm.runInContext("shouldSuppressRecentUserFinalReplay(incoming)",sandbox),true,"a delayed old final without new speech must remain blocked");
+  sandbox.lastListeningAudioActivityAt=now-1000;
+  sandbox.ttsSpeaking=true;
+  assert.equal(vm.runInContext("shouldSuppressRecentUserFinalReplay(incoming)",sandbox),true);
+  sandbox.ttsSpeaking=false;
+  sandbox.recentAcceptedUserFinals[0].questionIndex=4;
+  assert.equal(vm.runInContext("shouldSuppressRecentUserFinalReplay(incoming)",sandbox),true,"same-question rolling revisions remain guarded");
+});
+
+test("accepted finals with matching wording stay separate across question boundaries", () => {
+  const sandbox=relayFunctions("voice-relay.ts",["rememberAcceptedUserFinal"],{
+    currentQuestionIndex:3,recentAcceptedUserFinals:[],shouldSuppressAnsweredAsrFinal,mergeAsrSegments,
+  });
+  vm.runInContext("rememberAcceptedUserFinal('我会先核对任务目标和交付要求，再整理数据。')",sandbox);
+  sandbox.currentQuestionIndex=4;
+  vm.runInContext("rememberAcceptedUserFinal('我会先核对任务目标和交付要求，再整理数据。')",sandbox);
+  assert.equal(sandbox.recentAcceptedUserFinals.length,2);
+  assert.deepEqual(Array.from(sandbox.recentAcceptedUserFinals,(entry:any)=>entry.questionIndex),[3,4]);
+});
+
+test("real speech after a follow-up is not silently discarded for sharing the previous answer wording", () => {
+  const previous="我会先核对任务的目标和交付要求，再列出执行步骤，然后整理数据并检查结果，最后记录问题。";
+  const incoming="我会先核对任务的目标和交付要求，再列出执行步骤，然后制作验收表，并请负责人确认完成标准。";
+  const now=Date.now();
+  const sandbox=relayFunctions("voice-relay.ts",["isDuplicateUserFinal","normalizeUserUtteranceKey"],{
+    incoming,questionTranscript:[{role:"user",text:previous},{role:"assistant",text:"请补充验收的具体步骤。"}],
+    recruitmentControlKey:()=>"",consumedRecruitmentControlKey:"",shouldSuppressAnsweredAsrFinal,mergeAsrSegments,
+    rememberAcceptedUserFinal:()=>{},shouldSuppressRecentUserFinalReplay:()=>false,
+    lastAssistantMessageWallClockMs:now-5000,lastListeningAudioActivityAt:now-1000,
+  });
+  assert.equal(vm.runInContext("isDuplicateUserFinal(incoming)",sandbox),false);
+  sandbox.lastListeningAudioActivityAt=now-6000;
+  assert.equal(vm.runInContext("isDuplicateUserFinal(incoming)",sandbox),true);
+});
 
 test("playback receipt ignores stale/other-question packets and releases listeners on receipt, abort, close and timeout", async () => {
   for (const outcome of ["played", "abort", "close", "timeout"] as const) {
@@ -616,7 +721,7 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
   }
   visit(source);
   assert.equal(found.size, names.length);
-  const sandbox=vm.createContext({transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, isTransitioning:false, generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false, suppressAsrResults:false, asrAccumulator:"",heldBargeInInterimText:"",clearHeldBargeInInterim:()=>{}, logVoiceInputProgress:()=>{}, recoverDeferredUserTurnBeforeInactivity:async()=>false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
+  const sandbox=vm.createContext({asrAlive:true, asrAudioReplay:{acknowledge:()=>{}}, transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, isTransitioning:false, generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false, suppressAsrResults:false, asrAccumulator:"",heldBargeInInterimText:"",clearHeldBargeInInterim:()=>{}, logVoiceInputProgress:()=>{}, recoverDeferredUserTurnBeforeInactivity:async()=>false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
   vm.runInContext(ts.transpileModule(Array.from(found.values()).join("\n"), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, sandbox);
   return sandbox;
 }
