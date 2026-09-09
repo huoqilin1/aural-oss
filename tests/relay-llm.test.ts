@@ -7,6 +7,14 @@ import { flushHrUsage } from "../server/hr-model-usage-outbox";
 
 import * as relayLlm from "../server/relay-llm";
 
+test("capacity failures retain safe machine codes without private suffixes", () => {
+  for (const suffix of ["wait_timeout", "lease_lost", "control_unavailable", "control_invalid", "configuration_missing", "configuration_invalid"]) {
+    const code = `GLM_capacity_${suffix}`;
+    assert.equal(relayLlm.safeRelayFailure(new Error(code)), code);
+    assert.equal(relayLlm.safeRelayFailure(new Error(code + " private details")), "Error");
+  }
+});
+
 test("question validation diagnostics retain only bounded dimension and reason codes", () => {
   const code="missing_or_invalid_scored_question_job_work_sample_too_long";
   assert.equal(relayLlm.safeRelayFailure(new Error(code)),code);

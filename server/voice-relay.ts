@@ -22,6 +22,7 @@ import { randomUUID } from "crypto";
 import { waitForBrowserPlayback } from "./browser-playback-receipt";
 import { createAsrAudioReplayBuffer } from "./asr-audio-replay";
 import { speakWithBackgroundSummary } from "./question-summary-transition";
+import { questionMemory } from "./question-memory";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
@@ -778,25 +779,22 @@ async function summarizeQuestion(
   llmRoute?: RelayLlmRoute,
   sessionId?: string,
   interviewId?: string,
+  recruitment = false,
 ): Promise<string> {
-  if (transcript.length === 0) return "";
-
-  const t = transcript
-    .map((m) => `${m.role === "user" ? "Participant" : "Interviewer"}: ${m.text}`)
-    .join("\n");
-
-  try {
-    const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), undefined, {
-      stage: "q-summary",
-      session: sessionId,
-      interview: interviewId,
-    }, llmRoute);
-    log.info(`Q summary: "${result.slice(0, 100)}..."`);
-    return result;
-  } catch (err) {
-    log.error("LLM summarization failed:", err);
-    return t;
-  }
+  return questionMemory(transcript, recruitment, async t => {
+    try {
+      const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), undefined, {
+        stage: "q-summary",
+        session: sessionId,
+        interview: interviewId,
+      }, llmRoute);
+      log.info("Question context summary generated");
+      return result;
+    } catch (err) {
+      log.error("LLM summarization failed:", err);
+      return t;
+    }
+  });
 }
 
 // ── Relay server ────────────────────────────────────────────────────
@@ -2383,7 +2381,7 @@ async function handleBrowserConnection(
     const currentQ = sortedQuestions[currentQuestionIndex];
     const transcriptSnapshot = [...questionTranscript];
     if (transcriptSnapshot.length > 0) {
-      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId)
+      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId, isOprunRecruitmentInterview)
         .then((summary) => questionSummaries.push(summary))
         .catch(log.error);
     }
@@ -2999,7 +2997,7 @@ async function handleBrowserConnection(
         await speakWithBackgroundSummary(
           questionSummaries, previousQuestionIndex,
           transcriptSnapshot.map(entry => `${entry.role}: ${entry.text}`).join("\n"),
-          () => summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId),
+          () => summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId, isOprunRecruitmentInterview),
           () => speakAndHandle(transition, { trackInTranscript: false }),
         );
       } else {
@@ -3011,6 +3009,7 @@ async function handleBrowserConnection(
             llmRoute,
             ctxSessionId,
             ctx.interviewId,
+            isOprunRecruitmentInterview,
           );
           questionSummaries.push(lastSummary);
         }
@@ -3085,6 +3084,7 @@ async function handleBrowserConnection(
           llmRoute,
           ctxSessionId,
           ctx.interviewId,
+          isOprunRecruitmentInterview,
         );
         questionSummaries.push(summary);
       }

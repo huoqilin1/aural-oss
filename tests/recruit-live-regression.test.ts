@@ -15,6 +15,23 @@ import { EventEmitter } from "node:events";
 import type { WebSocket } from "ws";
 import { shouldSuppressRecentAsrFinal, shouldSuppressAnsweredAsrFinal } from "../server/voice-relay-helpers";
 import { createAsrAudioReplayBuffer } from "../server/asr-audio-replay";
+import { questionMemory } from "../server/question-memory";
+
+test("actual recruitment question context bypasses the model but keeps its source answer", async () => {
+  let calls = 0;
+  const sandbox = relayFunctions("voice-relay.ts", ["summarizeQuestion"], {
+    questionMemory,
+    callRelayLLM: async () => { calls++; return "legacy summary"; },
+    bt: (_zh: boolean, value: unknown) => value,
+    PROMPTS: { summarize: () => "synthetic prompt" },
+    log: { info() {}, error() {} },
+  });
+  const result = await vm.runInContext("summarizeQuestion('Q1', [{role:'user', text:'I owned review only.'}], true, undefined, 'session', 'interview', true)", sandbox);
+  assert.equal(result, "Participant: I owned review only.");
+  assert.equal(calls, 0);
+  assert.equal(await vm.runInContext("summarizeQuestion('Q1', [{role:'user', text:'Source'}], true)", sandbox), "legacy summary");
+  assert.equal(calls, 1);
+});
 
 test("ASR recovery retains unacknowledged PCM, separates questions and refuses truncated replay", () => {
   const buffer=createAsrAudioReplayBuffer(6);
