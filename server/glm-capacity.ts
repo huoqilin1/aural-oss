@@ -42,7 +42,10 @@ export async function acquireGlmSlot(priority: -1 | 0 | 1 = -1): Promise<{ signa
     });
   };
   try {
-    const deadline = Date.now() + 900_000;
+    // Background reports may wait behind a whole live interview batch. Queue
+    // time is not provider execution time; retain their FIFO position instead
+    // of reporting a model failure before the transport has started.
+    const deadline = priority === -1 ? Infinity : Date.now() + 900_000;
     while (!(await control("acquire", requestId, priority)).granted) {
       if (Date.now() >= deadline) throw new Error("GLM_capacity_wait_timeout");
       await new Promise(resolve => setTimeout(resolve, 1000));

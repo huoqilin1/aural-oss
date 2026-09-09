@@ -3,6 +3,36 @@ import test from "node:test";
 import { createHmac } from "node:crypto";
 import { acquireGlmSlot, withGlmSlot } from "../server/glm-capacity";
 
+test("background report retains its queue place beyond fifteen minutes", async () => {
+  const keys = ["GLM_SHARED_CAPACITY_ENABLED", "HR_MODEL_CONTROL_URL", "HR_MODEL_CONTROL_SECRET"];
+  const saved = keys.map(key => process.env[key]);
+  const originalFetch = globalThis.fetch;
+  const originalNow = Date.now;
+  let now = originalNow();
+  const calls: {action: string; request_id: string}[] = [];
+  process.env.GLM_SHARED_CAPACITY_ENABLED = "1";
+  process.env.HR_MODEL_CONTROL_URL = "https://hr.example/v1/recruit/internal/aural/model-policy";
+  process.env.HR_MODEL_CONTROL_SECRET = "synthetic-secret";
+  Date.now = () => now;
+  globalThis.fetch = (async (_input, options) => {
+    const body = JSON.parse(String(options?.body));
+    calls.push(body);
+    now += 901_000;
+    return Response.json({success: true, granted: calls.length > 1});
+  }) as typeof fetch;
+  try {
+    let providers = 0;
+    await withGlmSlot(async () => { providers++; }, -1);
+    assert.equal(providers, 1);
+    assert.deepEqual(calls.map(c => c.action), ["acquire", "acquire", "release"]);
+    assert.equal(new Set(calls.map(c => c.request_id)).size, 1);
+  } finally {
+    Date.now = originalNow;
+    globalThis.fetch = originalFetch;
+    keys.forEach((key, index) => { if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index]; });
+  }
+});
+
 test("GLM admission signs requests, releases after provider failure and never retries provider", async () => {
   const keys = ["GLM_SHARED_CAPACITY_ENABLED", "HR_MODEL_CONTROL_URL", "HR_MODEL_CONTROL_SECRET"];
   const saved = keys.map(key => process.env[key]);
