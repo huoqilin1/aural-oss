@@ -12,7 +12,7 @@ const questions = ["技能使用", "成果口径", "现场工作样例", "问题
 const source = fs.readFileSync("src/app/api/v1/interviews/[id]/generate-questions/route.ts", "utf8");
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 
-function harness(keyed = false) {
+function harness(keyed = false, shape = "standard") {
   const rows: Row[] = dimensions.slice(0, 2).map((dimension, order) => ({ id: `fixed-${order}`, order, text: `固定题${order}`, description: `oprun_dimension:${dimension}` }));
   const requested: string[][] = [];
   let failSecond = false, holdSecond = false, invalid = false, references = false, failSave = false, clock = 1000;
@@ -50,7 +50,15 @@ function harness(keyed = false) {
         if (requested.length === 2) { reached(); if (holdSecond) await blocked; if (failSecond) throw new ModelFailure(); }
         const generated = Object.entries(selected).map(([dimension, pair]) => ({ dimension,
           text: invalid ? "请说明工作经历？" : `你在简历中写到“${references ? "{{resume}}" : pair.resume}”，岗位要求“${references ? "{{job}}" : pair.job}”，请说明${questions[dimensions.indexOf(dimension) - 2]}的实际证据？` }));
-        const value = JSON.stringify({ questions: keyed ? Object.fromEntries(generated.map(({dimension,text})=>[dimension,{text}])) : generated });
+        const keyedRows = Object.fromEntries(generated.map(({dimension,text})=>[dimension,{text}]));
+        const value = JSON.stringify(shape === "root-map" ? keyedRows
+          : shape === "root-array" ? generated
+          : shape === "string-map" ? {questions:Object.fromEntries(generated.map(({dimension,text})=>[dimension,text]))}
+          : shape === "single-object" && generated.length === 1 ? {questions:generated[0]}
+          : shape === "root-single" && generated.length === 1 ? generated[0]
+          : shape === "unknown-dimension" ? {questions:{unknown:generated[0].text}}
+          : shape === "missing-dimension" ? {questions:{text:generated[0].text}}
+          : { questions: keyed ? keyedRows : generated });
         validate(value); return value;
       },
     },
@@ -73,6 +81,24 @@ test("dimension-keyed provider responses persist urgent Q3 and all later dimensi
   assert.deepEqual(h.requested,batches);
   assert.equal(h.rows.length,9);
 });
+
+for (const shape of ["root-map", "root-array", "string-map", "single-object", "root-single"]) {
+  test(`equivalent explicit-dimension JSON ${shape} preserves all eight anchored questions`, async () => {
+    const h = harness(true, shape); h.setReferences();
+    assert.equal((await h.request()).status, 200);
+    assert.deepEqual(h.requested, batches);
+    assert.deepEqual(h.rows.slice(0,8).map(row=>row.description), dimensions.map(d=>`oprun_dimension:${d}`));
+    assert.ok(h.rows.slice(2,8).every(row=>row.text.includes("负责客户项目交付") && !row.text.includes("{{")));
+  });
+}
+for (const shape of ["unknown-dimension", "missing-dimension"]) {
+  test(`${shape} is never inferred from the requested batch`, async () => {
+    const h = harness(true, shape);
+    assert.equal((await h.request()).status, 503);
+    assert.equal(h.rows.length, 2);
+    assert.equal(h.requested.length, 1);
+  });
+}
 
 test("actual route saves Q3 without waiting for Q4 and coalesces even after old lock TTL", async () => {
   const h = harness(); h.setHold();

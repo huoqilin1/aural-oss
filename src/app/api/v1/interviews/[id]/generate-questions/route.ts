@@ -61,6 +61,7 @@ function recruitDimensions(questionSetVersion: string): readonly string[] {
 }
 
 function parseJsonSafe(raw: string): unknown {
+  try { return JSON.parse(raw.trim()); } catch { /* inspect a fenced JSON object below */ }
   const jsonMatch = raw.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error("No JSON found in AI output");
   try {
@@ -88,20 +89,35 @@ function recruitJobFacts(value: string): string {
 }
 
 function parseRecruitQuestions(raw: string): { questions: Array<{ dimension: unknown; text: unknown }> } {
-  const value = parseJsonSafe(raw) as { questions?: unknown };
+  const value = parseJsonSafe(raw);
+  const known = new Set<string>([...LEGACY_RECRUIT_DIMENSIONS, ...EVIDENCE_V11_RECRUIT_DIMENSIONS]);
+  const record = (item: unknown): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item);
+  const invalid = (reason: string): never => {
+    // Structural classification only: never log provider text or arbitrary keys.
+    log.warn("Question response envelope rejected", { reason });
+    throw new Error(`invalid_question_response_${reason}`);
+  };
   const normalize = (question: { dimension: unknown; text: unknown }) => ({ ...question,
     // Remove only a cosmetic leading question number, never source quotations,
     // embedded instructions, topic headings or substantive question content.
     text: typeof question.text === "string" ? question.text.replace(/^\s*(?:第\s*[一二三四五六七八1-8]\s*题|Q\s*[1-8])(?:\s*[:：、.．]\s*|\s*\r?\n\s*)/i, "").trim() : question.text,
   });
-  if (Array.isArray(value?.questions)) return { questions: value.questions.map(normalize) };
-  if (!value?.questions || typeof value.questions !== "object") throw new Error("invalid_question_response");
-  const known = new Set<string>([...LEGACY_RECRUIT_DIMENSIONS, ...EVIDENCE_V11_RECRUIT_DIMENSIONS]);
-  const questions = Object.entries(value.questions).map(([dimension, item]) => {
-    if (!known.has(dimension) || !item || typeof item !== "object" || Array.isArray(item)) {
-      throw new Error("invalid_question_response");
+  // Normalize only equivalent envelopes with an explicit, recognized dimension.
+  // Never infer a missing dimension or invent/repair any substantive question text.
+  const envelope = record(value) && Object.hasOwn(value, "questions") ? value.questions : value;
+  const explicit = (item: unknown) => {
+    if (!record(item) || typeof item.dimension !== "string" || !known.has(item.dimension)) {
+      return invalid("explicit_dimension");
     }
-    return normalize({ dimension, text: (item as { text?: unknown }).text });
+    return normalize({ dimension: item.dimension, text: item.text });
+  };
+  if (Array.isArray(envelope)) return { questions: envelope.map(explicit) };
+  if (!record(envelope)) return invalid("envelope_type");
+  if (Object.hasOwn(envelope, "dimension")) return { questions: [explicit(envelope)] };
+  const questions = Object.entries(envelope).map(([dimension, item]) => {
+    if (!known.has(dimension)) return invalid("unknown_dimension_key");
+    if (typeof item !== "string" && !record(item)) return invalid("item_type");
+    return normalize({ dimension, text: typeof item === "string" ? item : item.text });
   });
   return { questions };
 }
