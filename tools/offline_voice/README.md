@@ -4,6 +4,22 @@ This is a local integration candidate, not a production acceptance certificate.
 The current production release still uses Volcengine speech. No automatic
 fallback from offline speech to a paid provider is implemented or allowed.
 
+The validated test configuration uses open-source SenseVoice/Silero recognition
+and the installed Windows Huihui offline voice. Windows speech is NOT an
+open-source model. It invokes no paid API. Set `OFFLINE_VOICE_TTS_ENGINE=windows`
+on the Windows test host. Keep production interviews on Volcengine. A private
+SSH reverse forward may connect the server's loopback port5211 to the Windows
+sidecar during an authorized test batch. This requires the test host to remain
+awake and connected; loss of the tunnel fails the test, never enables paid
+fallback. Never use this desktop-dependent setup as an unattended production
+speech replacement. Do not expose the sidecar on a public interface.
+
+Cross-check on 2026-09-10: the same ten distinct texts synthesized by Windows
+and transcribed by the real offline service all completed and all ten matched
+the original text after punctuation normalization. This isolates the major
+previous mismatch to the selected TTS path. It does not prove arbitrary ASR
+accuracy or replace the ten-interview acceptance gate.
+
 ## Routing
 
 The authenticated interview creation API accepts `voiceTest: true` from HR.

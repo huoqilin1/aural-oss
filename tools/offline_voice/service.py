@@ -22,9 +22,12 @@ import soundfile as sf
 ROOT = Path(os.environ['OFFLINE_VOICE_MODEL_DIR']).resolve()
 ASR = ROOT / 'sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17'
 TTS = ROOT / 'vits-melo-tts-zh_en'
+TTS_ENGINE=os.environ.get('OFFLINE_VOICE_TTS_ENGINE','melo')
+if TTS_ENGINE not in ('windows','melo') or (TTS_ENGINE=='windows' and os.name!='nt'):
+    raise RuntimeError('Unsupported offline TTS engine')
 recognizer = so.OfflineRecognizer.from_sense_voice(model=str(ASR/'model.int8.onnx'),
     tokens=str(ASR/'tokens.txt'), num_threads=2, use_itn=True, language='auto')
-tts = so.OfflineTts(so.OfflineTtsConfig(model=so.OfflineTtsModelConfig(
+tts = None if TTS_ENGINE=='windows' else so.OfflineTts(so.OfflineTtsConfig(model=so.OfflineTtsModelConfig(
     vits=so.OfflineTtsVitsModelConfig(model=str(TTS/'model.onnx'),
         lexicon=str(TTS/'lexicon.txt'), tokens=str(TTS/'tokens.txt'), dict_dir=str(TTS/'dict')),
     num_threads=2, provider='cpu')))
@@ -66,6 +69,9 @@ def recognize(samples):
     return stream.result.text
 
 def synthesize(text):
+    if TTS_ENGINE=='windows':
+        from windows_tts import synthesize_windows
+        return synthesize_windows(text)
     audio=tts.generate(text, sid=0, speed=1.0)
     output=io.BytesIO()
     sf.write(output,audio.samples,audio.sample_rate,format='WAV',subtype='PCM_16')
@@ -143,7 +149,7 @@ async def recognition(request):
     return ws
 
 async def health(request):
-    return web.json_response({'status':'ok','provider':'offline','engine':so.__version__})
+    return web.json_response({'status':'ok','provider':'offline','engine':so.__version__,'tts_engine':TTS_ENGINE})
 
 app=web.Application(client_max_size=16384)
 app.router.add_get('/health',health)
