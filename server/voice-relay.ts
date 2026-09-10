@@ -98,6 +98,7 @@ import { publishVoiceOnline } from "./voice-online-state";
 import { createAnswerCommitGate } from "./answer-commit-gate";
 import { loadInterviewRelayLlmRoute } from "./interview-llm-route";
 import { loadVoiceRoute, offlineVoiceEndpoint, synthesizeOffline } from './voice-provider-route';
+import { closeAsrSocket } from './close-asr-socket';
 
 const log = createLogger("voice-relay");
 
@@ -1092,8 +1093,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
         asrWs.send(buildBigModelAudioRequest(Buffer.alloc(0), asrAudioSeq, true));
       } catch { /* ignore */ }
     }
-    asrWs?.removeAllListeners();
-    asrWs?.close();
+    closeAsrSocket(asrWs);
     asrWs = null;
     asrAlive = false;
   }
@@ -1121,8 +1121,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
     }
     const failedWs = asrWs;
     asrWs = null;
-    failedWs?.removeAllListeners();
-    try { failedWs?.close(); } catch { /* ignore */ }
+    closeAsrSocket(failedWs);
 
     while (!intentionalClose && browserWs.readyState === WebSocket.OPEN
         && reconnectAttempts < maxReconnectAttempts) {
@@ -1216,10 +1215,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
 
   async function connectMicTestAsr(isInitial: boolean): Promise<void> {
     if (asrWs) {
-      asrWs.removeAllListeners();
-      try {
-        asrWs.close();
-      } catch { /* ignore */ }
+      closeAsrSocket(asrWs);
       asrWs = null;
       asrAlive = false;
     }
@@ -1254,8 +1250,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
       });
       });
     } catch (error) {
-      nextWs.removeAllListeners();
-      try { nextWs.close(); } catch { /* ignore */ }
+      closeAsrSocket(nextWs);
       throw error;
     }
 
@@ -1858,6 +1853,11 @@ async function handleBrowserConnection(
     }
     if (!holdDecision.hold) return false;
 
+    // Offline recognition emits completed VAD segments, not streaming interim
+    // text. A quiet transcript while speech continues is expected; rotating the
+    // socket here would discard the segment still buffered by the recognizer.
+    if (voiceRoute.provider === 'offline') return true;
+
     const textStuckMs =
       pendingAsrFinalLastChangedAt > 0
         ? Date.now() - pendingAsrFinalLastChangedAt
@@ -1898,6 +1898,7 @@ async function handleBrowserConnection(
    * Prevents mid-sentence cutoff while refreshing a degraded ASR session.
    */
   function rotateAsrSession() {
+    if (asrWs?.readyState === WebSocket.CONNECTING) return;
     asrIntentionalClose = true;
     if (keepAliveInterval) {
       clearInterval(keepAliveInterval);
@@ -1910,8 +1911,7 @@ async function handleBrowserConnection(
       } catch { /* ignore */ }
     }
     if (asrWs) {
-      asrWs.removeAllListeners();
-      try { asrWs.close(); } catch { /* ignore */ }
+      closeAsrSocket(asrWs);
     }
     asrWs = null;
     asrAlive = false;
@@ -3502,8 +3502,7 @@ async function handleBrowserConnection(
       } catch { /* ignore */ }
     }
     if (asrWs) {
-      asrWs.removeAllListeners();
-      try { asrWs.close(); } catch { /* ignore */ }
+      closeAsrSocket(asrWs);
     }
     asrWs = null;
     asrAlive = false;
@@ -3876,8 +3875,7 @@ async function handleBrowserConnection(
     };
 
     if (asrWs) {
-      asrWs.removeAllListeners();
-      try { asrWs.close(); } catch { /* ignore */ }
+      closeAsrSocket(asrWs);
     }
 
     const wsHeaders = buildBigModelHeaders(
@@ -4378,8 +4376,7 @@ async function handleBrowserConnection(
         asrWs.send(buildBigModelAudioRequest(Buffer.alloc(0), asrAudioSeq, true));
       } catch { /* ignore */ }
     }
-    asrWs?.removeAllListeners();
-    asrWs?.close();
+    closeAsrSocket(asrWs);
     // Non-recruitment sessions retain relay-side completion fallback. A
     // recruitment session must pass the eight-answer save API instead.
     if (wasFarewellDone && ctxSessionId) {
