@@ -29,6 +29,7 @@ import { createClient } from "@supabase/supabase-js";
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
 import { createAsrInitialConnectQueue } from "./asr-initial-connect-queue";
+import { waitForAsrSocketOpen } from "./asr-socket-open";
 import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentControlOnly, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
 import type { RelayLlmRoute } from "../src/lib/relay-llm-route";
 import {
@@ -3900,20 +3901,19 @@ async function handleBrowserConnection(
       ? new WebSocket(offlineVoiceEndpoint('asr'))
       : new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
 
-    await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("ASR connect timeout")), 10000);
-      asrWs!.on("open", () => { clearTimeout(t); resolve(); });
-      asrWs!.on("error", (e) => { clearTimeout(t); reject(e); });
-      asrWs!.on("unexpected-response", (_req, res) => {
-        let body = "";
-        res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-        res.on("end", () => {
-          clearTimeout(t);
-          log.error(`ASR WebSocket rejected: HTTP ${res.statusCode} — ${body}`);
-          reject(new Error(`ASR server responded ${res.statusCode}: ${body}`));
-        });
-      });
-    });
+    const openingSocket = asrWs;
+    const handshakeStartedAt = Date.now();
+    try {
+      await waitForAsrSocketOpen(openingSocket);
+    } catch (error) {
+      if (asrWs === openingSocket) { asrWs = null; asrAlive = false; }
+      log.warn(`ASR handshake failed session=${ctxSessionId} provider=${voiceRoute.provider} elapsed_ms=${Date.now()-handshakeStartedAt} state=${openingSocket.readyState}`);
+      throw error;
+    }
+    if (asrWs !== openingSocket || browserWs.readyState !== WebSocket.OPEN || interviewDone) {
+      closeAsrSocket(openingSocket);
+      throw new Error('ASR connection superseded');
+    }
     log.info(`ASR connected: resource=${ASR_RESOURCE_ID}`);
 
     asrWs.send(buildBigModelFullRequest(asrConfig, reqid));

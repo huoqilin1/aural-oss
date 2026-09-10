@@ -387,6 +387,11 @@ async function callOpenAICompatible(
   }
   // Report assembly must return structured final content within its transport
   // deadline. HR's three separately configured reasoning stages are unaffected.
+  // Live conversational acknowledgement uses the fast route. Keep reasoning
+  // for question preparation and HR's separately configured analysis stages.
+  if (options?.realtime && !options?.deep && endpoint.provider === "zhipu") {
+    reqBody.thinking = { type: "disabled" };
+  }
   if (options?.jsonReport && endpoint.provider === "zhipu") {
     reqBody.response_format = { type: "json_object" };
     reqBody.thinking = { type: "disabled" };

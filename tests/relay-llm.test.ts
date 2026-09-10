@@ -125,6 +125,8 @@ test("GLM questions and reports request JSON while question reasoning stays unch
       await relayLlm.callRelayLLM("Synthetic realtime reply", undefined, { stage: "interview-turn" }, { primary: "zhipu", fallbacks: [] });
       await relayLlm.callRelayLLM("Synthetic background summary", undefined, { stage: "q-summary" }, { primary: "zhipu", fallbacks: [] });
       await relayLlm.callRelayLLM("Synthetic readiness probe", undefined, { stage: "readiness_probe" }, { primary: "zhipu", fallbacks: [] });
+      assert.deepEqual(bodies[3].thinking, { type: "disabled" });
+      assert.equal(bodies[4].thinking, undefined);
       assert.deepEqual(priorities, [-1, -1, 0, 1, -1, 0]);
       await flushHrUsage();
     });
