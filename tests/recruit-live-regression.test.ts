@@ -903,6 +903,53 @@ test("primary actual transition preserves the answer until ACK and reopens input
   gate.close();
 });
 
+test("ten last-question transitions keep wrap-up playback on the browser's current question", async () => {
+  await Promise.all(Array.from({length:10}, async (_, i) => {
+    const count = i % 2 ? 9 : 8;
+    let browserIndex = count - 1;
+    const events: Record<string, unknown>[] = [];
+    const noop = () => {};
+    const peer = new EventEmitter() as EventEmitter & {readyState:number;send:(raw:string)=>void};
+    peer.readyState = 1;
+    peer.send = (raw) => {
+      const event = JSON.parse(raw); events.push(event);
+      if (event.type === "question_change") browserIndex = event.questionIndex;
+      // The real browser correctly ignores stale or unknown question receipts.
+      if (event.type === "playback_receipt_request" && event.questionIndex === browserIndex) {
+        queueMicrotask(() => peer.emit("message", JSON.stringify({...event,type:"playback_complete"}), false));
+      }
+    };
+    const sandbox = relayFunctions("voice-relay.ts", ["handleTransition"], {
+      interviewDone:false, isTransitioning:false, isOprunRecruitmentInterview:true,
+      currentQuestionIndex:count-1, questionTranscript:[{role:"user",text:"我负责检查和记录交付结果。"}],
+      hasRecruitmentAnswer, silenceAskCount:0, silenceConfirmPending:false,
+      answerCommitGate:{request:async()=>true}, recruitmentControlOnly,
+      consumedRecruitmentControlKey:"", recentAcceptedUserFinals:[],
+      browserWs:peer, WebSocket:{OPEN:1}, reopenAsr:async()=>{},
+      log:{error:(...errors:unknown[])=>{throw errors.at(-1);},info:noop},
+      shouldWaitForQuestionExpansion:()=>false,
+      sortedQuestions:Array.from({length:count},(_,q)=>({text:`Synthetic question ${q+1}`})),
+      clearPendingAsrFinal:noop, clearSilenceAutoSkip:noop, disconnectAsr:noop, cancelTts:noop,
+      userTurnsOnCurrentQ:1, lastResponseWasCorrection:false, cachedWhiteboardDescription:"",
+      whiteboardDirty:false, latestWhiteboardImage:null, recentAgentResponses:[], pendingLastQuestionTimeout:null,
+      refreshDynamicQuestions:async()=>{}, isZh:true, summarizeQuestion:async()=>"Saved synthetic answer",
+      buildWrapUpSayHello:()=>"还有补充吗？", llmRoute:{}, ctx:{interviewId:"local"}, ctxSessionId:"local",
+      questionSummaries:[], runQueuedManualTransition:()=>false,
+      speakAndHandle:async()=> {
+        const receipt=await waitForBrowserPlayback(peer as unknown as WebSocket, sandbox.currentQuestionIndex,
+          new AbortController().signal,100);
+        assert.equal(receipt,"played","wrap-up must remain audible and acknowledged on the last valid question");
+      },
+    });
+    await vm.runInContext("handleTransition()",sandbox);
+    assert.equal(sandbox.currentQuestionIndex,count-1);
+    assert.equal(sandbox.awaitingFinalResponse,true);
+    assert.equal(sandbox.isTransitioning,false);
+    assert.equal(events.filter(e=>e.type==="question_change").length,0);
+    assert.equal(events.filter(e=>e.type==="playback_receipt_request").length,1);
+  }));
+});
+
 test("backup actual socket handler holds response.done behind delayed save and emits the tool result", async () => {
   for (const saveOk of [false,true]) {
     const events:Record<string,unknown>[] = [];

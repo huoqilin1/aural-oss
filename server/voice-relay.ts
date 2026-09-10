@@ -2993,9 +2993,10 @@ async function handleBrowserConnection(
       }
 
       await refreshDynamicQuestions();
-      currentQuestionIndex++;
+      const nextQuestionIndex = currentQuestionIndex + 1;
 
-      if (currentQuestionIndex < sortedQuestions.length) {
+      if (nextQuestionIndex < sortedQuestions.length) {
+        currentQuestionIndex = nextQuestionIndex;
         const nextQ = sortedQuestions[currentQuestionIndex];
         const transition = isOprunRecruitmentInterview ? nextQ.text : buildTransitionSayHello(currentQuestionIndex, nextQ, isZh);
 
@@ -3017,6 +3018,9 @@ async function handleBrowserConnection(
           () => speakAndHandle(transition, { trackInTranscript: false }),
         );
       } else {
+        // Wrap-up is still spoken on the last valid question. Advancing past
+        // the list makes the browser discard its audio/playback receipt and
+        // leaves the otherwise completed interview waiting forever.
         if (transcriptSnapshot.length > 0) {
           const lastSummary = await summarizeQuestion(
             currentQ.text,
