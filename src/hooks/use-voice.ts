@@ -1,5 +1,6 @@
 "use client";
 
+import { MicrophonePcmFramer } from "@/lib/voice/capture-pcm";
 import { createLogger } from "@/lib/logger";
 import {
   cleanPeriodArtifacts,
@@ -485,9 +486,11 @@ export function useVoice({
       // Request microphone permission
       await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      // Create AudioContext for playback
+      // Use the native output rate; TTS buffers retain their 24 kHz rate.
+      // Capture has a separate processing-only context below, so speaker
+      // idle/restart clock changes cannot interrupt microphone input.
       if (!audioContextRef.current) {
-        audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+        audioContextRef.current = new AudioContext();
         if (audioContextRef.current.state === "suspended") {
           // resume() can remain pending when an auto-start effect runs after
           // transient browser user activation has expired. Relay connection
@@ -1103,64 +1106,70 @@ export function useVoice({
       });
       mediaStreamRef.current = stream;
 
-      const ctx = new AudioContext({ sampleRate: 16000 });
+      const ctx = new AudioContext();
+      if (ctx.state === "suspended") void ctx.resume().catch(() => {});
       const source = ctx.createMediaStreamSource(stream);
       const processor = ctx.createScriptProcessor(4096, 1, 1);
+      const capture = new MicrophonePcmFramer(ctx.sampleRate);
 
+      // A processing-only sink keeps the microphone graph off the speaker
+      // device clock (which may stop/restart when TTS becomes silent).
+      const sink = ctx.createMediaStreamDestination();
       source.connect(processor);
-      processor.connect(ctx.destination);
+      processor.connect(sink);
 
       processor.onaudioprocess = (event) => {
         if (!isListeningRef.current) return;
         const connector = relayConnectorRef.current;
         if (!connector?.isReady) return;
 
-        const inputData = event.inputBuffer.getChannelData(0);
+        for (const inputData of capture.push(event.inputBuffer.getChannelData(0))) {
 
-        // Compute RMS audio level (float32 range 0..1)
-        let sumSq = 0;
-        for (let i = 0; i < inputData.length; i++) sumSq += inputData[i] * inputData[i];
-        const rms = Math.sqrt(sumSq / inputData.length);
-        if (rms >= ASR_PROCESSING_AUDIO_ACTIVITY_RMS_THRESHOLD) {
-          lastMicActivityAtRef.current = performance.now();
-        }
-        const level = Math.min(1, rms * 5);
-        setState((s) => ({ ...s, audioLevel: level }));
+          // Compute RMS audio level (float32 range 0..1)
+          let sumSq = 0;
+          for (let i = 0; i < inputData.length; i++) sumSq += inputData[i] * inputData[i];
+          const rms = Math.sqrt(sumSq / inputData.length);
+          if (rms >= ASR_PROCESSING_AUDIO_ACTIVITY_RMS_THRESHOLD) {
+            lastMicActivityAtRef.current = performance.now();
+          }
+          const level = Math.min(1, rms * 5);
+          setState((s) => ({ ...s, audioLevel: level }));
 
-        if (performance.now() < micHoldUntilRef.current) {
-          if (rms < BARGE_IN_RMS_THRESHOLD) {
+          if (performance.now() < micHoldUntilRef.current) {
+            if (rms < BARGE_IN_RMS_THRESHOLD) {
+              bargeInFramesRef.current = 0;
+              continue;
+            }
+
+            bargeInFramesRef.current += 1;
+            if (bargeInFramesRef.current < BARGE_IN_FRAME_COUNT) {
+              continue;
+            }
+
+            // Sustained near-field speech should still be able to interrupt TTS.
+            micHoldUntilRef.current = 0;
+          } else {
             bargeInFramesRef.current = 0;
-            return;
           }
 
-          bargeInFramesRef.current += 1;
-          if (bargeInFramesRef.current < BARGE_IN_FRAME_COUNT) {
-            return;
+          // Convert float32 to int16 PCM
+          const pcm = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            pcm[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
           }
 
-          // Sustained near-field speech should still be able to interrupt TTS.
-          micHoldUntilRef.current = 0;
-        } else {
-          bargeInFramesRef.current = 0;
-        }
+          // Send as hex-encoded string
+          const bytes = new Uint8Array(pcm.buffer);
+          let hex = "";
+          for (let i = 0; i < bytes.length; i++) {
+            hex += bytes[i].toString(16).padStart(2, "0");
+          }
 
-        // Convert float32 to int16 PCM
-        const pcm = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcm[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+          connector.sendJson({ type: "audio", data: hex });
         }
-
-        // Send as hex-encoded string
-        const bytes = new Uint8Array(pcm.buffer);
-        let hex = "";
-        for (let i = 0; i < bytes.length; i++) {
-          hex += bytes[i].toString(16).padStart(2, "0");
-        }
-
-        connector.sendJson({ type: "audio", data: hex });
       };
 
-      processorRef.current = { processor, source, ctx };
+      processorRef.current = { processor, source, ctx, sink };
       isListeningRef.current = true;
       setState((s) => ({ ...s, isListening: true, userTranscript: "" }));
     } catch (error) {
@@ -1175,10 +1184,12 @@ export function useVoice({
     isListeningRef.current = false;
 
     if (processorRef.current) {
-      const { processor, source, ctx } = processorRef.current;
+      const { processor, source, ctx, sink } = processorRef.current;
+      processor.onaudioprocess = null;
       processor.disconnect();
       source.disconnect();
-      ctx.close();
+      sink.stream.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+      void ctx.close().catch(() => {});
       processorRef.current = null;
     }
 
