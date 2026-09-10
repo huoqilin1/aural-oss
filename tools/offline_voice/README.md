@@ -36,6 +36,13 @@ Do not turn on the production offline default based on local smoke results.
 
 ## Local sidecar
 
+The relay now retains healthy offline recognition sockets between questions.
+A full configuration packet resets VAD/pending audio and returns an ordered
+`offline_reset_ready` acknowledgement keyed by `user.uid`. The relay waits for
+that acknowledgement before restoring input readiness. Update the sidecar from
+the same immutable commit as the relay before running acceptance. An absent
+acknowledgement is a failure, never permission to silently switch providers.
+
 Install `requirements.txt` in an isolated Python environment. Download models
 from the sherpa-onnx project's documented release assets, then set
 `OFFLINE_VOICE_MODEL_DIR` to their parent directory:

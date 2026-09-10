@@ -5,6 +5,35 @@ import test from 'node:test';
 import WebSocket, { WebSocketServer } from 'ws';
 import { closeAsrSocket } from '../server/close-asr-socket';
 import { waitForAsrSocketOpen } from '../server/asr-socket-open';
+import { resetOfflineAsr } from '../server/offline-asr-reset';
+import {gunzipSync} from 'node:zlib';
+
+test('ten offline connections reset for eight turns without reopening their sockets', async()=>{
+ const server=new WebSocketServer({host:'127.0.0.1',port:0});await once(server,'listening');
+ let connections=0,resets=0;
+ server.on('connection',socket=>{connections++;socket.on('message',data=>{
+   const packet=Buffer.from(data as Buffer);
+   const config=JSON.parse(gunzipSync(packet.subarray(12)).toString());
+   const payload=Buffer.from(JSON.stringify({reqid:config.user.uid,code:0,message:'offline_reset_ready'}));
+   const length=Buffer.alloc(4);length.writeUInt32BE(payload.length);
+   setTimeout(()=>{resets++;socket.send(Buffer.concat([Buffer.from([0x11,0x90,0x10,0]),length,payload]));},5);
+ });});
+ const sockets=Array.from({length:10},()=>new WebSocket(`ws://127.0.0.1:${(server.address() as {port:number}).port}`));
+ try{
+  await Promise.all(sockets.map(socket=>waitForAsrSocketOpen(socket)));
+  await Promise.all(sockets.map(async socket=>{for(let turn=0;turn<8;turn++)await resetOfflineAsr(socket);}));
+  assert.equal(connections,10);assert.equal(resets,80);
+  assert.ok(sockets.every(socket=>socket.listenerCount('message')===0));
+ }finally{for(const socket of sockets)socket.terminate();server.close();}
+});
+
+test('an offline reset never reports readiness when the recognizer does not acknowledge',async()=>{
+ const server=new WebSocketServer({host:'127.0.0.1',port:0});await once(server,'listening');
+ const socket=new WebSocket(`ws://127.0.0.1:${(server.address() as {port:number}).port}`);
+ try{await waitForAsrSocketOpen(socket);await assert.rejects(resetOfflineAsr(socket,25),/reset timeout/);
+ assert.equal(socket.listenerCount('message'),0);
+ }finally{socket.terminate();server.close();}
+});
 
 test('retiring ten CONNECTING ASR sockets handles deferred errors without process failure', async () => {
   const server = createServer();

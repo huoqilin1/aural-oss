@@ -9,7 +9,7 @@ import { shouldBlockRecruitmentCompletion } from "../src/lib/voice/completion-au
 import { createAnswerCommitGate } from "../server/answer-commit-gate";
 import { createAsrInitialConnectQueue } from "../server/asr-initial-connect-queue";
 import { speakWithBackgroundSummary } from "../server/question-summary-transition";
-import { shouldWaitForQuestionExpansion } from "../src/lib/voice/dynamic-question-sync";
+import { shouldWaitForQuestionExpansion,mergeExpandedQuestionSet,LiveQuestionIdLookup,isProgressiveOpeningOnly } from "../src/lib/voice/dynamic-question-sync";
 import { waitForBrowserPlayback } from "../server/browser-playback-receipt";
 import { EventEmitter } from "node:events";
 import type { WebSocket } from "ws";
@@ -1080,4 +1080,37 @@ test("ten interrupted response cycles retain their model ownership and queue the
     assert.equal(sandbox.queuedUserUtteranceWhileGenerating,'这是新的模拟补充回答。');
     assert.deepEqual(messages,[{type:"interrupt"}]);
   }
+});
+
+test('actual relay expansion carries immutable IDs to the original browser callback',()=>{
+ const rows=Array.from({length:8},(_,order)=>({id:`q${order}`,order,text:`模拟问题${order}`,type:'OPEN_ENDED'}));
+ const events:Array<{questionIds:unknown}>=[];
+ const sandbox=relayFunctions('voice-relay.ts',['normalizeDynamicQuestions','applyDynamicQuestionSet'],{
+  sortedQuestions:rows.slice(0,2),currentQuestionIndex:1,mergeExpandedQuestionSet,isProgressiveOpeningOnly,
+  browserWs:{readyState:1,send:(s:string)=>events.push(JSON.parse(s))},WebSocket:{OPEN:1},log:{info:()=>{},warn:()=>{}}
+ });
+ sandbox.rows=rows;assert.equal(vm.runInContext("applyDynamicQuestionSet(rows,'database')",sandbox),true);
+ const lookup=new LiveQuestionIdLookup(rows.slice(0,2));lookup.updateFromRelay(events[0].questionIds);
+ lookup.update(rows.slice(0,2));
+ assert.deepEqual(rows.map((_,i)=>lookup.idAt(i)),rows.map(r=>r.id));
+});
+
+test('actual offline relay retains ten sockets across eight question transitions',async()=>{
+ for(let session=0;session<10;session++){
+  let resets=0;
+  const socket={readyState:1,send:()=>{}};
+  const sandbox=relayFunctions('voice-relay.ts',['disconnectAsr','connectAsrUngated'],{
+   voiceRoute:{provider:'offline'},asrWs:socket,WebSocket:{OPEN:1},interviewDone:false,
+   browserWs:{readyState:1},asrIntentionalClose:false,asrAudioSeq:1,keepAliveInterval:null,
+   asrSessionFirstSpeechAt:0,clearPendingAsrFinal:()=>{},clearHeldBargeInInterim:()=>{},
+   buildBigModelAudioRequest:()=>Buffer.alloc(0),Buffer,log:{info:()=>{}},armSilenceAutoSkip:()=>{},
+   closeAsrSocket:()=>{throw new Error('healthy offline connection was unnecessarily closed');},
+   resetOfflineAsr:async(s:unknown)=>{assert.equal(s,socket);resets++;},
+  });
+  for(let turn=0;turn<8;turn++){
+   vm.runInContext('disconnectAsr()',sandbox);assert.equal(sandbox.asrAlive,false);
+   await vm.runInContext('connectAsrUngated()',sandbox);assert.equal(sandbox.asrAlive,true);
+  }
+  assert.equal(resets,8);
+ }
 });

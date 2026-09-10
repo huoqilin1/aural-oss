@@ -388,7 +388,7 @@ async function callOpenAICompatible(
   // Report assembly must return structured final content within its transport
   // deadline. HR's three separately configured reasoning stages are unaffected.
   // Live conversational acknowledgement uses the fast route. Keep reasoning
-  // for question preparation and HR's separately configured analysis stages.
+  // for HR's separately configured analysis stages.
   if (options?.realtime && !options?.deep && endpoint.provider === "zhipu") {
     reqBody.thinking = { type: "disabled" };
   }
@@ -397,9 +397,12 @@ async function callOpenAICompatible(
     reqBody.thinking = { type: "disabled" };
   }
   // Questions are parsed and anchor-validated as JSON too. Constrain the
-  // transport format without changing their reasoning or relaxing validation.
+  // transport format. Anchored wording is latency-sensitive; the HR resume
+  // parser, resume scoring and four-dimension evaluation retain their own
+  // enabled reasoning configuration and every question still passes validation.
   if (options?.jsonQuestions && endpoint.provider === "zhipu") {
     reqBody.response_format = { type: "json_object" };
+    reqBody.thinking = { type: "disabled" };
   }
   const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
     method: "POST",

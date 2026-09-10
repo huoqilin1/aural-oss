@@ -88,7 +88,7 @@ afterEach(() => {
   relayLlm.resetRelayLlmCacheForTests();
 });
 
-test("GLM questions and reports request JSON while question reasoning stays unchanged", async () => {
+test("GLM questions and live turns use fast generation while background analysis stays unchanged", async () => {
   const root = await mkdtemp(join(tmpdir(), "glm-report-format-"));
   const originalFetch = globalThis.fetch;
   const bodies: Record<string, unknown>[] = [];
@@ -120,7 +120,7 @@ test("GLM questions and reports request JSON while question reasoning stays unch
         assert.deepEqual(body.thinking, { type: "disabled" });
       }
       assert.equal(bodies.length, 3);
-      assert.equal(bodies[2].thinking, undefined);
+      assert.deepEqual(bodies[2].thinking, { type: "disabled" });
       assert.deepEqual(bodies[2].response_format, { type: "json_object" });
       await relayLlm.callRelayLLM("Synthetic realtime reply", undefined, { stage: "interview-turn" }, { primary: "zhipu", fallbacks: [] });
       await relayLlm.callRelayLLM("Synthetic background summary", undefined, { stage: "q-summary" }, { primary: "zhipu", fallbacks: [] });

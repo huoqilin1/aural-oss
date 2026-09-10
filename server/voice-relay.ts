@@ -100,6 +100,7 @@ import { createAnswerCommitGate } from "./answer-commit-gate";
 import { loadInterviewRelayLlmRoute } from "./interview-llm-route";
 import { loadVoiceRoute, offlineVoiceEndpoint, synthesizeOffline } from './voice-provider-route';
 import { closeAsrSocket } from './close-asr-socket';
+import { resetOfflineAsr } from './offline-asr-reset';
 
 const log = createLogger("voice-relay");
 
@@ -1540,6 +1541,7 @@ async function handleBrowserConnection(
     return rows.map((row) => {
       const item = row as Record<string, unknown>;
       return {
+        id: typeof item.id === "string" ? item.id : undefined,
         text: String(item.text || ""),
         type: String(item.type || "OPEN_ENDED"),
         description: typeof item.description === "string" ? item.description : null,
@@ -1569,6 +1571,7 @@ async function handleBrowserConnection(
       browserWs.send(JSON.stringify({
         type: "question_count_update",
         totalQuestions: sortedQuestions.length,
+        questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
       }));
     }
     log.info(`Dynamic questions refreshed from ${source}: total=${sortedQuestions.length}`);
@@ -1595,7 +1598,7 @@ async function handleBrowserConnection(
     try {
       const { data, error } = await dynamicQuestionClient
         .from("questions")
-        .select("text,type,description,options,timeLimitSeconds,order")
+        .select("id,text,type,description,options,timeLimitSeconds,order")
         .eq("interviewId", ctx.interviewId)
         .order("order", { ascending: true });
       if (error) {
@@ -3009,6 +3012,7 @@ async function handleBrowserConnection(
         browserWs.send(
           JSON.stringify({
             type: "question_change",
+            questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
             questionIndex: currentQuestionIndex,
             totalQuestions: sortedQuestions.length,
             auto,
@@ -3123,6 +3127,7 @@ async function handleBrowserConnection(
       browserWs.send(
         JSON.stringify({
           type: "question_change",
+          questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
           questionIndex: currentQuestionIndex,
           totalQuestions: sortedQuestions.length,
           auto: false,
@@ -3512,10 +3517,12 @@ async function handleBrowserConnection(
         asrWs.send(buildBigModelAudioRequest(Buffer.alloc(0), asrAudioSeq, true));
       } catch { /* ignore */ }
     }
-    if (asrWs) {
+    const retainOfflineSocket = voiceRoute.provider === 'offline'
+      && asrWs?.readyState === WebSocket.OPEN && !interviewDone;
+    if (asrWs && !retainOfflineSocket) {
       closeAsrSocket(asrWs);
     }
-    asrWs = null;
+    if (!retainOfflineSocket) asrWs = null;
     asrAlive = false;
     asrAccumulator = "";
     asrSessionFirstSpeechAt = 0;
@@ -3868,6 +3875,24 @@ async function handleBrowserConnection(
 
   async function connectAsrUngated() {
     asrIntentionalClose = false;
+    if (voiceRoute.provider === 'offline' && asrWs?.readyState === WebSocket.OPEN) {
+      const retained = asrWs;
+      asrAlive = false;
+      try {
+        await resetOfflineAsr(retained);
+      } catch (error) {
+        closeAsrSocket(retained);
+        if (asrWs === retained) asrWs = null;
+        throw error;
+      }
+      if (asrWs !== retained || interviewDone || browserWs.readyState !== WebSocket.OPEN) {
+        throw new Error('ASR connection superseded');
+      }
+      asrAudioSeq = 1;
+      asrAlive = true;
+      armSilenceAutoSkip();
+      return;
+    }
     const reqid = randomUUID().replace(/-/g, "");
     asrAudioSeq = 1;
 
@@ -3923,6 +3948,7 @@ async function handleBrowserConnection(
     const connectedAsrWs = asrWs;
     asrWs.on("message", (data: Buffer) => {
       if (asrWs !== connectedAsrWs) return;
+      if (voiceRoute.provider === 'offline' && !asrAlive) return;
       try {
         const resp = parseAsrResponse(Buffer.from(data));
 
@@ -4207,6 +4233,7 @@ async function handleBrowserConnection(
     browserWs.send(
       JSON.stringify({
         type: "question_change",
+        questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
         questionIndex: currentQuestionIndex,
         totalQuestions: sortedQuestions.length,
       })

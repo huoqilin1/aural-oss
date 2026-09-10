@@ -906,6 +906,7 @@ export function useVoice({
           break;
 
         case "question_change": {
+          questionIdLookupRef.current?.updateFromRelay(msg.questionIds);
           // A new question owns a new audio/transcript cycle. The relay has
           // finished the bridge before this event; no old playback may bleed in.
           clearAsrProcessingTimer();
@@ -938,6 +939,7 @@ export function useVoice({
         }
 
         case "question_count_update": {
+          questionIdLookupRef.current?.updateFromRelay(msg.questionIds);
           const total = Number(msg.totalQuestions || 0);
           if (total > 0) {
             setState((s) => ({ ...s, totalQuestions: Math.max(s.totalQuestions, total) }));

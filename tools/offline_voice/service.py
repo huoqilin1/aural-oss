@@ -134,10 +134,18 @@ async def recognition(request):
                 if len(payload)>1024*1024:
                     raise ValueError('audio_packet_too_large')
             if kind==1:
-                audio=json.loads(payload)['audio']
+                config=json.loads(payload)
+                audio=config['audio']
                 if any(audio.get(k)!=v for k,v in [('rate',16000),('bits',16),('channels',1)]):
                     raise ValueError('unsupported_audio_format')
+                # Ordered processing ensures prior inference has settled before
+                # acknowledging reset. Reuse the VAD and transport across turns.
+                vad.reset()
+                pending=np.empty(0,dtype=np.float32)
                 initialized=True
+                ack=json.dumps({'reqid':config.get('user',{}).get('uid'),
+                    'code':0,'message':'offline_reset_ready'}).encode()
+                await ws.send_bytes(bytes([0x11,0x90,0x10,0])+struct.pack('>I',len(ack))+ack)
                 continue
             if kind!=2 or not initialized or len(payload)%2:
                 raise ValueError('invalid_audio_sequence')
