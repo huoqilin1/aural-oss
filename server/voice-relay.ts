@@ -3158,6 +3158,15 @@ async function handleBrowserConnection(
         break;
       }
     }
+    // A response can wait longer than the recent-final TTL in the model queue.
+    // The exact unanswered turn is still pending regardless of wall time.
+    // Do not apply fuzzy matching here: additions/corrections need processing,
+    // and the same words after an assistant reply can be a genuine new answer.
+    if (lastUserIdx >= 0 && lastUserIdx === questionTranscript.length - 1
+      && (generatingResponse || suppressAsrResults)
+      && key === normalizeUserUtteranceKey(questionTranscript[lastUserIdx].text)) {
+      return true;
+    }
     if (lastUserIdx >= 0 && lastUserIdx !== questionTranscript.length - 1) {
       const hasAssistantAfter = questionTranscript.slice(lastUserIdx + 1).some(e => e.role === "assistant");
 

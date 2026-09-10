@@ -32,7 +32,12 @@ function stripRecruitAnchorBullet(value: string): string {
 
 export function safeRecruitAnchorLines(value: string): string[] {
   const seen = new Set<string>();
-  return value
+  // HR wraps source paragraphs with a fact index and a policy header. The
+  // header is guidance, never a candidate claim; only indexed rows are source.
+  const source = value.trimStart().startsWith("简历原文事实索引（自述，未经外部核实）；")
+    ? value.split(/\r?\n/).filter(line => /^\[fact-[a-f0-9]+\|(?:project-[a-f0-9]+|unassigned)\]\s/.test(line)).join("\n")
+    : value;
+  return source
     .split(/[\r\n。；;]+/)
     .map(stripRecruitAnchorBullet)
     .map(completeRecruitAnchor)

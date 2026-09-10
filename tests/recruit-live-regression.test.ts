@@ -20,6 +20,35 @@ import { recruitmentInteractionReply } from "../src/lib/voice/recruitment-qualit
 import { companyKnowledgeVersion } from "../src/lib/recruitment-company-knowledge";
 import { readRecruitmentRealtimeDecision, recruitmentRealtimeSpeechRequest } from "../src/lib/voice/recruitment-realtime-decision";
 
+test("an identical pending ASR final remains a replay after the recent-history TTL expires", () => {
+  const answer = "我负责核对数据和验收，不负责销售签约。";
+  const sandbox = relayFunctions("voice-relay.ts", ["isDuplicateUserFinal", "normalizeUserUtteranceKey", "shouldSuppressRecentUserFinalReplay"], {
+    recruitmentControlKey:()=>"", consumedRecruitmentControlKey:"",
+    questionTranscript:[{role:"user",text:answer}],
+    generatingResponse:true, suppressAsrResults:true, isTransitioning:false, ttsSpeaking:false,
+    recentAcceptedUserFinals:[{text:answer,at:Date.now()-120_000,questionIndex:0}],
+    currentQuestionIndex:0, ASR_RECENT_FINAL_REPLAY_TTL_MS:90_000,
+    ASR_RECENT_FINAL_REPLAY_MIN_UNITS:8, shouldSuppressRecentAsrFinal,
+    shouldSuppressAnsweredAsrFinal, lastAssistantMessageWallClockMs:100,
+    lastListeningAudioActivityAt:200,
+  });
+  sandbox.incoming=answer;
+  assert.equal(vm.runInContext("isDuplicateUserFinal(incoming)",sandbox),true,
+    "model queue time must not turn the identical pending answer into another model request");
+  sandbox.incoming=answer+"补充一下，我还负责了故障复盘。";
+  assert.equal(vm.runInContext("isDuplicateUserFinal(incoming)",sandbox),false,
+    "new evidence must remain available");
+  sandbox.incoming="更正，我负责销售签约。";
+  assert.equal(vm.runInContext("isDuplicateUserFinal(incoming)",sandbox),false);
+  sandbox.questionTranscript.push({role:"assistant",text:"请确认你的职责。"});
+  sandbox.generatingResponse=false;sandbox.suppressAsrResults=false;sandbox.incoming=answer;
+  assert.equal(vm.runInContext("isDuplicateUserFinal(incoming)",sandbox),false,
+    "a fresh answer after the interviewer speaks is a new turn");
+  sandbox.questionTranscript=[{role:"assistant",text:"下一题"}];
+  sandbox.generatingResponse=true;sandbox.suppressAsrResults=true;
+  assert.equal(vm.runInContext("isDuplicateUserFinal(incoming)",sandbox),false);
+});
+
 test("actual recruitment question context bypasses the model but keeps its source answer", async () => {
   let calls = 0;
   const sandbox = relayFunctions("voice-relay.ts", ["summarizeQuestion"], {

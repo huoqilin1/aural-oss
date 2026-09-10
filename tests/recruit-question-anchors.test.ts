@@ -16,6 +16,17 @@ import {
   renderRecruitQuestionAnchorReferences,
 } from "../src/lib/recruit-question-anchors";
 
+test("HR fact-index instructions never become quoted resume evidence", () => {
+  const header = "简历原文事实索引（自述，未经外部核实）；共2条，选入2条，未纳入0条。材料缺失不等于没有经历；项目不可合并；不得把团队成果、计划或否定改写为本人已完成。";
+  const facts = ["负责合同台账与材料核验，无签署权限", "资料退回率由20%降到8%，按月度提交合同统计"];
+  const indexed = `${header}\n[fact-abcdef|project-123abc] ${facts[0]}\n[fact-123abc|unassigned] ${facts[1]}`;
+  assert.deepEqual(safeRecruitAnchorLines(indexed), facts);
+  const chosen = selectRecruitAnchor(indexed, ["成果", "提升", "降低", "增长", "指标", "完成", "%"]);
+  assert.equal(chosen, facts[1]);
+  assert.deepEqual(safeRecruitAnchorLines(header), [], "missing source rows must fail closed");
+  assert.deepEqual(safeRecruitAnchorLines(facts.join("\n")), facts, "legacy raw resumes remain supported");
+});
+
 test("job anchors prefer responsibilities over unrelated numeric experience requirements", () => {
   const job="拓展地方政府客户、推进合同落地\n3-5年商务/BD经验";
   assert.equal(selectRecruitAnchor(job,["工具","技术"],false),"拓展地方政府客户、推进合同落地");
