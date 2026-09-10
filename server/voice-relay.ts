@@ -97,6 +97,7 @@ import { SessionConnectionRegistry } from "./session-connection-registry";
 import { publishVoiceOnline } from "./voice-online-state";
 import { createAnswerCommitGate } from "./answer-commit-gate";
 import { loadInterviewRelayLlmRoute } from "./interview-llm-route";
+import { loadVoiceRoute, offlineVoiceEndpoint, synthesizeOffline } from './voice-provider-route';
 
 const log = createLogger("voice-relay");
 
@@ -1308,6 +1309,7 @@ async function handleBrowserConnection(
   ctx: InterviewContext,
   llmRoute?: RelayLlmRoute,
 ) {
+  const voiceRoute = await loadVoiceRoute(dynamicQuestionClient, ctx.interviewId);
   // ── 服务端收尾登记:本连接活跃时持续摸时间,关页后由宽限/硬限兜底 ──
   const ctxSessionId = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
   const connectionClaim = ctxSessionId
@@ -2141,7 +2143,10 @@ async function handleBrowserConnection(
       let ok = false;
       let audioBytes = 0;
       try {
-        for await (const event of synthesizeSpeech(text, auth, ttsOpts, abortController.signal)) {
+        const speech = voiceRoute.provider === 'offline'
+          ? synthesizeOffline(text, abortController.signal)
+          : synthesizeSpeech(text, auth, ttsOpts, abortController.signal);
+        for await (const event of speech) {
           if (abortController.signal.aborted) break;
           if (browserWs.readyState !== WebSocket.OPEN) break;
 
@@ -3879,7 +3884,9 @@ async function handleBrowserConnection(
       ASR_APP_ID, ASR_ACCESS_TOKEN, reqid, ASR_RESOURCE_ID,
       ASR_API_KEY || undefined,
     );
-    asrWs = new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
+    asrWs = voiceRoute.provider === 'offline'
+      ? new WebSocket(offlineVoiceEndpoint('asr'))
+      : new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
 
     await new Promise<void>((resolve, reject) => {
       const t = setTimeout(() => reject(new Error("ASR connect timeout")), 10000);

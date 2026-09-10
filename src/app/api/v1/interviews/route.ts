@@ -9,6 +9,7 @@ import {
   parseRelayLlmRoute,
 } from "@/lib/relay-llm-route";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { selectVoiceRoute } from '../../../../../server/voice-provider-route';
 
 export async function GET(request: Request) {
   const auth = await validateApiKey(request);
@@ -118,6 +119,10 @@ export async function POST(request: Request) {
   }
 
   const projectId = auth.projectIds[0]!;
+  if (body.voiceTest !== undefined && typeof body.voiceTest !== 'boolean') {
+    return apiError('BAD_REQUEST', 'voiceTest must be boolean', 400);
+  }
+  const voiceRoute = selectVoiceRoute(body.voiceTest === true);
 
   const chatEnabled = typeof body.chatEnabled === "boolean" ? body.chatEnabled : true;
   const voiceEnabled = typeof body.voiceEnabled === "boolean" ? body.voiceEnabled : false;
@@ -168,9 +173,9 @@ export async function POST(request: Request) {
       ? {
           llmProvider: relayLlmRoute.primary,
           llmModel: relayLlmProviderModel(relayLlmRoute.primary),
-          customBranding: { oprunRelayLlmRoute: relayLlmRoute },
         }
       : {}),
+    customBranding: { ...(relayLlmRoute ? {oprunRelayLlmRoute:relayLlmRoute} : {}), oprunVoiceRoute:voiceRoute },
   };
 
   const { data: interview, error } = await supabaseAdmin
