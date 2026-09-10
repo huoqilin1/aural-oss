@@ -2,6 +2,7 @@ import { generateVoiceSummary } from "@/lib/ai/voice-summary";
 import { createLogger } from "@/lib/logger";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
+import { hasRecruitmentAnswer } from "../../../../../server/voice-relay-helpers";
 import {
   handleVoiceSave,
   orderedVoiceMessageTimestamp,
@@ -90,13 +91,14 @@ const voiceSaveOps: VoiceSaveOps = {
   async loadAnsweredQuestionIds(sessionId) {
     const result = await supabaseAdmin
       .from("messages")
-      .select("questionId")
+      .select("questionId,content")
       .eq("sessionId", sessionId)
       .eq("role", "USER")
       .not("questionId", "is", null);
 
     const data = requireVoiceStorageResult("load answered question ids", result);
     return (data ?? [])
+      .filter(row => hasRecruitmentAnswer(String(row.content || "")))
       .map((row) => row.questionId as string | null)
       .filter((questionId): questionId is string => Boolean(questionId));
   },

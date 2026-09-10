@@ -4,6 +4,7 @@ import type { LLMMessage } from "@/lib/ai/types";
 import { createLogger } from "@/lib/logger";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
+import { respondToRecruitmentChat } from "@/lib/ai/recruitment-chat";
 
 const log = createLogger("api/ai/chat");
 
@@ -29,8 +30,9 @@ export async function POST(req: Request) {
       );
     }
 
-    const provider = getProvider(interview.llmProvider);
-
+    if (interview.title.includes("数君招聘")) {
+      return NextResponse.json(await respondToRecruitmentChat(interview, sessionId));
+    }
     const conversationHistory: LLMMessage[] = (messages ?? [])
       .filter(
         (m: { role?: string; content?: string }) =>
@@ -40,6 +42,8 @@ export async function POST(req: Request) {
         role: m.role as "user" | "assistant",
         content: m.content.trim(),
       }));
+
+    const provider = getProvider(interview.llmProvider);
 
     const promptMessages = buildInterviewerPrompt({
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

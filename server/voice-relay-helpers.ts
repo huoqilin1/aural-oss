@@ -1,4 +1,5 @@
 import { recruitmentAnswerContent, recruitmentSpeechIntent, recruitmentControlOnly } from "../src/lib/voice/recruitment-turn-policy";
+import { recruitmentUtterance, recruitmentEvidenceText } from "../src/lib/voice/recruitment-quality";
 
 // Strong: self-referencing commands unlikely to appear as topic descriptions.
 const STRONG_END_PATTERNS = [
@@ -170,6 +171,8 @@ export function isUserSkipRequest(text: string, context?: { isRecruitmentIntervi
  * both voice relays enforce the same human-like behavior.
  */
 export function isRecruitmentConversationControl(text: string): boolean {
+  const turn = recruitmentUtterance(text);
+  if (["company_question", "mixed", "clarification", "answer_request", "correction"].includes(turn.kind)) return true;
   const normalized = text.trim().replace(/\s+/g, " ");
   if (!normalized || normalized.length > 80) return false;
 
@@ -181,6 +184,7 @@ export function isRecruitmentConversationControl(text: string): boolean {
   if (answerSignals.some((pattern) => pattern.test(normalized))) return false;
 
   const controlSignals = [
+    /^(?:好的|好|明白了|知道了|了解了|谢谢|谢谢你|嗯|嗯嗯|ok|okay|thanks)[！!。,.，\s]*$/i,
     /^(?:你好|您好|喂|哈[喽啰罗]|hello|hi|hey)[！!。,.，\s]*$/i,
     /(?:听得到|能听到|听得见|能听见|声音正常|声音清楚|麦克风正常|can you hear me|do you hear me|is my (?:audio|microphone|mic) working)/i,
     /(?:请|麻烦)?(?:再说|重复)(?:一遍|一下)?|(?:没|没有|未)(?:听清|听到)|听不清|刚才.{0,8}(?:没听清|没听到)|(?:please )?(?:repeat|say that again)|(?:didn't|did not|couldn't|could not) hear/i,
@@ -190,7 +194,8 @@ export function isRecruitmentConversationControl(text: string): boolean {
 
 export function hasRecruitmentAnswer(text: string): boolean {
   if (recruitmentControlOnly(text)) return false;
-  const content = recruitmentAnswerContent(text);
+  const content = recruitmentEvidenceText(recruitmentAnswerContent(text));
+  if (recruitmentUtterance(content).kind === "correction") return /负责|参与|设计|实施|验证|主导|交付/.test(content);
   return Boolean(content) && !isRecruitmentConversationControl(content)
     && !isUserEndRequest(content, { isRecruitmentInterview: true })
       && !isUserSkipRequest(content, { isRecruitmentInterview: true });
@@ -367,7 +372,7 @@ export function summarizeRecruitmentResumeBudget(
         state.followUpAnswered = true;
         state.awaitingFollowUpAnswer = false;
       }
-      state.lastUserWasControl = false;
+      state.lastUserWasControl = isRecruitmentConversationControl(content);
       states.set(questionIndex, state);
       continue;
     }
@@ -432,12 +437,13 @@ export function recruitmentMetricEvidenceFollowUp(
   isZh: boolean,
 ): string | null {
   if (questionIndex !== 3) return null;
-  const hasMetric = /(?:\d+(?:\.\d+)?\s*%|百分之\s*[一二三四五六七八九十百\d]+|\d+(?:\.\d+)?\s*(?:倍|条|人|次|万元|元|天|小时))/i.test(answer);
+  const metric = answer.match(/(?:\d+(?:\.\d+)?\s*%|百分之\s*[一二三四五六七八九十百\d]+|\d+(?:\.\d+)?\s*(?:倍|条|人|次|万元|元|天|小时))/i);
   const hasEvidenceGap = /(?:无法|不能|没有|未保留|拿不出|不清楚|记不清|估算|大概|不是.{0,8}(?:独立|第三方)|no\s+(?:raw|source|sample)|cannot\s+(?:provide|verify)|estimate)/i.test(answer);
-  if (!hasMetric || !hasEvidenceGap) return null;
+  const hasDefinition = /统计口径|分母|基准|同比|环比|核对了|样本|按.{1,20}(?:计算|统计)|denominator|baseline|sample/i.test(answer);
+  if (!metric || (!hasEvidenceGap && hasDefinition)) return null;
   return isZh
-    ? "为了确认这项数据的口径，请只补充它对应的具体时间范围和样本量；如果确实无法确认，也请明确说明这项数据应标为待核实。"
-    : "To verify the metric definition, please give only its exact time window and sample size; if those cannot be confirmed, say clearly that the claim should remain unverified.";
+    ? `你刚才提到“${metric[0]}”，它具体采用什么统计口径？不需要提供保密数字。`
+    : `You mentioned “${metric[0]}”; how was it defined? You do not need to disclose confidential figures.`;
 }
 
 export function responseInvitesUserReply(text: string, isZh: boolean): boolean {

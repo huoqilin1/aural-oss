@@ -24,6 +24,7 @@ export function renderRecruitQuestionAnchorReferences(
 
 function stripRecruitAnchorBullet(value: string): string {
   return value
+    .replace(/^\[fact-[a-f0-9]+\|(?:project-[a-f0-9]+|unassigned)\]\s*/gm, "")
     .replace(/^[\s\-–—•·*#>]+/, "")
     .replace(/^\d+[.、）)]\s*/, "")
     .trim();
@@ -108,7 +109,21 @@ export function recruitQuestionAnchorFailure(
   if (!questionReferencesRecruitAnchor(question, anchors.resume)) return "question_resume_anchor_missing";
   if (!questionReferencesRecruitAnchor(question, anchors.job)) return "question_job_anchor_missing";
   if (!recruitQuestionFitsRoleType(question, isTechnicalRole)) return "question_role_mismatch";
+  if (recruitAnchorScenarioDifference(anchors.resume, anchors.job)
+    && !/场景.{0,10}(?:不同|差异|区别)|(?:不同|差异).{0,10}场景|迁移|尚未体现|未体现|不一定相同/.test(question)) return "question_scenario_boundary_missing";
   return null;
+}
+
+/** This detects explicit differences only; a lexical match never proves direct experience. */
+export function recruitAnchorScenarioDifference(resume: string, job: string): boolean {
+  const domains = [
+    /电商|店铺|消费者|买家/i,
+    /企业客户|企业软件|SaaS|B端/i,
+    /政府|政务|工信/i,
+  ];
+  const left = domains.flatMap((domain, i) => domain.test(resume) ? [i] : []);
+  const right = domains.flatMap((domain, i) => domain.test(job) ? [i] : []);
+  return Boolean(left.length && right.length && !left.some(i => right.includes(i)));
 }
 
 export function questionReferencesRecruitAnchor(question: string, anchor: string): boolean {

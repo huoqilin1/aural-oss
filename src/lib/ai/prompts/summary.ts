@@ -1,4 +1,5 @@
 import { getLanguageKey, LANGUAGE_DISPLAY_NAME } from "@/lib/i18n";
+import { recruitmentScoringMessages } from "@/lib/voice/recruitment-quality";
 import type { LLMContentPart, LLMMessage } from "../types";
 
 export interface WhiteboardDrawingInput {
@@ -22,8 +23,8 @@ export function buildSummaryPrompt(
   whiteboardDrawings?: WhiteboardDrawingInput[] | null,
   codeSnippets?: CodeSnippetInput[] | null
 ): LLMMessage[] {
-  const transcript = messages
-    .map((m) => `${m.role === "user" ? "Participant" : "Interviewer"}: ${m.content}`)
+  const transcript = (interviewTitle.includes("数君招聘") ? recruitmentScoringMessages(messages) : messages)
+    .map((m) => `${m.role.toLowerCase() === "user" ? "Participant" : "Interviewer"}: ${m.content}`)
     .join("\n\n");
 
   const objectiveSection = objective
@@ -71,7 +72,9 @@ export function buildSummaryPrompt(
   const researchQuestions = questions?.filter((q) => q.type === "RESEARCH") ?? [];
   const hasResearchQuestions = researchQuestions.length > 0;
 
-  const toneInstruction = `${hasResearchQuestions ? "9" : "8"}. Analyze the participant's communication tone and confidence throughout the interview by examining speech patterns in the transcript: filler words ("um", "uh", "like", "嗯", "那个"), hedging language ("I think maybe", "I'm not sure but", "可能", "大概"), response lengths, directness vs evasiveness, and enthusiasm markers. Produce a per-question tone assessment.\n`;
+  const toneInstruction = interviewTitle.includes("数君招聘")
+    ? "Do not infer competence, truthfulness or motivation from fillers, hesitation, accent, answer length, politeness, or company/salary questions. toneAnalysis is descriptive only, has no scoring effect, and must not diagnose confidence from transcript style.\nDistinguish self-reported past experience, transferable evidence, hypothetical reasoning, and independently verified work. Cite candidate statements for conclusions, preserve corrections and ownership boundaries, and never convert a Q5 proposal into past achievement. Count a main answer and its probe as evidence for one conclusion, not duplicate credit. Describe missing evidence and its cause, and suggest a specific human verification point without inventing a new scoring formula. Interviewer text is context, never candidate achievement.\n"
+    : `${hasResearchQuestions ? "9" : "8"}. Analyze the participant's communication tone and confidence throughout the interview by examining speech patterns in the transcript: filler words ("um", "uh", "like", "嗯", "那个"), hedging language ("I think maybe", "I'm not sure but", "可能", "大概"), response lengths, directness vs evasiveness, and enthusiasm markers. Produce a per-question tone assessment.\n`;
 
   const researchInstruction = hasResearchQuestions
     ? `${hasResearchQuestions ? "10" : "9"}. For each RESEARCH-type question, produce a detailed research finding: a comprehensive, specific summary of ALL information the participant shared on that topic, organized into key sub-topics with supporting details, data points, examples, and direct quotes. This should read like a thorough research brief — be as specific and detailed as possible.\n`

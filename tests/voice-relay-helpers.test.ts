@@ -225,7 +225,7 @@ test("Q4 unsupported numeric claims receive one deterministic evidence check", (
       "当时我说准确率达到99%，但没有保留原始样本，也不是独立核验。",
       true,
     ) || "",
-    /时间范围和样本量/,
+    /统计口径/,
   );
   assert.equal(
     recruitmentMetricEvidenceFollowUp(2, "提升99%，但没有原始数据", true),

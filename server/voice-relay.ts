@@ -67,6 +67,9 @@ import {
     type RecentAsrFinal,
 } from "./voice-relay-helpers";
 import { PROMPTS, SPOKEN } from "./voice-relay-prompts";
+import { recruitmentInteractionReply, rememberRecruitmentInteraction } from "../src/lib/voice/recruitment-quality";
+import { recruitmentDecisionSpeech } from "../src/lib/voice/recruitment-decision";
+import { companyKnowledgeVersion, pinCompanyKnowledge } from "../src/lib/recruitment-company-knowledge";
 import {
     BIGMODEL_ASR_URL,
     buildBigModelAudioRequest,
@@ -1686,7 +1689,7 @@ async function handleBrowserConnection(
       .eq("id", ctx.sessionId)
       .single();
     if (!sessionError) {
-      recruitmentParticipantMetadata = sessionData?.participantMetadata ?? null;
+      recruitmentParticipantMetadata = pinCompanyKnowledge(sessionData?.participantMetadata);
       recruitmentParticipantMetadataLoaded = true;
     } else {
       log.warn(`Recruitment follow-up metadata hydration failed: ${sessionError.message}`);
@@ -1728,6 +1731,7 @@ async function handleBrowserConnection(
     );
     if (
       !persistedBudget
+      || !(sessionData?.participantMetadata as Record<string,unknown>|null)?.recruitmentCompanyKnowledgeVersion
       || persistedBudget.inlineFollowUpsUsed < recruitmentInlineFollowUpsUsed
       || persistedBudget.finalFollowUpsUsed < recruitmentFinalFollowUpsUsed
     ) {
@@ -2486,6 +2490,14 @@ async function handleBrowserConnection(
     const currentQ = sortedQuestions[currentQuestionIndex];
     const history = PROMPTS.formatHistory(questionTranscript, isZh);
     const latestAnsweredExchange = getLatestAnsweredExchange();
+    const interactionReply = isOprunRecruitmentInterview && latestAnsweredExchange?.participant
+      ? recruitmentInteractionReply(latestAnsweredExchange.participant, ctx.title, new Date(),
+          recruitmentParticipantMetadataLoaded ? companyKnowledgeVersion(recruitmentParticipantMetadata) : "") : null;
+    if (interactionReply) {
+      recruitmentParticipantMetadata=rememberRecruitmentInteraction(recruitmentParticipantMetadata,currentQ?.id||"",interactionReply);
+      await persistRecruitmentFollowUpBudget();
+      return isCurrentResponse()?interactionReply.text:"";
+    }
     const isRecruitmentControlTurn = Boolean(
       isOprunRecruitmentInterview
       && latestAnsweredExchange?.participant
@@ -2562,8 +2574,8 @@ async function handleBrowserConnection(
 
     if (!forceSkip && isRecruitmentControlTurn) {
       followUpInstruction = isZh
-        ? `候选人刚才只是寒暄、确认声音或请求重述，并没有回答当前计分题。请像真人面试官一样简短回应，然后自然、原意不变地重述当前题目。不要追问证据，不要加 ${NEXT_TOKEN}，这次不计入追问预算。`
-        : `The participant only greeted you, checked audio, or asked for repetition; they did not answer the scored question. Respond briefly and naturally, then restate the current question without changing its meaning. Do not probe evidence, do not append ${NEXT_TOKEN}, and do not consume a follow-up.`;
+        ? `候选人发出互动或事实纠正。简短回应；如果纠正了事实，承认原前提有误并采用更正，不能照读错误前提。只有明确请求重述时才重复题意，其他互动接回当前目标即可。不要追问新证据，不要加 ${NEXT_TOKEN}，这次不计入追问预算。`
+        : `The participant made an interaction or factual correction. Acknowledge it and adopt corrected facts. Repeat the question only when explicitly requested; otherwise resume its goal. Do not probe new evidence, append ${NEXT_TOKEN}, or consume a follow-up.`;
     } else if (forceSkip) {
       const skipOverride = isZh
         ? `⚠️ 受访者已明确要求跳过/进入下一题。你必须简短回应（如"好的，没问题"），然后在回复末尾加上 ${NEXT_TOKEN}。不要试图继续提问或鼓励。`
@@ -2669,6 +2681,9 @@ async function handleBrowserConnection(
     if (!isCurrentResponse()) return "";
     if (deterministicMetricFollowUp) {
       log.info("Using deterministic Q4 metric-evidence follow-up");
+    }
+    if (isOprunRecruitmentInterview && !deterministicMetricFollowUp) {
+      response = recruitmentDecisionSpeech(response, latestParticipantAnswer, isZh);
     }
 
     response = response.replace(/^(追问型|结束型|FOLLOW[- ]?UP|WRAP[- ]?UP)\s*[:：]\s*/i, "").trim();

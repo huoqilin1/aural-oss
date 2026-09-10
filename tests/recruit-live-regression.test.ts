@@ -16,6 +16,9 @@ import type { WebSocket } from "ws";
 import { shouldSuppressRecentAsrFinal, shouldSuppressAnsweredAsrFinal } from "../server/voice-relay-helpers";
 import { createAsrAudioReplayBuffer } from "../server/asr-audio-replay";
 import { questionMemory } from "../server/question-memory";
+import { recruitmentInteractionReply } from "../src/lib/voice/recruitment-quality";
+import { companyKnowledgeVersion } from "../src/lib/recruitment-company-knowledge";
+import { readRecruitmentRealtimeDecision, recruitmentRealtimeSpeechRequest } from "../src/lib/voice/recruitment-realtime-decision";
 
 test("actual recruitment question context bypasses the model but keeps its source answer", async () => {
   let calls = 0;
@@ -749,6 +752,7 @@ test("primary relay real response function never calls the model for answered Q1
       interviewDone:false, currentQuestionIndex:index, sortedQuestions:[{text:"介绍"},{text:"经历"}],
       PROMPTS:{formatHistory:()=>""}, questionTranscript:[], isZh:true,
       getLatestAnsweredExchange:()=>({participant:"我负责项目交付。"}),
+      recruitmentInteractionReply, companyKnowledgeVersion, recruitmentParticipantMetadataLoaded:false, ctx:{title:"数君招聘 · 工程师"},
       isOprunRecruitmentInterview:true, isRecruitmentConversationControl:()=>false,
       recruitmentAnsweredQuestions:new Set([index]), recruitmentQ1Transition,
       buildAgentContext:()=>{throw new Error("Q1/explicit done must not invoke context/model generation");},
@@ -874,6 +878,32 @@ test("backup actual socket handler holds response.done behind delayed save and e
     assert.equal((upstream[0].item as any).call_id,"tool-1");
     assert.equal(events.filter((e)=>e.type==="followup").length,1);
     gate.close();
+  }
+});
+
+test("backup socket validates silent decisions and drops cancelled or stale results",async()=>{
+  for(const scenario of ["advance","invalid","stale","cancelled"]){
+    const handlers=new Map<string,(data:Buffer)=>void>();
+    const ws={on:(name:string,handler:(data:Buffer)=>void)=>handlers.set(name,handler)};
+    const events:string[]=[];
+    const answer="我用测试验证。";
+    const sandbox=relayFunctions("openai-voice-relay.ts",["attachOaiHandlers"],{
+      oaiWs:ws,lastOaiActivity:0,log:{debug:()=>{},error:(error:unknown)=>{throw error;}},
+      recruitmentDecisions:new Map(scenario==="cancelled"?[]:[["decision",{questionIndex:2,answer}]]),
+      currentQuestionIndex:scenario==="stale"?3:2,responseInFlight:true,
+      takeQueuedAssistantResponse:()=>null,conversationHistory:[{role:"user",text:answer}],
+      interviewDone:false,reconnecting:false,isZh:true,readRecruitmentRealtimeDecision,recruitmentRealtimeSpeechRequest,
+      transitionToNextWhenReady:async()=>{events.push("advance");},
+      requestAssistantResponse:(_reason:string,response:Record<string,unknown>)=>{events.push("speak");assert.doesNotMatch(String(response.instructions),/evidence_quotes/);},
+    });
+    sandbox.ws=ws;vm.runInContext("attachOaiHandlers(ws)",sandbox);
+    const decision={action:"advance",evidence_quotes:[scenario==="invalid"?"编造的原话":answer],missing_evidence:"",speech:"谢谢"};
+    handlers.get("message")!(Buffer.from(JSON.stringify({type:"response.done",response:{status:"completed",
+      metadata:{topic:"recruitment_evidence",decisionId:"decision"},output:[{content:[{type:"output_text",text:JSON.stringify(decision)}]}]}})));
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(events,scenario==="advance"?["advance"]:scenario==="invalid"?["speak"]:[]);
+    assert.equal(sandbox.recruitmentDecisions.size,0);
+    if(scenario==="cancelled")assert.equal(sandbox.responseInFlight,true);
   }
 });
 
