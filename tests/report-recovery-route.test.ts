@@ -25,6 +25,18 @@ test("report parsing retains legacy repair but rejects truncated JSON", () => {
   assert.throws(() => extractJson('{"summary":"incomplete'));
 });
 
+test("report formatting repair preserves evidence while removing only structural trailing commas", () => {
+  const summary = 'Evidence says “P95”: unknown; code ```json {"x": 1} ```; literal ,} and ,] stay.\nNext line.';
+  const raw = '{"summary":' + JSON.stringify(summary).replace('\\n', '\n')
+    + ',"themes":["evidence",],"details":{"quote":"literal ,}",},}';
+  assert.deepEqual(extractJson(raw), {
+    summary, themes:["evidence"], details:{quote:"literal ,}"},
+  });
+  for (const partial of ['{"summary":"complete text","details":[{"x":1}', '{"summary":"missing outer close","themes":[1,2]']) {
+    assert.throws(()=>extractJson(partial), "format repair must not invent missing braces or fields");
+  }
+});
+
 test("report validation rejects absent or empty report bodies", () => {
   for (const value of [null, [], {}, { summary: "  " }, { summary: 12 }]) {
     assert.throws(() => validateReport(value), /report_summary_missing/);

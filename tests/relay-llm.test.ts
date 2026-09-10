@@ -7,6 +7,14 @@ import { flushHrUsage } from "../server/hr-model-usage-outbox";
 
 import * as relayLlm from "../server/relay-llm";
 
+test("JSON diagnostics expose only bounded offsets and sizes", () => {
+  for (const position of ["unknown", "2852"]) {
+    const code = `json_syntax_position_${position}_characters_12345`;
+    assert.equal(relayLlm.safeRelayFailure(new SyntaxError(code)),code);
+    assert.equal(relayLlm.safeRelayFailure(new SyntaxError(code + " private response")),"SyntaxError");
+  }
+});
+
 test("capacity failures retain safe machine codes without private suffixes", () => {
   for (const suffix of ["wait_timeout", "lease_lost", "control_unavailable", "control_invalid", "configuration_missing", "configuration_invalid"]) {
     const code = `GLM_capacity_${suffix}`;

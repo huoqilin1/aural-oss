@@ -28,6 +28,17 @@ export function extractJson<T = Record<string, unknown>>(raw: string): T {
     } catch { /* Only malformed JSON proceeds to the legacy repair path. */ }
   }
 
+  // Repair formatting before the legacy quote/fence heuristics. Those
+  // heuristics must not rewrite evidence merely because an array has a
+  // trailing comma or a string contains an unescaped control character.
+  for (const candidate of intactCandidates) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(repairJsonFormatting(candidate));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed as T;
+    } catch { /* Missing structure is never supplied by this repair. */ }
+  }
+
   // 1. Normalise smart / curly quotes to ASCII equivalents
   let text = raw
     .replace(/[\u201C\u201D\u201E\u201F\u2033\u2036]/g, '"') // double
@@ -58,9 +69,36 @@ export function extractJson<T = Record<string, unknown>>(raw: string): T {
     } catch (e) {
       // Model output can contain private resume and interview material.
       log.error("Failed to parse JSON after sanitisation");
-      throw e;
+      const position = e instanceof Error ? /position (\d+)/.exec(e.message)?.[1] : undefined;
+      throw new SyntaxError(`json_syntax_position_${position ?? "unknown"}_characters_${jsonStr.length}`);
     }
   }
+}
+
+/** Preserve every value; only remove structural commas and escape controls. */
+function repairJsonFormatting(raw: string): string {
+  let inString = false;
+  const output: string[] = [];
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (ch === "\\") {
+        output.push(ch);
+        if (i + 1 < raw.length) output.push(raw[++i]);
+      } else if (ch === '"') {
+        inString = false;
+        output.push(ch);
+      } else if (ch.charCodeAt(0) < 32) {
+        output.push(`\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+      } else output.push(ch);
+    } else if (ch === '"') {
+      inString = true;
+      output.push(ch);
+    } else if (ch === "," && /^[\x20\t\r\n]*[}\]]/.test(raw.slice(i + 1))) {
+      // Commas inside quoted evidence never enter this branch.
+    } else output.push(ch);
+  }
+  return output.join("");
 }
 
 /**

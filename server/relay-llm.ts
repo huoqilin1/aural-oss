@@ -490,6 +490,7 @@ export class AllFourModelsFailed extends Error {
 
 export function safeRelayFailure(error: unknown): string {
   if (!(error instanceof Error)) return "provider_error";
+  if (/^json_syntax_position_(?:unknown|[0-9]{1,9})_characters_[0-9]{1,9}$/.test(error.message)) return error.message;
   if (/^GLM_capacity_(?:wait_timeout|lease_lost|configuration_missing|configuration_invalid|control_unavailable|control_invalid)$/.test(error.message)) return error.message;
   const http = /^LLM API ([1-5][0-9]{2})(?: code=([0-9]{3,6}))?(?: retry_after=([0-9]{1,5}))?$/.exec(error.message);
   if (http) return `http_${http[1]}` + (http[2] ? `_code_${http[2]}` : "")
