@@ -20,6 +20,7 @@ type RequestOptions = {
   jsonReport?: boolean;
   jsonQuestions?: boolean;
   realtime?: boolean;
+  readiness?: boolean;
   signal?: AbortSignal;
 };
 import { createLogger } from "../src/lib/logger";
@@ -477,7 +478,8 @@ async function callEndpoint(
     : endpoint.provider === "zhipu"
       // Progressive questions are dependencies of the live conversation. Share
       // its FIFO lane so newer replies cannot indefinitely overtake queued Q3.
-      ? withGlmSlot(signal => callOpenAICompatible(endpoint, prompt, maxTokens, options, signal), options?.realtime || options?.jsonQuestions ? 1 : -1)
+      ? withGlmSlot(signal => callOpenAICompatible(endpoint, prompt, maxTokens, options, signal),
+        options?.realtime ? 1 : options?.jsonQuestions || options?.readiness ? 0 : -1)
       : callOpenAICompatible(endpoint, prompt, maxTokens, options);
 }
 
@@ -526,6 +528,7 @@ export async function generateGovernedText(identity: TaskIdentity, messages: Arr
 
 async function callRelayRequest(prompt: string, maxTokens?: number, meta?: RelayLlmCallMeta, route?: RelayLlmRoute, options?: RequestOptions): Promise<string> {
   if (meta?.stage === "interview-turn") options = { ...options, realtime: true };
+  if (meta?.stage === "readiness_probe") options = { ...options, readiness: true };
   options = { ...options, deep: options?.deep || meta?.stage === "interview.generate_questions" };
   if (recruitTestModelRoutingEnabled()) {
     route = options.deep

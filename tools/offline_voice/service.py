@@ -32,15 +32,17 @@ tts = None if TTS_ENGINE=='windows' else so.OfflineTts(so.OfflineTtsConfig(model
         lexicon=str(TTS/'lexicon.txt'), tokens=str(TTS/'tokens.txt'), dict_dir=str(TTS/'dict')),
     num_threads=2, provider='cpu')))
 asr_pool = ThreadPoolExecutor(max_workers=2)
-tts_pool = ThreadPoolExecutor(max_workers=1)
+# Windows SAPI objects are thread-local. Keep neural engines serialized, but
+# synthesize independent Windows utterances concurrently for live interviews.
+tts_pool = ThreadPoolExecutor(max_workers=4 if TTS_ENGINE == 'windows' else 1)
 slots = asyncio.Semaphore(10)
 audio_cache = OrderedDict()
 cache_bytes = 0
 inflight = {}
 
-async def cached_synthesis(text):
+async def cached_synthesis(text, audio_format='wav'):
     global cache_bytes
-    key=sha256(text.encode()).digest()
+    key=sha256((audio_format+'\0'+text).encode()).digest()
     if key in audio_cache:
         audio_cache.move_to_end(key)
         return audio_cache[key]
@@ -49,7 +51,7 @@ async def cached_synthesis(text):
     async def work():
         global cache_bytes
         async with slots:
-            audio=await asyncio.get_running_loop().run_in_executor(tts_pool,synthesize,text)
+            audio=await asyncio.get_running_loop().run_in_executor(tts_pool,synthesize,text,audio_format)
         if len(audio)<=32*1024*1024:
             while audio_cache and cache_bytes+len(audio)>32*1024*1024:
                 _,old=audio_cache.popitem(last=False)
@@ -68,22 +70,34 @@ def recognize(samples):
     recognizer.decode_stream(stream)
     return stream.result.text
 
-def synthesize(text):
+def synthesize(text, audio_format='wav'):
     if TTS_ENGINE=='windows':
         from windows_tts import synthesize_windows
-        return synthesize_windows(text)
-    audio=tts.generate(text, sid=0, speed=1.0)
+        raw=synthesize_windows(text)
+        if audio_format=='wav':
+            return raw
+        samples,rate=sf.read(io.BytesIO(raw),dtype='float32')
+    else:
+        audio=tts.generate(text, sid=0, speed=1.0)
+        samples,rate=audio.samples,audio.sample_rate
     output=io.BytesIO()
-    sf.write(output,audio.samples,audio.sample_rate,format='WAV',subtype='PCM_16')
+    if audio_format=='mp3':
+        sf.write(output,samples,rate,format='MP3',subtype='MPEG_LAYER_III',
+                 bitrate_mode='VARIABLE',compression_level=0.4)
+    else:
+        sf.write(output,samples,rate,format='WAV',subtype='PCM_16')
     return output.getvalue()
 
 async def speech(request):
     data=await request.json()
     text=data.get('text')
+    audio_format=data.get('format','wav')
     if not isinstance(text,str) or not text.strip() or len(text)>2000:
         raise web.HTTPBadRequest()
-    audio=await cached_synthesis(text)
-    return web.Response(body=audio,content_type='audio/wav')
+    if audio_format not in ('wav','mp3'):
+        raise web.HTTPBadRequest()
+    audio=await cached_synthesis(text,audio_format)
+    return web.Response(body=audio,content_type='audio/mpeg' if audio_format=='mp3' else 'audio/wav')
 
 def response_packet(text):
     payload=json.dumps({'result':{'utterances':[{'text':text,'definite':True}]}},ensure_ascii=False).encode()

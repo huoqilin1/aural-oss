@@ -43,13 +43,16 @@ export async function* synthesizeOffline(text: string, signal?: AbortSignal): As
   for (const piece of pieces) {
     signal?.throwIfAborted();
   const response = await fetch(offlineVoiceEndpoint('tts'), {
-    method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:piece}),
+    method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:piece,format:'mp3'}),
     signal: AbortSignal.any([AbortSignal.timeout(60_000), ...(signal ? [signal] : [])]),
     redirect:'error',
   });
   if (!response.ok) throw new Error(`Offline TTS failed (${response.status})`);
   const audio=Buffer.from(await response.arrayBuffer());
-  if (audio.length < 44 || audio.toString('ascii',0,4)!=='RIFF' || audio.toString('ascii',8,12)!=='WAVE') {
+  const wav = audio.length >= 44 && audio.toString('ascii',0,4)==='RIFF' && audio.toString('ascii',8,12)==='WAVE';
+  const mp3 = audio.length >= 128 && response.headers.get('content-type')?.split(';')[0]==='audio/mpeg'
+    && (audio.toString('ascii',0,3)==='ID3' || (audio[0]===0xff && (audio[1]&0xe0)===0xe0));
+  if (!wav && !mp3) {
     throw new Error('Offline TTS returned invalid audio');
   }
   signal?.throwIfAborted();
