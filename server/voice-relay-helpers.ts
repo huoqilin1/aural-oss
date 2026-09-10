@@ -1,6 +1,18 @@
 import { recruitmentAnswerContent, recruitmentSpeechIntent, recruitmentControlOnly } from "../src/lib/voice/recruitment-turn-policy";
 import { recruitmentUtterance, recruitmentEvidenceText } from "../src/lib/voice/recruitment-quality";
 
+/** Question openings need not be duplicated in the per-question transcript. */
+export function latestAnsweredExchange(
+  transcript: readonly { role: string; text: string }[],
+  currentQuestionText = "",
+): { interviewer: string; participant: string } | null {
+  const last = transcript.at(-1);
+  if (last?.role !== "user" || !last.text.trim()) return null;
+  const previous = transcript.slice(0, -1).findLast(entry => entry.role === "assistant" && entry.text.trim());
+  const interviewer = previous?.text.trim() || currentQuestionText.trim();
+  return interviewer ? { interviewer, participant: last.text.trim() } : null;
+}
+
 // Strong: self-referencing commands unlikely to appear as topic descriptions.
 const STRONG_END_PATTERNS = [
   /(?:please|let'?s|I\s+want\s+to|can\s+we)\s+end(?:\s+(?:the\s+)?interview)?/i,

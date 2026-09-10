@@ -2,12 +2,36 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { COMPANY_FACTS, COMPANY_KNOWLEDGE_VERSION, companyKnowledgeVersion, pinCompanyKnowledge, lookupCompanyFact } from "../src/lib/recruitment-company-knowledge";
 import { recruitmentUtterance, recruitmentInteractionReply, recruitmentScoringMessages } from "../src/lib/voice/recruitment-quality";
-import { hasRecruitmentAnswer, isRecruitmentConversationControl } from "../server/voice-relay-helpers";
+import { hasRecruitmentAnswer, isRecruitmentConversationControl, latestAnsweredExchange } from "../server/voice-relay-helpers";
 import { PROMPTS } from "../server/voice-relay-prompts";
 import { summarizeRecruitmentResumeBudget } from "../server/voice-relay-helpers";
 import { QUALITY_CASES } from "./fixtures/recruit-quality-cases";
 import { parseRecruitmentDecision, recruitmentDecisionSpeech } from "../src/lib/voice/recruitment-decision";
 const now = new Date("2026-09-10T10:00:00Z");
+
+test("first company question after a transition uses approved facts without a transcript opening", () => {
+  for (const question of ["请问公司是做什么的？", "请问这个岗位的薪资福利可以保证多少？"]) {
+    const transcript = [{ role: "user", text: question }];
+    const exchange = latestAnsweredExchange(transcript, "请说明你在项目中的职责边界。");
+    assert.equal(exchange?.participant, question);
+    const reply = recruitmentInteractionReply(exchange!.participant, "数君招聘 · 运维工程师", now);
+    assert.equal(reply?.sourceId, question.includes("公司") ? "company-intro" : "needs_hr_confirmation");
+    assert.match(reply!.text, /我们接着刚才的话题/);
+    assert.equal(hasRecruitmentAnswer(question), false);
+    assert.deepEqual(transcript, [{ role: "user", text: question }]);
+  }
+});
+
+test("current question fallback preserves first answers and the latest follow-up context", () => {
+  assert.deepEqual(latestAnsweredExchange([{ role: "user", text: "我负责发布与回滚。" }], "请介绍职责。"),
+    { interviewer: "请介绍职责。", participant: "我负责发布与回滚。" });
+  assert.deepEqual(latestAnsweredExchange([{ role: "assistant", text: "如何验证回滚？" }, { role: "user", text: "核对健康检查。" }], "请介绍职责。"),
+    { interviewer: "如何验证回滚？", participant: "核对健康检查。" });
+  assert.equal(latestAnsweredExchange([], "题干"), null);
+  assert.equal(latestAnsweredExchange([{ role: "assistant", text: "已回答。" }], "题干"), null);
+  assert.equal(latestAnsweredExchange([{ role: "user", text: " " }], "题干"), null);
+  assert.equal(latestAnsweredExchange([{ role: "user", text: "回答" }]), null);
+});
 
 test("company source version is pinned and unknown saved releases fail closed", () => {
   const original={other:"kept"};

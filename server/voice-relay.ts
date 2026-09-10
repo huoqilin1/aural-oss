@@ -43,6 +43,7 @@ import {
 } from "./relay-llm";
 import {
     collapseInternalAsrRepetitions,
+    latestAnsweredExchange,
     decidePendingFinalSpeechHold,
     evaluateTranscriptManualAdvance,
     failClosedRecruitmentResumeBudget,
@@ -3218,20 +3219,8 @@ async function handleBrowserConnection(
   }
 
   function getLatestAnsweredExchange(): { interviewer: string; participant: string } | null {
-    const lastEntry = questionTranscript[questionTranscript.length - 1];
-    if (lastEntry?.role !== "user") return null;
-
-    for (let i = questionTranscript.length - 2; i >= 0; i--) {
-      const entry = questionTranscript[i];
-      if (entry.role === "assistant" && entry.text.trim()) {
-        return {
-          interviewer: entry.text.trim(),
-          participant: lastEntry.text.trim(),
-        };
-      }
-    }
-
-    return null;
+    return latestAnsweredExchange(questionTranscript,
+      isOprunRecruitmentInterview ? sortedQuestions[currentQuestionIndex]?.text || "" : "");
   }
 
   /**
