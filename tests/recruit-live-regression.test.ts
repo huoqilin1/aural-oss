@@ -308,11 +308,11 @@ test("twenty first ASR handshakes use four bounded slots and failures release th
 });
 
 test("actual ASR connection joins concurrent calls and retains throttling for later attempts", async () => {
-  for(const failFirst of [false,true]){
+  for(const provider of ["offline","volcengine"]) for(const failFirst of [false,true]){
     const events:string[]=[];let release:()=>void=()=>{};
     let calls=0;
     const sandbox=relayFunctions("voice-relay.ts",["connectAsr"],{
-      asrConnectPending:null,asrConnectionAttempted:false,
+      asrConnectPending:null,asrConnectionAttempted:false,voiceRoute:{provider},
       scheduleInitialAsrConnect:(task:()=>Promise<void>)=>{events.push("initial");return task();},
       scheduleAsrConnect:(task:()=>Promise<void>)=>{events.push("replacement");return task();},
       connectAsrUngated:async()=>{calls++;if(calls===1){await new Promise<void>(resolve=>{release=resolve;});if(failFirst)throw new Error("injected first failure");}},
@@ -324,7 +324,7 @@ test("actual ASR connection joins concurrent calls and retains throttling for la
     assert.equal(sandbox.asrConnectPending,null);
     await vm.runInContext("connectAsr()",sandbox);
     assert.equal(calls,2);
-    assert.deepEqual(events,["initial","replacement"]);
+    assert.deepEqual(events,["initial",provider === "offline" ? "initial" : "replacement"]);
   }
 });
 
@@ -1052,4 +1052,32 @@ test("actual browser save queue carries an earlier failed answer into the later 
   assert.equal(bodies.length,2);
   assert.deepEqual(bodies[1].messages,bodies[0].messages);
   assert.equal(trackedMessagesRef.current.length,0);
+});
+
+
+test("ten interrupted response cycles retain their model ownership and queue the next spoken final", async () => {
+  for (let i=0;i<10;i++) {
+    let cancelled=0; const messages:unknown[]=[];
+    const sandbox=relayFunctions("voice-relay.ts",["interruptAssistantPlayback","handleUserUtterance"],{
+      generatingResponse:true,suppressAsrResults:true,ttsSpeaking:true,
+      cancelTts:()=>{cancelled++;},
+      browserWs:{readyState:1,send:(value:string)=>messages.push(JSON.parse(value))},WebSocket:{OPEN:1},
+      isTransitioning:false,interviewDone:false,isOprunRecruitmentInterview:true,
+      isUserEndRequest:()=>false,isFastPrevRequest:()=>false,isUserPrevRequest:()=>false,
+      isFastNextRequest:()=>false,isUserSkipRequest:()=>false,isSameAsPendingUserTurn:()=>false,
+      isDuplicateUserFinal:()=>false,isReplayOfPendingUserTurn:()=>false,
+      asrAudioReplay:{acknowledge:()=>{}},currentQuestionIndex:1,clearSilenceAutoSkip:()=>{},
+      silenceAskCount:0,silenceConfirmPending:false,unansweredQuestionsStreak:0,
+      queuedUserUtteranceWhileGenerating:"",queuedUserUtteranceIsChat:false,mergeAsrSegments,
+      log:{info:()=>{}},
+      generateControlledResponse:()=>{throw new Error("a second model request started before the old one settled");},
+    });
+    vm.runInContext("interruptAssistantPlayback()",sandbox);
+    await vm.runInContext("handleUserUtterance('这是新的模拟补充回答。')",sandbox);
+    assert.equal(cancelled,1);
+    assert.equal(sandbox.generatingResponse,true);
+    assert.equal(sandbox.suppressAsrResults,false);
+    assert.equal(sandbox.queuedUserUtteranceWhileGenerating,'这是新的模拟补充回答。');
+    assert.deepEqual(messages,[{type:"interrupt"}]);
+  }
 });

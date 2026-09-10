@@ -3254,6 +3254,16 @@ async function handleBrowserConnection(
     return false;
   }
 
+  function interruptAssistantPlayback() {
+    cancelTts();
+    suppressAsrResults = false;
+    // The active response cycle still owns its model request. Keep its busy
+    // flag so a new final is queued and drained after that cycle settles.
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({ type: "interrupt" }));
+    }
+  }
+
   async function handleUserUtterance(
     userText: string,
     options?: { allowRecentReplay?: boolean; isChatInput?: boolean },
@@ -3840,7 +3850,11 @@ async function handleBrowserConnection(
 
   async function connectAsr() {
     if (asrConnectPending) return await asrConnectPending;
-    const schedule = asrConnectionAttempted ? scheduleAsrConnect : scheduleInitialAsrConnect;
+    // The offline engine has no paid-provider reconnect-rate restriction.
+    // Bound all its handshakes to four without serializing ten clients behind
+    // one slow replacement. Preserve the provider-specific production queue.
+    const schedule = voiceRoute.provider === 'offline' || !asrConnectionAttempted
+      ? scheduleInitialAsrConnect : scheduleAsrConnect;
     asrConnectionAttempted = true;
     const operation = schedule(connectAsrUngated);
     asrConnectPending = operation;
@@ -3944,12 +3958,7 @@ async function handleBrowserConnection(
           })) {
             log.info(`Barge-in detected via ASR (interim: "${r.text.slice(0, 40)}") — cancelling TTS`);
             holdBargeInInterim(r.text);
-            cancelTts();
-            suppressAsrResults = false;
-            generatingResponse = false;
-            if (browserWs.readyState === WebSocket.OPEN) {
-              browserWs.send(JSON.stringify({ type: "interrupt" }));
-            }
+            interruptAssistantPlayback();
             continue;
           }
 
@@ -4248,12 +4257,7 @@ async function handleBrowserConnection(
       } else if (msg.type === "barge_in") {
         if (ttsSpeaking || generatingResponse) {
           log.info("Client barge-in signal received — cancelling TTS");
-          cancelTts();
-          suppressAsrResults = false;
-          generatingResponse = false;
-          if (browserWs.readyState === WebSocket.OPEN) {
-            browserWs.send(JSON.stringify({ type: "interrupt" }));
-          }
+          interruptAssistantPlayback();
         }
       } else if (msg.type === "text_input" && msg.content) {
         const userText = (msg.content as string).trim();
