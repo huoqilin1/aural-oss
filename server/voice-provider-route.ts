@@ -38,10 +38,15 @@ export function offlineVoiceEndpoint(kind: 'asr'|'tts'): string {
   return url.toString();
 }
 
+const spokenCharacter = new RegExp('[\\p{L}\\p{N}]', 'u');
+
 export async function* synthesizeOffline(text: string, signal?: AbortSignal): AsyncGenerator<TtsChunkEvent> {
   const pieces = text.match(/[^。！？!?；;]+[。！？!?；;]?|[。！？!?；;]/g) || [text];
   for (const piece of pieces) {
     signal?.throwIfAborted();
+    // Sentence splitting can leave punctuation-only fragments. SAPI emits no
+    // samples for these; they are pauses, not failed speech payloads.
+    if (!spokenCharacter.test(piece)) continue;
   const response = await fetch(offlineVoiceEndpoint('tts'), {
     method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:piece,format:'mp3'}),
     signal: AbortSignal.any([AbortSignal.timeout(60_000), ...(signal ? [signal] : [])]),

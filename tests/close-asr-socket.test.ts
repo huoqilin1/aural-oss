@@ -33,3 +33,22 @@ test('retiring an open socket detaches stale callbacks and is repeatable after c
   closeAsrSocket(null);
   server.close();
 });
+
+
+test('cancelling a pending handshake settles its waiter without waiting for timeout', async () => {
+  const server = createServer();
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address() as {port:number};
+  const socket = new WebSocket(`ws://127.0.0.1:${address.port}`);
+  const waiter = new Promise<void>((resolve, reject) => {
+    socket.once('open', resolve);
+    socket.once('error', reject);
+  });
+  try {
+    const rejected = assert.rejects(waiter, /closed before the connection was established/);
+    closeAsrSocket(socket);
+    await rejected;
+    assert.equal(socket.readyState, WebSocket.CLOSED);
+  } finally { socket.terminate(); server.close(); }
+});

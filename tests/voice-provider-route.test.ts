@@ -35,3 +35,26 @@ test('offline endpoints cannot point to a paid provider',()=>{
     assert.equal(offlineVoiceEndpoint('asr'),'ws://127.0.0.1:5211/asr');
   } finally {if(previous===undefined)delete process.env.OFFLINE_VOICE_URL;else process.env.OFFLINE_VOICE_URL=previous;}
 });
+
+
+test('punctuation fragments never produce empty synthesis requests; spoken pieces remain ordered', async () => {
+  const original = globalThis.fetch;
+  const spoken: string[] = [];
+  const mp3 = new Uint8Array(128); mp3[0] = 0xff; mp3[1] = 0xf3;
+  globalThis.fetch = async (_input, init) => {
+    const body = JSON.parse(String(init?.body));
+    spoken.push(body.text);
+    assert.equal(body.format, 'mp3');
+    return new Response(mp3, {headers: {'content-type': 'audio/mpeg'}});
+  };
+  try {
+    const events = [];
+    for await (const event of synthesizeOffline('！？好的。……；下一题！')) events.push(event.type);
+    assert.deepEqual(spoken, ['好的。', '下一题！']);
+    assert.deepEqual(events, ['audio', 'audio', 'done']);
+    for await (const event of synthesizeOffline('……！？（ ）')) assert.equal(event.type, 'done');
+    assert.equal(spoken.length, 2);
+    globalThis.fetch = async () => new Response(new Uint8Array(), {headers: {'content-type': 'audio/mpeg'}});
+    await assert.rejects(async () => { for await (const event of synthesizeOffline('实际内容')) void event; }, /invalid audio/);
+  } finally { globalThis.fetch = original; }
+});
