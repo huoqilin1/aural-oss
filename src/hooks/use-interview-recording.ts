@@ -103,6 +103,9 @@ export function useInterviewRecording({
   const mixDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
   const micSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const screenshotTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cameraRecoveryTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cameraRecoveryInFlightRef = useRef(false);
+  const cameraPermissionDeniedRef = useRef(false);
   const screenshotsRef = useRef<ScreenshotEntry[]>([]);
   const cameraVideoRef = useRef<HTMLVideoElement | null>(null);
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -115,26 +118,25 @@ export function useInterviewRecording({
   const ttsPlayTimeRef = useRef(0);
   const ttsSourcesRef = useRef<AudioBufferSourceNode[]>([]);
 
-  // Keep refs in sync with state
-  useEffect(() => { cameraStreamRef.current = cameraStream; }, [cameraStream]);
-  useEffect(() => { screenStreamRef.current = screenStream; }, [screenStream]);
-
   /** Acquire camera and screen streams, reusing stored streams from onboarding. */
   const acquireStreams = useCallback(async () => {
     // Reuse camera stream from onboarding if still active
-    const storedCam = getStoredCameraStream();
+    const storedCam = cameraStreamRef.current?.getVideoTracks().some(t => t.readyState === "live")
+      ? cameraStreamRef.current : getStoredCameraStream();
     if (storedCam) {
       setCameraStream(storedCam);
       cameraStreamRef.current = storedCam;
       setStoredCameraStream(null);
-    } else if (!wasCameraSkipped()) {
+    } else if (!wasCameraSkipped() && !cameraPermissionDeniedRef.current) {
       try {
         const cam = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: "user", width: 640, height: 480 },
         });
+        if (stoppedRef.current) { cam.getTracks().forEach(t => t.stop()); return; }
         setCameraStream(cam);
         cameraStreamRef.current = cam;
       } catch (err) {
+        if (err instanceof DOMException && err.name === "NotAllowedError") cameraPermissionDeniedRef.current = true;
         log.warn("Camera not available:", err);
       }
     }
@@ -154,6 +156,26 @@ export function useInterviewRecording({
     // 招聘语音面:不录屏、不弹屏幕共享授权框(王总 2026-06-21)。
     // 切走检测/多屏检测/禁粘贴在 use-anti-cheating.ts,不依赖屏幕共享,照常生效。
   }, []);
+
+  // Recover transient device loss and interrupted video playback without a
+  // second candidate action. Refs are assigned synchronously, not after a
+  // guessed React state propagation delay.
+  const maintainCamera = useCallback(async () => {
+    if (stoppedRef.current || cameraRecoveryInFlightRef.current) return;
+    cameraRecoveryInFlightRef.current = true;
+    try {
+      await acquireStreams();
+      if (stoppedRef.current) return;
+      for (const [video, stream] of [
+        [cameraVideoRef.current, cameraStreamRef.current],
+        [screenVideoRef.current, screenStreamRef.current],
+      ] as const) {
+        if (!video || !stream) continue;
+        if (video.srcObject !== stream) video.srcObject = stream;
+        if (video.paused) await video.play().catch(() => {});
+      }
+    } finally { cameraRecoveryInFlightRef.current = false; }
+  }, [acquireStreams]);
 
   /** Pipe a mic MediaStream into the recording mixer. */
   const attachMicStream = useCallback((micStream: MediaStream) => {
@@ -216,7 +238,9 @@ export function useInterviewRecording({
   /** Capture a screenshot from a video element and upload it. */
   const captureAndUpload = useCallback(
     async (video: HTMLVideoElement, type: "camera" | "screen") => {
-      if (video.readyState < 2 || video.videoWidth === 0) return;
+      const stream = video.srcObject as MediaStream | null;
+      if (!stream?.getVideoTracks().some(t => t.readyState === "live")
+        || video.paused || video.readyState < 2 || video.videoWidth === 0) return;
 
       const canvas = document.createElement("canvas");
       canvas.width = video.videoWidth;
@@ -320,9 +344,6 @@ export function useInterviewRecording({
       recordingStoppedAtRef.current = 0;
       recorderRef.current = recorder;
 
-      // Acquire camera + screen
-      await acquireStreams();
-
       // Set up hidden video elements for screenshot capture
       if (!cameraVideoRef.current) {
         const v = document.createElement("video");
@@ -341,19 +362,9 @@ export function useInterviewRecording({
         screenVideoRef.current = v;
       }
 
-      // Bind streams to hidden video elements for canvas capture
-      const bindStream = (video: HTMLVideoElement, stream: MediaStream | null) => {
-        if (stream) {
-          video.srcObject = stream;
-          video.play().catch(() => {});
-        }
-      };
-      // Use refs (set in acquireStreams via state update + useEffect sync)
-      // Small delay to let state sync
-      setTimeout(() => {
-        bindStream(cameraVideoRef.current!, cameraStreamRef.current);
-        bindStream(screenVideoRef.current!, screenStreamRef.current);
-      }, 500);
+      await maintainCamera();
+      if (stoppedRef.current) return;
+      cameraRecoveryTimerRef.current = setInterval(() => { void maintainCamera(); }, 2000);
 
       // Start periodic screenshot timer
       screenshotTimerRef.current = setInterval(takeScreenshots, screenshotIntervalMs);
@@ -361,7 +372,7 @@ export function useInterviewRecording({
       setIsRecording(true);
       log.info("Started");
     },
-    [enabled, isRecording, acquireStreams, attachMicStream, takeScreenshots, screenshotIntervalMs],
+    [enabled, isRecording, maintainCamera, attachMicStream, takeScreenshots, screenshotIntervalMs],
   );
 
   /**
@@ -373,6 +384,8 @@ export function useInterviewRecording({
     micSourceRef.current = null;
     cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
     screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    cameraStreamRef.current = null;
+    screenStreamRef.current = null;
     setCameraStream(null);
     setScreenStream(null);
     setIsRecording(false);
@@ -394,6 +407,10 @@ export function useInterviewRecording({
     screenshots: ScreenshotEntry[];
   }> => {
     stoppedRef.current = true;
+    if (cameraRecoveryTimerRef.current) {
+      clearInterval(cameraRecoveryTimerRef.current);
+      cameraRecoveryTimerRef.current = null;
+    }
 
     // Stop screenshot timer
     if (screenshotTimerRef.current) {
@@ -480,6 +497,8 @@ export function useInterviewRecording({
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      stoppedRef.current = true;
+      if (cameraRecoveryTimerRef.current) clearInterval(cameraRecoveryTimerRef.current);
       if (screenshotTimerRef.current) clearInterval(screenshotTimerRef.current);
       try { recorderRef.current?.stop(); } catch { /* noop */ }
       try { micSourceRef.current?.disconnect(); } catch { /* noop */ }

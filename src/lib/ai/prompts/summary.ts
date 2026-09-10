@@ -64,7 +64,7 @@ export function buildSummaryPrompt(
     assessmentCriteria && assessmentCriteria.length > 0
       ? `,
   "criteriaEvaluations": [
-    { "name": "criterion name", "score": 1-10, "reasoning": "brief explanation of the score" }
+    { "name": "criterion name", "score": 8, "reasoning": "brief explanation of the score" }
   ]`
       : "";
 
@@ -144,20 +144,21 @@ Your analysis should:
 ${questionEvalInstruction}${criteriaEvalInstruction}${toneInstruction}${researchInstruction}${languageInstruction}
 
 Provide a structured analysis as VALID JSON ONLY (use only standard ASCII double-quotes, never Unicode smart quotes like \u201C \u201D):
+Choose one sentiment value from positive, neutral, negative. Tone values are confident, enthusiastic, neutral, hesitant, uncertain; confidence values are high, medium, low. Scores are numbers from 1 to 10. The following is a valid JSON example: replace its illustrative values with evidence-based analysis, include all relevant entries, and never output ellipses, alternatives separated by pipes, numeric ranges or comments inside JSON. Escape ASCII quotation marks and newlines inside string values.
 {
   "summary": "2-3 paragraph evaluation of the participant's responses, covering key points discussed and overall performance",
-  "themes": ["theme1", "theme2", ...],
+  "themes": ["theme1", "theme2"],
   "sentiment": {
-    "overall": "positive" | "neutral" | "negative",
+    "overall": "neutral",
     "details": "brief analysis of participant's engagement and attitude"
   },
-  "keyInsights": ["insight1", "insight2", ...],
+  "keyInsights": ["insight1", "insight2"],
   "notableQuotes": ["direct quote from participant 1", "direct quote 2"],
   "toneAnalysis": {
-    "overall": "confident" | "neutral" | "hesitant",
+    "overall": "neutral",
     "details": "brief overall communication style assessment",
     "segments": [
-      { "question": "Q1 question text", "tone": "confident" | "enthusiastic" | "neutral" | "hesitant" | "uncertain", "confidence": "high" | "medium" | "low", "notes": "specific observations about speech patterns, filler words, directness" }
+      { "question": "Q1 question text", "tone": "neutral", "confidence": "medium", "notes": "specific observations about communication style; do not infer ability or truthfulness" }
     ]
   }${questionEvalJsonField}${criteriaJsonField}${researchJsonField}
 }`;
