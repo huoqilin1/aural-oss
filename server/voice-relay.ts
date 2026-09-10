@@ -3550,10 +3550,26 @@ async function handleBrowserConnection(
       silenceConfirmPending = true;
       logVoiceInputProgress("silence_prompt");
       log.info(`候选人静默 ${SILENCE_ASK_MS / 1000}s,小君询问是否答完(第 ${silenceAskCount} 次)`);
-      void speakText(bt(isZh, SPOKEN.silenceAsk())).catch((err) =>
-        log.error("静默询问 TTS 失败:", err),
-      );
-      armSilenceConfirm();
+      const reminderGeneration = transitionGeneration;
+      try {
+        // tts_text closes browser input. Restore it only after playback and
+        // actual ASR readiness; a reminder is still part of the same question.
+        const reminderPlayed = await speakText(bt(isZh, SPOKEN.silenceAsk()));
+        if (reminderGeneration !== transitionGeneration || interviewDone
+          || endingInterview || isTransitioning || !silenceConfirmPending) return;
+        if (!reminderPlayed) {
+          markResponseGenerationBlocked();
+          return;
+        }
+        await reopenAsr();
+        if (reminderGeneration === transitionGeneration && asrAlive
+          && !generatingResponse && !ttsSpeaking && silenceConfirmPending) {
+          armSilenceConfirm();
+        }
+      } catch (err) {
+        log.error("静默询问 TTS 失败:", err);
+        markResponseGenerationBlocked();
+      }
     }, SILENCE_ASK_MS);
   }
 

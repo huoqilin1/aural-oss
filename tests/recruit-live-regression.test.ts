@@ -340,6 +340,42 @@ test("completion preflight retains late messages and serializes subsequent saves
   }
 });
 
+test("silence reminder restores actual ASR readiness before starting the next inactivity window", async () => {
+  for (const outcome of ["played", "transitioned", "failed", "undelivered"] as const) {
+    const events: string[] = [];
+    let timer: (() => Promise<void>) | undefined;
+    let finishSpeech!: () => void;
+    const spoken = new Promise<void>((resolve) => { finishSpeech = resolve; });
+    const sandbox = relayFunctions("voice-relay.ts", ["armSilenceAutoSkip", "reopenAsr"], {
+      interviewDone:false, endingInterview:false, pendingProgressiveTransition:false,
+      responseGenerationBlocked:false, asrAlive:true, isTransitioning:false,
+      generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false,
+      silenceAskCount:0, MAX_SILENT_ASKS_PER_QUESTION:2, currentQuestionIndex:0,
+      transitionGeneration:0, isOprunRecruitmentInterview:true, isZh:true,
+      clearSilenceAutoSkip:()=>{}, silenceAutoSkipTimer:null, SILENCE_ASK_MS:100,
+      setTimeout:(callback:()=>Promise<void>)=>{timer=callback;return 1;},
+      recoverDeferredUserTurnBeforeInactivity:async()=>false,
+      logVoiceInputProgress:()=>{}, log:{info(){},warn(){},error(){}},
+      bt:(_zh:boolean,text:string)=>text, SPOKEN:{silenceAsk:()=>"Please continue"},
+      speakText:async()=>{events.push("tts_text");await spoken;if(outcome==="failed")throw new Error("synthetic TTS failure");if(outcome==="undelivered")return false;events.push("tts_ended");return true;},
+      armSilenceConfirm:()=>events.push("confirm_timer"),
+      markResponseGenerationBlocked:()=>events.push("system_failure"),
+      connectAsr:async()=>{events.push("asr_ready");},keepAliveInterval:1,
+      pendingUserUtteranceWhileSuppressed:"", suppressAsrResults:false,
+      browserWs:{readyState:1,send:(data:string)=>events.push(JSON.parse(data).type)},WebSocket:{OPEN:1},
+    });
+    vm.runInContext("armSilenceAutoSkip()",sandbox);
+    const pending=timer!();
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.deepEqual(events,["tts_text"],"inactivity started while the reminder was still playing");
+    if(outcome==="transitioned") sandbox.transitionGeneration=1;
+    finishSpeech();await pending;
+    assert.deepEqual(events,outcome==="played"
+      ? ["tts_text","tts_ended","asr_ready","input_ready","confirm_timer"]
+      : outcome==="failed" || outcome==="undelivered" ? ["tts_text","system_failure"] : ["tts_text","tts_ended"]);
+  }
+});
+
 test("waiting for background questions cannot arm or finish an inactivity timeout", async () => {
   const timers: Array<()=>void> = [];
   const sandbox = relayFunctions("voice-relay.ts", ["armSilenceAutoSkip", "abandonForInactivity"], {

@@ -503,6 +503,25 @@ test("candidate input stays unavailable until the relay confirms ASR readiness",
   await context.close();
 });
 
+test("a silence reminder restores candidate input on the same question after relay readiness", async () => {
+  const context = await newContext({ locale: "zh-CN" });
+  try {
+    const page = await context.newPage();
+    await page.goto(`${baseUrl}/functional-tests/voice?language=zh-CN&scenario=recruitment-entry&silenceReminder=1`);
+    await waitForText(page,"面试须知",10_000,true);
+    await page.getByText("我已阅读并同意以上面试须知",{exact:true}).click();
+    await page.getByRole("button",{name:"开始面试",exact:true}).click();
+    await waitForText(page,"正在听取回答，慢慢来",5_000,true);
+    await waitForText(page,"你可以继续补充刚才的回答。",5_000,true);
+    assert.equal(await page.getByText("正在听取回答，慢慢来",{exact:true}).count(),0);
+    await waitForText(page,"正在听取回答，慢慢来",5_000,true);
+    const sent = await readRelaySentMessages(page);
+    assert.equal(sent.filter(message=>message.type==="next_question").length,0);
+  } finally {
+    await context.close();
+  }
+});
+
 test("browser playback receipt waits for real AudioContext playback before acknowledging", async () => {
   const context = await newContext({ locale: "zh-CN" });
   const page = await context.newPage();

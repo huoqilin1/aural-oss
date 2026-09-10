@@ -580,6 +580,13 @@ function installFunctionalRelayMocks(
       }
 
       if (parsed) {
+        if (parsed.type === "init" && new URLSearchParams(window.location.search).has("silenceReminder")) {
+          const emit = (message: Record<string, unknown>) => this.onmessage?.({data:JSON.stringify(message)});
+          setTimeout(() => emit({type:"input_ready"}), 300);
+          setTimeout(() => emit({type:"tts_text",questionIndex:0,data:{text:"你可以继续补充刚才的回答。"}}), 1500);
+          setTimeout(() => emit({type:"tts_ended",questionIndex:0}), 1700);
+          setTimeout(() => emit({type:"input_ready"}), 2800);
+        }
         if (new URLSearchParams(window.location.search).has("playbackReceipt")) {
           if (parsed.type === "init") {
             setTimeout(() => {
