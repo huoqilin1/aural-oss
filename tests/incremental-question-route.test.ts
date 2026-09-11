@@ -51,7 +51,14 @@ function harness(keyed = false, shape = "standard") {
         const generated = Object.entries(selected).map(([dimension, pair]) => ({ dimension,
           text: invalid ? "请说明工作经历？" : `你在简历中写到“${references ? "{{resume}}" : pair.resume}”，岗位要求“${references ? "{{job}}" : pair.job}”，请说明${questions[dimensions.indexOf(dimension) - 2]}的实际证据？` }));
         const keyedRows = Object.fromEntries(generated.map(({dimension,text})=>[dimension,{text}]));
-        const value = JSON.stringify(shape === "root-map" ? keyedRows
+        const slots = generated.map(({text},index)=>({slot:index+1,text}));
+        if(shape === "slot-missing")slots.pop();
+        if(shape === "slot-duplicate")slots.push(slots[0]);
+        if(shape === "slot-out-of-range")slots[0].slot=99;
+        if(shape === "slot-boolean")(slots[0] as any).slot=true;
+        if(shape === "slot-unbound-dimension")(slots[0] as any).dimension=generated[0].dimension;
+        const value = JSON.stringify(shape.startsWith("slot") ? {questions:slots}
+          : shape === "root-map" ? keyedRows
           : shape === "root-array" ? generated
           : shape === "string-map" ? {questions:Object.fromEntries(generated.map(({dimension,text})=>[dimension,text]))}
           : shape === "single-object" && generated.length === 1 ? {questions:generated[0]}
@@ -82,7 +89,7 @@ test("dimension-keyed provider responses persist urgent Q3 and all later dimensi
   assert.equal(h.rows.length,9);
 });
 
-for (const shape of ["root-map", "root-array", "string-map", "single-object", "root-single"]) {
+for (const shape of ["slots", "root-map", "root-array", "string-map", "single-object", "root-single"]) {
   test(`equivalent explicit-dimension JSON ${shape} preserves all eight anchored questions`, async () => {
     const h = harness(true, shape); h.setReferences();
     assert.equal((await h.request()).status, 200);
@@ -91,7 +98,7 @@ for (const shape of ["root-map", "root-array", "string-map", "single-object", "r
     assert.ok(h.rows.slice(2,8).every(row=>row.text.includes("负责客户项目交付") && !row.text.includes("{{")));
   });
 }
-for (const shape of ["unknown-dimension", "missing-dimension"]) {
+for (const shape of ["slot-missing", "slot-duplicate", "slot-out-of-range", "slot-boolean", "slot-unbound-dimension", "unknown-dimension", "missing-dimension"]) {
   test(`${shape} is never inferred from the requested batch`, async () => {
     const h = harness(true, shape);
     assert.equal((await h.request()).status, 503);

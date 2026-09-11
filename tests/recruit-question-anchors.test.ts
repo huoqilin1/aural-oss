@@ -103,7 +103,8 @@ test("actual generation prompt selects work evidence and actual provider validat
     context.requested=requested;
     const prompt=vm.runInContext('buildRecruitPrompt({jobTitle,jobDescription,resumeText,durationMinutes,resumeQuestions,jobQuestions,preserveOpening,preserveDimensions,requestedDimensions:requested,questionSpecVersion:contractVersion,roleType})',context);
     const example=JSON.parse(prompt[0].content.slice(prompt[0].content.indexOf('{\n  "questions"')));
-    assert.deepEqual(Object.keys(example.questions),requested);
+    assert.deepEqual(example.questions.map((item:{slot:number})=>item.slot),requested.map((_,index)=>index+1));
+    requested.forEach((dimension,index)=>assert.ok(prompt[0].content.includes(`${index+1}=${dimension}`)));
     const defined=[...prompt[0].content.matchAll(/^\s*\d+\) ([a-z_]+):/gm)].map(match=>match[1]);
     assert.deepEqual(defined,requested);
     assert.ok(!prompt[0].content.includes("完整顺序和 dimension 必须严格如下"));

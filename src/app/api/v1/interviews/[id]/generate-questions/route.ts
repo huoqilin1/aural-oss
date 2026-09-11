@@ -88,7 +88,7 @@ function recruitJobFacts(value: string): string {
     : value;
 }
 
-function parseRecruitQuestions(raw: string): { questions: Array<{ dimension: unknown; text: unknown }> } {
+function parseRecruitQuestions(raw: string, slots?: readonly string[]): { questions: Array<{ dimension: unknown; text: unknown }> } {
   const value = parseJsonSafe(raw);
   const known = new Set<string>([...LEGACY_RECRUIT_DIMENSIONS, ...EVIDENCE_V11_RECRUIT_DIMENSIONS]);
   const record = (item: unknown): item is Record<string, unknown> => !!item && typeof item === "object" && !Array.isArray(item);
@@ -106,6 +106,15 @@ function parseRecruitQuestions(raw: string): { questions: Array<{ dimension: unk
   // Never infer a missing dimension or invent/repair any substantive question text.
   const envelope = record(value) && Object.hasOwn(value, "questions") ? value.questions : value;
   const explicit = (item: unknown) => {
+    // The request binds each numbered slot to exactly one frozen dimension.
+    // No dimension is inferred from free text, missing fields, or array order.
+    if (record(item) && Object.hasOwn(item, "slot")) {
+      if (Object.keys(item).some(key => key !== "slot" && key !== "text")
+        || typeof item.slot !== "number" || !Number.isInteger(item.slot)
+        || !slots || item.slot < 1 || item.slot > slots.length
+        || !known.has(slots[item.slot - 1])) return invalid("explicit_dimension");
+      return normalize({ dimension: slots[item.slot - 1], text: item.text });
+    }
     if (!record(item) || typeof item.dimension !== "string" || !known.has(item.dimension)) {
       return invalid("explicit_dimension");
     }
@@ -113,7 +122,7 @@ function parseRecruitQuestions(raw: string): { questions: Array<{ dimension: unk
   };
   if (Array.isArray(envelope)) return { questions: envelope.map(explicit) };
   if (!record(envelope)) return invalid("envelope_type");
-  if (Object.hasOwn(envelope, "dimension")) return { questions: [explicit(envelope)] };
+  if (Object.hasOwn(envelope, "dimension") || Object.hasOwn(envelope, "slot")) return { questions: [explicit(envelope)] };
   const questions = Object.entries(envelope).map(([dimension, item]) => {
     if (!known.has(dimension)) return invalid("unknown_dimension_key");
     if (typeof item !== "string" && !record(item)) return invalid("item_type");
@@ -236,9 +245,10 @@ ${expertBlock ? `
 7. 下面给了资深面试官(王总/凌总等专家)在本岗位问过的「经典问答范例」。请学习这些范例的提问深度、角度和挖人方式,出题向这个水准看齐——可借鉴角度,但要结合本候选人简历,不要照抄。` : ""}
 
 只输出合法 JSON,不要 markdown、不要解释。下面逐项列出了本批所需的全部维度，必须为每一项填写完整问题，不能省略后续项，也不能输出本批以外的题目。text只写候选人直接听到的问题，不写题号、dimension、规则说明或出题备注。
-questions 是以本批固定 dimension 为键的对象，每个键必须保留并填写 text；不要重新命名键，也不要把多个维度合为一题。
-${JSON.stringify({ questions: Object.fromEntries(remaining.map(dimension => [dimension,
-  { text: "用完整的候选人问题替换本字段" }])) }, null, 2)}`,
+每个编号槽位已由系统绑定到一个固定维度：${remaining.map((dimension,index)=>`${index+1}=${dimension}`).join("，")}。
+questions 是对象数组；每项只有 slot 整数和 text 字符串。每个槽位恰好一次，禁止省略、重复或合并；不要输出 dimension 或重命名维度。程序按明确的 slot 绑定保存固定维度，不要求你重新生成内部标识。
+${JSON.stringify({ questions: remaining.map((_,index)=>({slot:index+1,
+  text: "用完整的候选人问题替换本字段"})) }, null, 2)}`,
     },
     {
       role: "user" as const,
@@ -465,11 +475,11 @@ export async function POST(
         Array.from(anchors).filter(([dimension]) => batchDimensions.includes(dimension)))) });
     }
     batchMessages.push({ role: "system", content:
-      `现在直接向候选人提出本批问题：${batchDimensions.join(", ")}。输出 questions 对象；每个固定维度键下只有 text 字符串。text 必须包含具体情境或任务，以及要求候选人回答的完整问句；不得用标题、能力名称、考察点、提纲、建议或列表代替问题正文。`
+      `现在直接向候选人提出本批问题：${batchDimensions.join(", ")}。槽位绑定：${batchDimensions.map((dimension,index)=>`${index+1}=${dimension}`).join(", ")}。输出 questions 数组，每项只有 slot 整数和 text 字符串，每个槽位恰好一次。text 必须包含具体情境或任务，以及要求候选人回答的完整问句；不得用标题、能力名称、考察点、提纲、建议或列表代替问题正文。`
       + (evidenceV11 ? "每个 text 都须在问句中同时保留 {{resume}} 和 {{job}} 两个原文引用标记，随后提出与两条事实相关的一个具体问题。" : "")
       + "不要输出答案、解析或任何额外字段。只输出完整的 JSON。" });
     const response = batchDimensions.length ? await generateGovernedText({ interview_id: interviewId, stage: "interview.generate_questions" }, batchMessages, text => {
-      const value = parseRecruitQuestions(text);
+      const value = parseRecruitQuestions(text, batchDimensions);
       if (!Array.isArray(value?.questions)) throw new Error("invalid_question_response");
       const seen = new Set(persistedTexts);
       const needed = batchDimensions;
@@ -504,7 +514,7 @@ export async function POST(
         seen.add(normalized);
       }
     }) : '{"questions":[]}';
-    generated = parseRecruitQuestions(response) as typeof generated;
+    generated = parseRecruitQuestions(response, batchDimensions) as typeof generated;
   } catch (error) {
     log.error("Recruitment question generation stopped", error instanceof Error ? error.name : "model_error");
     const code = error instanceof AllFourModelsFailed || error instanceof HrTaskHalted ? "ALL_MODELS_FAILED" : "PREPARATION_UNAVAILABLE";

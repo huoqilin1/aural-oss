@@ -1095,6 +1095,8 @@ export function useVoice({
   /** Start capturing microphone audio and sending to relay */
   const startListening = useCallback(async () => {
     if (isListeningRef.current) return;
+    let setupStream: MediaStream | null = null;
+    let setupContext: AudioContext | null = null;
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -1106,12 +1108,18 @@ export function useVoice({
           autoGainControl: true,
         },
       });
+      setupStream = stream;
       mediaStreamRef.current = stream;
 
       const ctx = new AudioContext();
+      setupContext = ctx;
       if (ctx.state === "suspended") void ctx.resume().catch(() => {});
       const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      await ctx.audioWorklet.addModule("/audio/microphone-capture.worklet.js");
+      const processor = new AudioWorkletNode(ctx, "oprun-microphone-capture", {
+        channelCount: 1,
+        channelCountMode: "explicit",
+      });
       const capture = new MicrophonePcmFramer(ctx.sampleRate);
 
       // A processing-only sink keeps the microphone graph off the speaker
@@ -1120,12 +1128,12 @@ export function useVoice({
       source.connect(processor);
       processor.connect(sink);
 
-      processor.onaudioprocess = (event) => {
+      processor.port.onmessage = (event: MessageEvent<Float32Array>) => {
         if (!isListeningRef.current) return;
         const connector = relayConnectorRef.current;
         if (!connector?.isReady) return;
 
-        for (const inputData of capture.push(event.inputBuffer.getChannelData(0))) {
+        for (const inputData of capture.push(event.data)) {
 
           // Compute RMS audio level (float32 range 0..1)
           let sumSq = 0;
@@ -1175,6 +1183,9 @@ export function useVoice({
       isListeningRef.current = true;
       setState((s) => ({ ...s, isListening: true, userTranscript: "" }));
     } catch (error) {
+      setupStream?.getTracks().forEach(track => track.stop());
+      if (mediaStreamRef.current === setupStream) mediaStreamRef.current = null;
+      if (setupContext) void setupContext.close().catch(() => {});
       const msg =
         error instanceof Error ? error.message : "Microphone access failed";
       onError?.(msg);
@@ -1187,7 +1198,9 @@ export function useVoice({
 
     if (processorRef.current) {
       const { processor, source, ctx, sink } = processorRef.current;
-      processor.onaudioprocess = null;
+      processor.port.onmessage = null;
+      processor.port.postMessage({ type: "stop" });
+      processor.port.close();
       processor.disconnect();
       source.disconnect();
       sink.stream.getTracks().forEach((track: MediaStreamTrack) => track.stop());
