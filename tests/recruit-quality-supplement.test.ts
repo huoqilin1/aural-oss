@@ -9,6 +9,23 @@ import { QUALITY_CASES } from "./fixtures/recruit-quality-cases";
 import { parseRecruitmentDecision, recruitmentDecisionSpeech } from "../src/lib/voice/recruitment-decision";
 const now = new Date("2026-09-10T10:00:00Z");
 
+test("split employer questions never become scored answers, including a space inside the company word", () => {
+  for (const text of ["请问公。", "请问公 司是做什么的？", "请问公。司是做什么的？", "请 问公 司是做什么的？"]) {
+    assert.equal(recruitmentUtterance(text).kind, "company_question");
+    assert.equal(recruitmentUtterance(text).question, text);
+    assert.equal(hasRecruitmentAnswer(text), false);
+    const reply = recruitmentInteractionReply(text, "数君招聘 · 工程师", now)!;
+    assert.equal(reply.sourceId, text === "请问公。" ? "interaction-clarification" : "company-intro");
+    assert.doesNotMatch(reply.text, /\[NEXT\]/);
+    assert.deepEqual(recruitmentScoringMessages([{role:"user",content:text}]), []);
+  }
+  const answer = "我负责公 司的系统开发。";
+  assert.equal(recruitmentUtterance(answer).answer, answer);
+  const mixed = recruitmentUtterance(answer + "另外，请问公 司是做什么的？");
+  assert.equal(mixed.kind, "mixed");
+  assert.equal(mixed.answer, answer);
+});
+
 test('a truncated spoken employer question is not scored as candidate evidence', () => {
   const text = '请问这个岗位的薪资福利可以保证。';
   assert.equal(recruitmentUtterance(text).kind, 'company_question');

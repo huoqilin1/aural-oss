@@ -17,7 +17,7 @@ import type { WebSocket } from "ws";
 import { shouldSuppressRecentAsrFinal, shouldSuppressAnsweredAsrFinal } from "../server/voice-relay-helpers";
 import { createAsrAudioReplayBuffer } from "../server/asr-audio-replay";
 import { questionMemory } from "../server/question-memory";
-import { recruitmentInteractionReply } from "../src/lib/voice/recruitment-quality";
+import { recruitmentInteractionReply, rememberRecruitmentInteraction } from "../src/lib/voice/recruitment-quality";
 import { companyKnowledgeVersion } from "../src/lib/recruitment-company-knowledge";
 import { readRecruitmentRealtimeDecision, recruitmentRealtimeSpeechRequest } from "../src/lib/voice/recruitment-realtime-decision";
 
@@ -811,6 +811,26 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
   vm.runInContext(ts.transpileModule(Array.from(found.values()).join("\n"), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, sandbox);
   return sandbox;
 }
+
+test("primary relay keeps fragmented employer questions on Q2 even when advance is requested", async () => {
+  for (const participant of ["请问公。", "请问公 司是做什么的？"]) {
+    let persisted = 0;
+    const sandbox = relayFunctions("voice-relay.ts", ["generateControlledResponse"], {
+      interviewDone:false, currentQuestionIndex:1, sortedQuestions:[{id:"q1"},{id:"q2"}],
+      PROMPTS:{formatHistory:()=>""}, questionTranscript:[], isZh:true,
+      getLatestAnsweredExchange:()=>({participant}), isOprunRecruitmentInterview:true,
+      recruitmentInteractionReply, rememberRecruitmentInteraction, companyKnowledgeVersion,
+      recruitmentParticipantMetadataLoaded:true, recruitmentParticipantMetadata:{},
+      ctx:{title:"数君招聘 · 工程师"}, persistRecruitmentFollowUpBudget:async()=>{persisted++;},
+      buildAgentContext:()=>{throw new Error("Company question must not enter scoring/model generation");},
+    });
+    const response = await vm.runInContext("generateControlledResponse({forceSkip:true})", sandbox);
+    assert.equal(persisted, 1);
+    assert.equal(sandbox.currentQuestionIndex, 1);
+    assert.doesNotMatch(response, /\[NEXT\]/);
+    assert.match(response, participant === "请问公。" ? /继续说完/ : /OpRun/);
+  }
+});
 
 test("primary relay real response function never calls the model for answered Q1 or answer-done Q2", async () => {
   for (const index of [0,1]) {

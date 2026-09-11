@@ -8,6 +8,10 @@ export type RecruitmentUtterance = {
 };
 const company = /(?:你们|贵司|贵公司|公司|岗位|薪资|薪酬|工资|福利|试用期|加班|双休|远程|出差|面试结果|招聘流程|oprun|your company|this role|salary|benefits)/i;
 const asking = /[？?]|(?:请问|想问|什么|哪些|哪里|在哪|怎么|如何|是否|吗|多久|多少|介绍|几轮|what|where|how|tell me|can you)/i;
+const explicitQuestion = /^(?:请问|想问|我想问|我想请问)/;
+const hanSpacing = new RegExp("(?<=\\p{Script=Han})\\s+(?=\\p{Script=Han})", "gu");
+const partialQuestion = new RegExp("^(?:请问|想问|我想问|我想请问)\\p{Script=Han}{0,2}[。！？?…]*$", "u");
+const intentText = (text: string) => text.trim().replace(hanSpacing, "");
 
 /** Conservative intent split; preserve the verbatim answer portion in mixed turns. */
 export function recruitmentUtterance(text: string): RecruitmentUtterance {
@@ -22,8 +26,13 @@ export function recruitmentUtterance(text: string): RecruitmentUtterance {
     return { kind: "clarification", answer: "", question: value };
   }
   const chunks = value.split(/(?<=[。！？!?；;])|(?:[，,]?\s*(?:另外|还有我想问|我想问一下|顺便问一下|by the way)\s*[，,]?)/i).filter(Boolean);
-  const questionIndex = chunks.findIndex(chunk => company.test(chunk) && asking.test(chunk)
-    && !/^(?:我|我们)(?:之前|以前|当时|曾|在|负责|做|通过|使用|把|将)/.test(chunk.trim()));
+  const questionIndex = chunks.findIndex(chunk => {
+    const intent = intentText(chunk);
+    // A partial "请问公。" is still a question, not ability evidence. ASR may
+    // later join the tail as "公 司"; normalize only intent matching, not records.
+    return (explicitQuestion.test(intent) || (company.test(intent) && asking.test(intent)))
+      && !/^(?:我|我们)(?:之前|以前|当时|曾|在|负责|做|通过|使用|把|将)/.test(intent);
+  });
   if (questionIndex >= 0) {
     const answer = chunks.slice(0, questionIndex).join("").trim();
     return { kind: answer ? "mixed" : "company_question", answer, question: chunks.slice(questionIndex).join("").trim() };
@@ -55,6 +64,9 @@ export function recruitmentInteractionReply(text: string, title: string, now = n
     text: "我可以解释题目的情境和要求；具体方案请按你的判断来分析。", sourceId: "interaction-boundary", question: turn.question,
   };
   if (turn.kind !== "company_question" && turn.kind !== "mixed") return null;
+  if (partialQuestion.test(intentText(turn.question))) return {
+    text: "请继续说完你的问题，我在听。", sourceId: "interaction-clarification", question: turn.question,
+  };
   const position = title.replace(/^数君招聘\s*[·•:：-]\s*/, "").trim();
   const fact = lookupCompanyFact(turn.question, position, now, COMPANY_KNOWLEDGE_RELEASES[version] || []);
   return {
