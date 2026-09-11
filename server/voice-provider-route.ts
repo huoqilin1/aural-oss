@@ -1,3 +1,4 @@
+import { requestAbortScope } from "./request-abort";
 import type { SupabaseClient } from '@supabase/supabase-js';
 import type { TtsChunkEvent } from './volcengine-tts';
 
@@ -47,21 +48,24 @@ export async function* synthesizeOffline(text: string, signal?: AbortSignal): As
     // Sentence splitting can leave punctuation-only fragments. SAPI emits no
     // samples for these; they are pauses, not failed speech payloads.
     if (!spokenCharacter.test(piece)) continue;
-  const response = await fetch(offlineVoiceEndpoint('tts'), {
-    method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:piece,format:'mp3'}),
-    signal: AbortSignal.any([AbortSignal.timeout(60_000), ...(signal ? [signal] : [])]),
-    redirect:'error',
-  });
-  if (!response.ok) throw new Error(`Offline TTS failed (${response.status})`);
-  const audio=Buffer.from(await response.arrayBuffer());
-  const wav = audio.length >= 44 && audio.toString('ascii',0,4)==='RIFF' && audio.toString('ascii',8,12)==='WAVE';
-  const mp3 = audio.length >= 128 && response.headers.get('content-type')?.split(';')[0]==='audio/mpeg'
-    && (audio.toString('ascii',0,3)==='ID3' || (audio[0]===0xff && (audio[1]&0xe0)===0xe0));
-  if (!wav && !mp3) {
-    throw new Error('Offline TTS returned invalid audio');
-  }
-  signal?.throwIfAborted();
-  yield {type:'audio',audio};
+  const abortScope = requestAbortScope([AbortSignal.timeout(60_000), ...(signal ? [signal] : [])]);
+  try {
+    const response = await fetch(offlineVoiceEndpoint('tts'), {
+      method:'POST',headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:piece,format:'mp3'}),
+      signal: abortScope.signal,
+      redirect:'error',
+    });
+    if (!response.ok) throw new Error(`Offline TTS failed (${response.status})`);
+    const audio=Buffer.from(await response.arrayBuffer());
+    const wav = audio.length >= 44 && audio.toString('ascii',0,4)==='RIFF' && audio.toString('ascii',8,12)==='WAVE';
+    const mp3 = audio.length >= 128 && response.headers.get('content-type')?.split(';')[0]==='audio/mpeg'
+      && (audio.toString('ascii',0,3)==='ID3' || (audio[0]===0xff && (audio[1]&0xe0)===0xe0));
+    if (!wav && !mp3) {
+      throw new Error('Offline TTS returned invalid audio');
+    }
+    signal?.throwIfAborted();
+    yield {type:'audio',audio};
+  } finally { abortScope.dispose(); }
   }
   yield {type:'done'};
 }

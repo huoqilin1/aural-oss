@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { runHrModelTask, type TaskIdentity } from "./hr-model-task";
 import { ensureHrUsageReady, queueHrUsage } from "./hr-model-usage-outbox";
 import { withGlmSlot } from "./glm-capacity";
+import { requestAbortScope } from "./request-abort";
 import { GlmPreOutputOverload, overloadDelay, waitForGlm } from "./glm-overload-retry";
 
 type RequestOptions = {
@@ -404,16 +405,7 @@ async function callOpenAICompatible(
     reqBody.response_format = { type: "json_object" };
     reqBody.thinking = { type: "disabled" };
   }
-  const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${endpoint.apiKey}`,
-    },
-    body: JSON.stringify(reqBody),
-    // Abort the actual transport, not just a Promise.race that leaves billing
-    // and an in-flight request running while the fallback starts.
-    signal: AbortSignal.any([...(capacitySignal ? [capacitySignal] : []), ...(options?.signal ? [options.signal] : []), AbortSignal.timeout((() => {
+  const abortScope = requestAbortScope([...(capacitySignal ? [capacitySignal] : []), ...(options?.signal ? [options.signal] : []), AbortSignal.timeout((() => {
       const configured = Number(options?.deep
         ? process.env.FALLBACK_DEEP_ATTEMPT_TIMEOUT_MS
         : process.env.FALLBACK_ATTEMPT_TIMEOUT_MS);
@@ -425,40 +417,48 @@ async function callOpenAICompatible(
       return Number.isSafeInteger(configured) && configured > 0
         ? configured
         : (options?.deep || reasoningEnabled ? 180_000 : 30_000);
-    })())]),
-  });
+    })())]);
+  try {
+    const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${endpoint.apiKey}` },
+      body: JSON.stringify(reqBody),
+      signal: abortScope.signal,
+    });
 
-  if (!res.ok) {
-    // Preserve only bounded numeric diagnostics, never provider message text.
-    let providerCode = "";
-    let noOutputOrUsage = false;
-    try {
-      const failure = await res.json();
-      noOutputOrUsage = Boolean(failure?.error) && (!failure?.choices || (Array.isArray(failure.choices) && failure.choices.length === 0)) && !failure?.usage && !failure?.content && !failure?.reasoning_content;
-      const code = String(failure?.error?.code ?? "");
-      if (/^[0-9]{3,6}$/.test(code)) providerCode = code;
-    } catch { /* A non-JSON error still retains the HTTP status. */ }
-    const retry = res.headers.get("retry-after") ?? "";
-    const retrySeconds = /^[0-9]{1,5}$/.test(retry) ? Number(retry) : null;
-    if (recruitGlmOnlyEnabled() && endpoint.provider === "zhipu"
-        && endpoint.baseUrl === "https://open.bigmodel.cn/api/coding/paas/v4"
-        && res.status === 429 && providerCode === "1305" && noOutputOrUsage) {
-      throw new GlmPreOutputOverload(retry === "" ? 0 : retrySeconds ?? 91);
-    }
-    throw new Error(`LLM API ${res.status}`
-      + (providerCode ? ` code=${providerCode}` : "")
-      + (retrySeconds !== null && retrySeconds <= 86400 ? ` retry_after=${retrySeconds}` : ""));
-  }
-
-  const data = await res.json();
-  const usage = data.usage
-    ? {
-        promptTokens: knownTokenCount(data.usage.prompt_tokens),
-        completionTokens: knownTokenCount(data.usage.completion_tokens),
-        cachedInputTokens: knownTokenCount(data.usage.prompt_cache_hit_tokens ?? data.usage.prompt_tokens_details?.cached_tokens),
+    if (!res.ok) {
+      // Preserve only bounded numeric diagnostics, never provider message text.
+      let providerCode = "";
+      let noOutputOrUsage = false;
+      try {
+        const failure = await res.json();
+        noOutputOrUsage = Boolean(failure?.error) && (!failure?.choices || (Array.isArray(failure.choices) && failure.choices.length === 0)) && !failure?.usage && !failure?.content && !failure?.reasoning_content;
+        const code = String(failure?.error?.code ?? "");
+        if (/^[0-9]{3,6}$/.test(code)) providerCode = code;
+      } catch { /* A non-JSON error still retains the HTTP status. */ }
+      const retry = res.headers.get("retry-after") ?? "";
+      const retrySeconds = /^[0-9]{1,5}$/.test(retry) ? Number(retry) : null;
+      if (recruitGlmOnlyEnabled() && endpoint.provider === "zhipu"
+          && endpoint.baseUrl === "https://open.bigmodel.cn/api/coding/paas/v4"
+          && res.status === 429 && providerCode === "1305" && noOutputOrUsage) {
+        throw new GlmPreOutputOverload(retry === "" ? 0 : retrySeconds ?? 91);
       }
-    : undefined;
-  return { text: data.choices?.[0]?.message?.content?.trim() || "", usage };
+      throw new Error(`LLM API ${res.status}`
+        + (providerCode ? ` code=${providerCode}` : "")
+        + (retrySeconds !== null && retrySeconds <= 86400 ? ` retry_after=${retrySeconds}` : ""));
+    }
+
+    const data = await res.json();
+    const usage = data.usage
+      ? {
+          promptTokens: knownTokenCount(data.usage.prompt_tokens),
+          completionTokens: knownTokenCount(data.usage.completion_tokens),
+          cachedInputTokens: knownTokenCount(data.usage.prompt_cache_hit_tokens ?? data.usage.prompt_tokens_details?.cached_tokens),
+        }
+      : undefined;
+    return { text: data.choices?.[0]?.message?.content?.trim() || "", usage };
+  } finally { abortScope.dispose(); }
 }
 
 function endpointKey(endpoint: RelayLlmEndpoint): string {
