@@ -57,6 +57,19 @@ test("explicit anchor references preserve source exactly and never repair missin
   assert.throws(() => renderRecruitQuestionAnchorReferences(draft, undefined), /question_anchor_invalid/);
 });
 
+test("exact legacy source spans receive quotes without adding or changing facts", () => {
+  const pair = { resume: "负责订单核对并记录差异", job: "核对合同与交付结果" };
+  const draft = `你的简历写到${pair.resume}，岗位要求${pair.job}，请说明如何核验？`;
+  const expected = `你的简历写到“${pair.resume}”，岗位要求“${pair.job}”，请说明如何核验？`;
+  assert.equal(renderRecruitQuestionAnchorReferences(draft, pair), expected);
+  assert.equal(renderRecruitQuestionAnchorReferences(expected, pair), expected);
+  assert.equal(renderRecruitQuestionAnchorReferences(`岗位要求${pair.job}，简历写到${pair.resume}，如何核验？`, pair),
+    `岗位要求“${pair.job}”，简历写到“${pair.resume}”，如何核验？`);
+  const missing = `简历写到${pair.resume}，如何核验？`;
+  assert.equal(renderRecruitQuestionAnchorReferences(missing, pair), missing);
+  assert.equal(renderRecruitQuestionAnchorReferences("共同事实", {resume:"共同事实",job:"共同事实"}), "共同事实");
+});
+
 test("bare anchor markers are quoted only after JSON parsing without changing source facts", () => {
   const pair = { resume: '复核"订单"并记录40%差异$&', job: "核对合同与交付结果" };
   const parsed = JSON.parse(JSON.stringify({ text: "你的简历写到{{resume}}，岗位要求{{job}}，请说明如何核对？" }));

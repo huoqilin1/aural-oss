@@ -8,7 +8,30 @@ export function renderRecruitQuestionAnchorReferences(
   question: string,
   anchors: { resume: string; job: string } | undefined,
 ): string {
-  if (!question.includes("{{")) return question;
+  if (!question.includes("{{")) {
+    if (!anchors?.resume || !anchors.job) return question;
+    // Legacy responses sometimes copy the exact facts instead of the markers.
+    // Quote only two existing, non-overlapping source spans; never add facts.
+    const occurrences = (source: string) => {
+      const found: Array<{ start: number; end: number }> = [];
+      for (let start = question.indexOf(source); start >= 0; start = question.indexOf(source, start + 1)) {
+        found.push({ start, end: start + source.length });
+      }
+      return found;
+    };
+    const pair = occurrences(anchors.resume).flatMap(resume => occurrences(anchors.job)
+      .filter(job => resume.end <= job.start || job.end <= resume.start).map(job => [resume, job]))[0];
+    if (!pair) return question; // Existing content validators reject missing facts.
+    let result = question;
+    for (const { start, end } of pair.sort((a, b) => b.start - a.start)) {
+      const before = question[start - 1], after = question[end];
+      const quoted = (before === "“" && after === "”") || (before === '"' && after === '"')
+        || (before === "「" && after === "」") || (before === "『" && after === "』")
+        || (before === "‘" && after === "’");
+      if (!quoted) result = `${result.slice(0, start)}“${result.slice(start, end)}”${result.slice(end)}`;
+    }
+    return result;
+  }
   if (!anchors?.resume || !anchors.job || !question.includes("{{resume}}") || !question.includes("{{job}}")
     || /\{\{|\}\}/.test(question.replace(/\{\{(?:resume|job)\}\}/g, ""))) {
     throw new Error("question_anchor_invalid");
