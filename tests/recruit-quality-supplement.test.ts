@@ -9,6 +9,14 @@ import { QUALITY_CASES } from "./fixtures/recruit-quality-cases";
 import { parseRecruitmentDecision, recruitmentDecisionSpeech } from "../src/lib/voice/recruitment-decision";
 const now = new Date("2026-09-10T10:00:00Z");
 
+test('a truncated spoken employer question is not scored as candidate evidence', () => {
+  const text = '请问这个岗位的薪资福利可以保证。';
+  assert.equal(recruitmentUtterance(text).kind, 'company_question');
+  assert.equal(hasRecruitmentAnswer(text), false);
+  assert.equal(recruitmentInteractionReply(text, '数君招聘 · 工程师', now)?.sourceId, 'needs_hr_confirmation');
+  assert.equal(recruitmentUtterance('我负责薪资福利系统的开发。').kind, 'answer');
+});
+
 test("first company question after a transition uses approved facts without a transcript opening", () => {
   for (const question of ["请问公司是做什么的？", "请问这个岗位的薪资福利可以保证多少？"]) {
     const transcript = [{ role: "user", text: question }];

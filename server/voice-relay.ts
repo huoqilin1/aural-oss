@@ -101,6 +101,7 @@ import { loadInterviewRelayLlmRoute } from "./interview-llm-route";
 import { loadVoiceRoute, offlineVoiceEndpoint, synthesizeOffline } from './voice-provider-route';
 import { closeAsrSocket } from './close-asr-socket';
 import { resetOfflineAsr } from './offline-asr-reset';
+import { OfflineAsrDrain } from './offline-asr-drain';
 
 const log = createLogger("voice-relay");
 
@@ -1338,6 +1339,7 @@ async function handleBrowserConnection(
   let asrProtocolFailureQuestion = -1;
   let asrProtocolFailures = 0;
   let asrAudioSeq = 1;
+  const offlineAsrDrain = new OfflineAsrDrain();
   let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 
   // ── TTS state ──────────────────────────────────────────────────
@@ -1796,7 +1798,7 @@ async function handleBrowserConnection(
 
   function noteIncomingAudioActivity(pcm: Buffer) {
     receivedMicrophoneFrames++;
-    if (pcm.length < 2) return;
+    if (pcm.length < 2) return false;
 
     let sumSq = 0;
     let samples = 0;
@@ -1805,7 +1807,7 @@ async function handleBrowserConnection(
       sumSq += sample * sample;
       samples++;
     }
-    if (samples === 0) return;
+    if (samples === 0) return false;
 
     const rms = Math.sqrt(sumSq / samples);
     if (rms >= ASR_AUDIO_ACTIVITY_RMS_THRESHOLD) {
@@ -1825,6 +1827,7 @@ async function handleBrowserConnection(
         }
       }
     }
+    return rms >= ASR_AUDIO_ACTIVITY_RMS_THRESHOLD;
   }
 
   function logVoiceInputProgress(reason: string) {
@@ -1835,6 +1838,7 @@ async function handleBrowserConnection(
 
   function shouldHoldPendingAsrFinalForActiveSpeech(finalText: string): boolean {
     if (!finalText || ASR_ACTIVE_SPEECH_HOLD_MS <= 0) return false;
+    if (voiceRoute.provider === 'offline' && offlineAsrDrain.pending) return true;
     // 王总 2026-09-03：删除"短句(<12词/80字)不受保护"的豁免——答题开头的短段
     // 停顿后继续讲时最容易被打断；真正答完的人此时麦是静的，不受影响。
     const heldForMs = pendingAsrFinalStartedAt ? Date.now() - pendingAsrFinalStartedAt : 0;
@@ -3875,6 +3879,7 @@ async function handleBrowserConnection(
 
   async function connectAsrUngated() {
     asrIntentionalClose = false;
+    offlineAsrDrain.reset();
     if (voiceRoute.provider === 'offline' && asrWs?.readyState === WebSocket.OPEN) {
       const retained = asrWs;
       asrAlive = false;
@@ -3951,6 +3956,10 @@ async function handleBrowserConnection(
       if (voiceRoute.provider === 'offline' && !asrAlive) return;
       try {
         const resp = parseAsrResponse(Buffer.from(data));
+        if (voiceRoute.provider === 'offline' && resp.message === 'offline_audio_processed') {
+          offlineAsrDrain.acknowledge(resp.audioSequence);
+          return;
+        }
 
         if (resp.errorCode != null) {
           handleAsrProtocolError(resp.errorCode);
@@ -4189,6 +4198,7 @@ async function handleBrowserConnection(
         for (const pcm of replay) {
           if (!asrWs || asrWs.readyState !== WebSocket.OPEN || !asrAlive) throw new Error("ASR disconnected during replay");
           asrAudioSeq++;
+          if (voiceRoute.provider === 'offline') offlineAsrDrain.sent(asrAudioSeq, pcm.length, true);
           asrWs.send(buildBigModelAudioRequest(pcm, asrAudioSeq));
         }
 
@@ -4274,12 +4284,13 @@ async function handleBrowserConnection(
 
       if (msg.type === "audio" && msg.data) {
         const pcm = Buffer.from(msg.data, "hex");
-        noteIncomingAudioActivity(pcm);
+        const activeSpeech = noteIncomingAudioActivity(pcm);
         if (!isTransitioning && !ttsSpeaking && !suppressAsrResults && !interviewDone) {
           asrAudioReplay.append(currentQuestionIndex, pcm);
         }
         if (!asrAlive || isTransitioning || !asrWs || asrWs.readyState !== WebSocket.OPEN) return;
         asrAudioSeq++;
+        if (voiceRoute.provider === 'offline') offlineAsrDrain.sent(asrAudioSeq, pcm.length, activeSpeech);
         asrWs.send(buildBigModelAudioRequest(pcm, asrAudioSeq));
       } else if (msg.type === "barge_in") {
         if (ttsSpeaking || generatingResponse) {

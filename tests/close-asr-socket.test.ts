@@ -6,6 +6,34 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { closeAsrSocket } from '../server/close-asr-socket';
 import { waitForAsrSocketOpen } from '../server/asr-socket-open';
 import { resetOfflineAsr } from '../server/offline-asr-reset';
+import { OfflineAsrDrain } from '../server/offline-asr-drain';
+import { parseAsrResponse } from '../server/volcengine-asr';
+
+test('offline segment cannot finish a turn until later speech and VAD silence are decoded', () => {
+  const drain = new OfflineAsrDrain();
+  drain.sent(2, 32000, true);
+  drain.acknowledge(2);
+  assert.equal(drain.pending, true);
+  drain.sent(3, 24000, false); // pause before the last words
+  drain.sent(4, 16000, true);
+  drain.sent(5, 32000, false);
+  drain.acknowledge(3); // first VAD segment finished, tail still queued
+  assert.equal(drain.pending, true);
+  drain.acknowledge(4);
+  assert.equal(drain.pending, true);
+  const payload = Buffer.from(JSON.stringify({message:'offline_audio_processed',audio_sequence:5}));
+  const size = Buffer.alloc(4); size.writeUInt32BE(payload.length);
+  drain.acknowledge(parseAsrResponse(Buffer.concat([Buffer.from([0x11,0x90,0x10,0]),size,payload])).audioSequence);
+  assert.equal(drain.pending, false);
+  drain.sent(6,3200,false); // continuing silence cannot move the goal forever
+  assert.equal(drain.pending,false);
+  drain.reset();
+  drain.sent(2,32000,true);
+  drain.sent(3,32000,false);
+  assert.equal(drain.pending,true); // old turn's receipt was cleared
+  drain.acknowledge(3);
+  assert.equal(drain.pending,false);
+});
 import {gunzipSync} from 'node:zlib';
 
 test('ten offline connections reset for eight turns without reopening their sockets', async()=>{

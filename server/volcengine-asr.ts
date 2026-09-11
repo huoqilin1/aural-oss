@@ -173,6 +173,7 @@ export interface AsrUtterance {
 }
 
 export interface AsrResponse {
+  audioSequence?: number;
   messageType: number;
   isLastPackage?: boolean;
   sequence?: number;
@@ -254,6 +255,7 @@ export function parseAsrResponse(data: Buffer): AsrResponse {
         isLastPackage: isLast,
         sequence,
         reqid: json.reqid,
+        audioSequence: json.audio_sequence,
         code: json.code,
         message: typeof json.message === "string" ? json.message : JSON.stringify(json.message),
         text: json.result?.text,

@@ -1,3 +1,4 @@
+import { OfflineAsrDrain } from '../server/offline-asr-drain';
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -806,7 +807,7 @@ function relayFunctions(file: string, names: string[], context: Record<string, u
   }
   visit(source);
   assert.equal(found.size, names.length);
-  const sandbox=vm.createContext({asrAlive:true, asrAudioReplay:{acknowledge:()=>{}}, transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, isTransitioning:false, generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false, suppressAsrResults:false, asrAccumulator:"",heldBargeInInterimText:"",clearHeldBargeInInterim:()=>{}, logVoiceInputProgress:()=>{}, recoverDeferredUserTurnBeforeInactivity:async()=>false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
+  const sandbox=vm.createContext({voiceRoute:{provider:'volcengine'},offlineAsrDrain:new OfflineAsrDrain(), asrAlive:true, asrAudioReplay:{acknowledge:()=>{}}, transitionGeneration:0, pendingProgressiveTransition:false, responseGenerationBlocked:false, isTransitioning:false, generatingResponse:false, ttsSpeaking:false, awaitingFinalResponse:false, suppressAsrResults:false, asrAccumulator:"",heldBargeInInterimText:"",clearHeldBargeInInterim:()=>{}, logVoiceInputProgress:()=>{}, recoverDeferredUserTurnBeforeInactivity:async()=>false, retainDeferredAnswerBeforeTransition:()=>{}, ...context});
   vm.runInContext(ts.transpileModule(Array.from(found.values()).join("\n"), {compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText, sandbox);
   return sandbox;
 }
@@ -1113,4 +1114,13 @@ test('actual offline relay retains ten sockets across eight question transitions
   }
   assert.equal(resets,8);
  }
+});
+
+
+test('actual relay waits for offline decoder receipts even after microphone silence',()=>{
+ const drain=new OfflineAsrDrain();drain.sent(2,32000,true);drain.sent(3,32000,false);drain.acknowledge(2);
+ const sandbox=relayFunctions('voice-relay.ts',['shouldHoldPendingAsrFinalForActiveSpeech'],{
+  voiceRoute:{provider:'offline'},offlineAsrDrain:drain,ASR_ACTIVE_SPEECH_HOLD_MS:1000,
+ });
+ assert.equal(vm.runInContext("shouldHoldPendingAsrFinalForActiveSpeech('请问岗位薪资福利可以保证。')",sandbox),true);
 });

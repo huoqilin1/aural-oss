@@ -165,6 +165,13 @@ async def recognition(request):
                     text=await asyncio.get_running_loop().run_in_executor(asr_pool,recognize,samples)
                 if text.strip():
                     await ws.send_bytes(response_packet(text))
+            # Confirm only after VAD and every resulting decode have finished.
+            # A first segment is not proof that the rest of the spoken turn was
+            # processed, especially when ten connections share inference.
+            sequence=abs(struct.unpack('>i',packet[4:8])[0]) if packet[1]&1 else 0
+            ack=json.dumps({'code':0,'message':'offline_audio_processed',
+                'audio_sequence':sequence}).encode()
+            await ws.send_bytes(bytes([0x11,0x90,0x10,0])+struct.pack('>I',len(ack))+ack)
     except Exception:
         # Never log audio, transcripts, or model payloads.
         await ws.close(code=1011,message=b'offline_asr_failed')

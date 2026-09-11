@@ -7,7 +7,7 @@ export type RecruitmentUtterance = {
   question: string;
 };
 const company = /(?:你们|贵司|贵公司|公司|岗位|薪资|薪酬|工资|福利|试用期|加班|双休|远程|出差|面试结果|招聘流程|oprun|your company|this role|salary|benefits)/i;
-const asking = /[？?]|(?:什么|哪些|哪里|在哪|怎么|如何|是否|吗|多久|多少|介绍|几轮|what|where|how|tell me|can you)/i;
+const asking = /[？?]|(?:请问|想问|什么|哪些|哪里|在哪|怎么|如何|是否|吗|多久|多少|介绍|几轮|what|where|how|tell me|can you)/i;
 
 /** Conservative intent split; preserve the verbatim answer portion in mixed turns. */
 export function recruitmentUtterance(text: string): RecruitmentUtterance {
