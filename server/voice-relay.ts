@@ -33,7 +33,6 @@ import { waitForAsrSocketOpen } from "./asr-socket-open";
 import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentControlOnly, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
 import type { RelayLlmRoute } from "../src/lib/relay-llm-route";
 import {
-  isProgressiveOpeningOnly,
   mergeExpandedQuestionSet,
   shouldWaitForQuestionExpansion,
 } from "../src/lib/voice/dynamic-question-sync";
@@ -1566,30 +1565,32 @@ async function handleBrowserConnection(
       if (incoming.length > sortedQuestions.length) {
         log.warn(`Rejected ${source} question refresh that changed an active question`);
       }
-      return false;
+    } else {
+      sortedQuestions = merged;
+      if (browserWs.readyState === WebSocket.OPEN) {
+        browserWs.send(JSON.stringify({
+          type: "question_count_update",
+          totalQuestions: sortedQuestions.length,
+          questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
+        }));
+      }
+      log.info(`Dynamic questions refreshed from ${source}: total=${sortedQuestions.length}`);
     }
-    sortedQuestions = merged;
-    if (browserWs.readyState === WebSocket.OPEN) {
-      browserWs.send(JSON.stringify({
-        type: "question_count_update",
-        totalQuestions: sortedQuestions.length,
-        questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
-      }));
-    }
-    log.info(`Dynamic questions refreshed from ${source}: total=${sortedQuestions.length}`);
     if (
       pendingProgressiveTransition
-      && !isProgressiveOpeningOnly(sortedQuestions)
       && currentQuestionIndex < sortedQuestions.length - 1
     ) {
-      pendingProgressiveTransition = false;
       setTimeout(() => {
-        if (!isTransitioning && !interviewDone) {
+        // Keep the pending transition until handleTransition actually accepts
+        // it. A refresh during playback/speech must retry on the next poll,
+        // even if the question set has not grown since the last poll.
+        if (pendingProgressiveTransition && !isTransitioning && !interviewDone
+          && !ttsSpeaking && !generatingResponse && !responseGenerationBlocked) {
           handleTransition(true).catch(log.error);
         }
       }, 0);
     }
-    return true;
+    return Boolean(merged);
   }
 
   async function refreshDynamicQuestions(): Promise<boolean> {
@@ -2892,8 +2893,11 @@ async function handleBrowserConnection(
 
   async function handleTransition(auto = false) {
     if (interviewDone) return;
-    if (auto && isOprunRecruitmentInterview && lastListeningAudioActivityAt > 0
-      && Date.now() - lastListeningAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS) return;
+    if (auto && isOprunRecruitmentInterview && (
+      (voiceRoute.provider === 'offline' && offlineAsrDrain.pending)
+      || (lastListeningAudioActivityAt > 0
+        && Date.now() - lastListeningAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS)
+    )) return;
     if (isTransitioning) {
       if (!auto) queueManualTransition("next");
       return;
@@ -2954,12 +2958,12 @@ async function handleBrowserConnection(
     // Q1 must advance to it immediately.
     if (shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex)) {
       const waitUntil = Date.now() + 10_000;
-      while (isProgressiveOpeningOnly(sortedQuestions) && Date.now() < waitUntil) {
+      while (shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex) && Date.now() < waitUntil) {
         await refreshDynamicQuestions();
-        if (!isProgressiveOpeningOnly(sortedQuestions)) break;
+        if (!shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex)) break;
         await new Promise((resolve) => setTimeout(resolve, 2_000));
       }
-      if (isProgressiveOpeningOnly(sortedQuestions)) {
+      if (shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex)) {
         isTransitioning = false;
         pendingProgressiveTransition = true;
         clearSilenceAutoSkip();
@@ -3644,6 +3648,10 @@ async function handleBrowserConnection(
   /** AFK 守卫:页面开着但人不在,空转两题后诚实收尾,不留全空回答记录 */
   async function recoverDeferredUserTurnBeforeInactivity(): Promise<boolean> {
     if (!isOprunRecruitmentInterview) return false;
+    if (voiceRoute.provider === 'offline' && offlineAsrDrain.pending) {
+      armSilenceAutoSkip();
+      return true;
+    }
     // Raw microphone speech is activity even if the recognizer has not
     // produced a first token yet. Never wait for text to protect a speaker.
     if (lastUserAudioActivityAt > 0

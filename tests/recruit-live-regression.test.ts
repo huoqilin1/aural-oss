@@ -875,7 +875,8 @@ test("primary actual transition preserves the answer until ACK and reopens input
     consumedRecruitmentControlKey:"old-control", recentAcceptedUserFinals:[{text:"我答完了",at:1}],
     browserWs:{readyState:1,send:(s:string)=>events.push(JSON.parse(s))}, WebSocket:{OPEN:1},
     reopenAsr:async()=>{}, log:{error:(err:unknown)=>{throw err;}, info:noop},
-    shouldWaitForQuestionExpansion:()=>false, sortedQuestions:[{text:"介绍"},{text:"经历"},{text:"协作"}],
+    shouldWaitForQuestionExpansion, isProgressiveOpeningOnly,
+    sortedQuestions:[{text:"介绍",order:0,description:"oprun_dimension:core_experience"},{text:"经历",order:1,description:"oprun_dimension:project_ownership"}],
     clearPendingAsrFinal:noop, clearSilenceAutoSkip:noop, suppressAsrResults:false,
     disconnectAsr:noop, cancelTts:noop, generatingResponse:false, asrAccumulator:"",
     userTurnsOnCurrentQ:1, lastResponseWasCorrection:false, cachedWhiteboardDescription:"",
@@ -883,6 +884,9 @@ test("primary actual transition preserves the answer until ACK and reopens input
     refreshDynamicQuestions:async()=>{}, isZh:true, summarizeQuestion:()=>new Promise<string>(()=>{}), speakWithBackgroundSummary,
     speakAndHandle:async()=>{}, llmRoute:{}, ctx:{interviewId:"synthetic-interview"}, ctxSessionId:"synthetic-session", questionSummaries:[], runQueuedManualTransition:()=>false,
   });
+  sandbox.refreshDynamicQuestions=async()=>{
+    if(sandbox.sortedQuestions.length===2)sandbox.sortedQuestions.push({text:"协作",order:2,description:"oprun_dimension:core_skill_evidence"});
+  };
   const failed = vm.runInContext("handleTransition()", sandbox);
   assert.equal(sandbox.currentQuestionIndex, 1);
   assert.equal(sandbox.questionTranscript, transcript);
@@ -1123,4 +1127,54 @@ test('actual relay waits for offline decoder receipts even after microphone sile
   voiceRoute:{provider:'offline'},offlineAsrDrain:drain,ASR_ACTIVE_SPEECH_HOLD_MS:1000,
  });
  assert.equal(vm.runInContext("shouldHoldPendingAsrFinalForActiveSpeech('请问岗位薪资福利可以保证。')",sandbox),true);
+});
+
+
+test('offline decode backlog cannot trigger a silence reminder 1235ms after speech',async()=>{
+ const drain=new OfflineAsrDrain();drain.sent(2,32000,true);drain.sent(3,32000,false);drain.acknowledge(2);
+ let rearmed=0;
+ const sandbox=relayFunctions('voice-relay.ts',['recoverDeferredUserTurnBeforeInactivity'],{
+  isOprunRecruitmentInterview:true,voiceRoute:{provider:'offline'},offlineAsrDrain:drain,
+  lastUserAudioActivityAt:Date.now()-1235,ASR_ACTIVE_SPEECH_HOLD_MS:1200,
+  armSilenceAutoSkip:()=>{rearmed++;},
+  queuedUserUtteranceWhileGenerating:'',pendingUserUtteranceWhileSuppressed:'',pendingAsrFinalText:'重复的回答前半句',
+  asrAccumulator:'',heldBargeInInterimText:'',mergeAsrSegments,questionTranscript:[],
+  looksLikeAssistantPlaybackEcho:()=>false,isDuplicateUserFinal:()=>true,
+ });
+ assert.equal(await vm.runInContext('recoverDeferredUserTurnBeforeInactivity()',sandbox),true);
+ assert.equal(rearmed,1);
+ drain.acknowledge(3);
+ assert.equal(await vm.runInContext('recoverDeferredUserTurnBeforeInactivity()',sandbox),false);
+});
+
+test('a pending automatic question transition preserves speech still being decoded',async()=>{
+ const drain=new OfflineAsrDrain();drain.sent(2,32000,true);drain.sent(3,32000,false);drain.acknowledge(2);
+ const sandbox=relayFunctions('voice-relay.ts',['handleTransition'],{
+  interviewDone:false,isOprunRecruitmentInterview:true,voiceRoute:{provider:'offline'},offlineAsrDrain:drain,
+  pendingProgressiveTransition:true,currentQuestionIndex:1,
+ });
+ await vm.runInContext('handleTransition(true)',sandbox);
+ assert.equal(sandbox.pendingProgressiveTransition,true);
+ assert.equal(sandbox.currentQuestionIndex,1);
+});
+
+test('pending Q2 advances on Q3 availability and retries after playback without waiting for Q8',async()=>{
+ const rows=Array.from({length:3},(_,order)=>({id:`q${order}`,order,text:`模拟题${order}`,type:'OPEN_ENDED'}));
+ const callbacks:Array<()=>void>=[];let advanced=0;
+ const sandbox=relayFunctions('voice-relay.ts',['normalizeDynamicQuestions','applyDynamicQuestionSet'],{
+  sortedQuestions:rows.slice(0,2),currentQuestionIndex:1,mergeExpandedQuestionSet,
+  pendingProgressiveTransition:true,ttsSpeaking:true,interviewDone:false,
+  browserWs:{readyState:1,send:()=>{}},WebSocket:{OPEN:1},log:{info:()=>{},warn:()=>{}},
+  setTimeout:(fn:()=>void)=>{callbacks.push(fn);},
+ });
+ sandbox.handleTransition=async()=>{advanced++;sandbox.pendingProgressiveTransition=false;};
+ sandbox.rows=rows;
+ assert.equal(vm.runInContext("applyDynamicQuestionSet(rows,'database')",sandbox),true);
+ assert.equal(callbacks.length,1);callbacks.shift()!();assert.equal(advanced,0);
+ assert.equal(sandbox.pendingProgressiveTransition,true);
+ sandbox.ttsSpeaking=false;
+ assert.equal(vm.runInContext("applyDynamicQuestionSet(rows,'database')",sandbox),false);
+ callbacks.shift()!();await Promise.resolve();assert.equal(advanced,1);
+ vm.runInContext("applyDynamicQuestionSet(rows,'database')",sandbox);
+ assert.equal(callbacks.length,0);
 });

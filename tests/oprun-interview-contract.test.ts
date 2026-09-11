@@ -210,14 +210,16 @@ test("both voice relays refresh questions during an active candidate session", (
     assert.match(source, /async function refreshDynamicQuestions/);
     assert.match(source, /type: "question_count_update"/);
     assert.match(source, /type === "question_set_update"/);
-    assert.match(source, /isProgressiveOpeningOnly\(sortedQuestions\)/);
+    assert.match(source, source === relay
+      ? /shouldWaitForQuestionExpansion\(sortedQuestions, currentQuestionIndex\)/
+      : /isProgressiveOpeningOnly\(sortedQuestions\)/);
     assert.match(source, /2_000/);
     assert.match(source, /Dynamic questions refreshed from/);
   }
   assert.match(relay, /await refreshDynamicQuestions\(\)/);
   assert.match(relay, /const waitUntil = Date\.now\(\) \+ 10_000/);
   assert.match(relay, /shouldWaitForQuestionExpansion\(sortedQuestions, currentQuestionIndex\)/);
-  assert.match(relay, /while \(isProgressiveOpeningOnly\(sortedQuestions\)/);
+  assert.match(relay, /while \(shouldWaitForQuestionExpansion\(sortedQuestions, currentQuestionIndex\)/);
   assert.match(openAiRelay, /next_question_not_ready/);
   assert.match(openAiRelay, /This wait is not an additional interview question/);
   assert.match(openAiRelay, /pendingProgressiveTransition/);
