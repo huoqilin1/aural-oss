@@ -32,9 +32,9 @@ tts = None if TTS_ENGINE=='windows' else so.OfflineTts(so.OfflineTtsConfig(model
         lexicon=str(TTS/'lexicon.txt'), tokens=str(TTS/'tokens.txt'), dict_dir=str(TTS/'dict')),
     num_threads=2, provider='cpu')))
 asr_pool = ThreadPoolExecutor(max_workers=2)
-# Windows SAPI objects are thread-local. Keep neural engines serialized, but
-# synthesize independent Windows utterances concurrently for live interviews.
-tts_pool = ThreadPoolExecutor(max_workers=4 if TTS_ENGINE == 'windows' else 1)
+# Native SAPI engines can share process-global state despite thread-local COM
+# objects. Serialize synthesis; ASR and the ten socket sessions remain concurrent.
+tts_pool = ThreadPoolExecutor(max_workers=1)
 slots = asyncio.Semaphore(10)
 audio_cache = OrderedDict()
 cache_bytes = 0
