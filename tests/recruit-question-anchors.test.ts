@@ -121,7 +121,7 @@ test("actual generation prompt selects work evidence and actual provider validat
     const defined=[...prompt[0].content.matchAll(/^\s*\d+\) ([a-z_]+):/gm)].map(match=>match[1]);
     assert.deepEqual(defined,requested);
     assert.ok(!prompt[0].content.includes("完整顺序和 dimension 必须严格如下"));
-    assert.ok(prompt[1].content.includes(`dimension 必须依次为 ${requested.join(", ")}`));
+    assert.ok(prompt[1].content.includes(`槽位绑定为 ${requested.map((dimension,index)=>`${index+1}=${dimension}`).join(", ")}`));
     assert.ok(!prompt[1].content.includes("请生成这场 AI 一面的题目"));
   }
   assert.equal(input.at(-2)?.role,"system");

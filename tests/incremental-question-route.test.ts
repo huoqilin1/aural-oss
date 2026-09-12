@@ -45,6 +45,9 @@ function harness(keyed = false, shape = "standard") {
       generateGovernedText: async (_identity: unknown, messages: Array<{ role:string; content: string }>, validate: (text: string) => void) => {
         const selected = JSON.parse(messages.filter(message=>message.role==='user').at(-1)!.content) as Record<string, { resume: string; job: string }>;
         assert.equal(messages.at(-1)!.role,'system');
+        const resumeMessage = messages.find(message => message.role === 'user' && message.content.includes('--- 候选人简历 ---'))!;
+        assert.ok(resumeMessage.content.includes('questions 必须是对象数组，每项只有 slot 整数和 text 字符串'));
+        assert.ok(!resumeMessage.content.includes('每个固定维度键下填写 text'));
         assert.ok(messages.at(-1)!.content.includes('不得用标题、能力名称、考察点、提纲、建议或列表代替问题正文'));
         requested.push(Object.keys(selected));
         if (requested.length === 2) { reached(); if (holdSecond) await blocked; if (failSecond) throw new ModelFailure(); }

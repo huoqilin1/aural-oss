@@ -267,7 +267,7 @@ ${expertBlock ? `
 ${expertBlock}
 --- 范例结束 ---
 ` : ""}
-仅生成当前批次的 ${remaining.length} 道问题，dimension 必须依次为 ${remaining.join(", ")}。已固定和其他批次的题目不要输出。输出包含 questions 对象的 JSON，每个固定维度键下填写 text。`,
+仅生成当前批次的 ${remaining.length} 道问题。槽位绑定为 ${remaining.map((dimension,index)=>`${index+1}=${dimension}`).join(", ")}，已固定和其他批次的题目不要输出。questions 必须是对象数组，每项只有 slot 整数和 text 字符串，每个槽位恰好一次；不要输出维度键对象或 dimension 字段。`,
     },
   ];
 }
