@@ -174,8 +174,10 @@ export async function POST(req: Request) {
         sentiment: parsed.sentiment ?? null,
         insights: insightsData,
       })
-      .eq("id", sessionId);
-    if (saved.error) throw new Error("report_storage_failed");
+      .eq("id", sessionId)
+      .select("id")
+      .maybeSingle();
+    if (saved.error || saved.data?.id !== sessionId) throw new Error("report_storage_failed");
 
     return NextResponse.json(parsed);
   } catch (error) {

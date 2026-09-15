@@ -15,7 +15,13 @@ export function verifyAudioContent(expected,actual) {
     return dot/Math.sqrt(a2*b2||1);
   };
   let anchor=-1,offset=0;
-  for(let lag=0;lag<=8192;lag++){const score=correlation(48000,1024,lag);if(score>anchor){anchor=score;offset=lag;}}
+  // A permitted small clock adjustment may cross any one anchor window.
+  // Locate one intact window, then still check every sample window against
+  // that single fixed offset and the original bounded drift/gap thresholds.
+  // Never realign different regions independently to conceal transport loss.
+  for(const start of [16000,48000,80000]){
+    for(let lag=0;lag<=8192;lag++){const score=correlation(start,1024,lag);if(score>anchor){anchor=score;offset=lag;}}
+  }
   let unmatched=0,maxGap=0,gap=0,minLag=offset,maxLag=offset;
   // Bound clock alignment to 16 ms around one fixed anchor, never freely
   // realign whole seconds. A dropped 4096-sample transport packet must fail.

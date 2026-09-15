@@ -13,3 +13,24 @@ test('silent or slowed microphone content cannot pass on duration alone',()=>{
   assert.equal(verifyAudioContent(expected,Array(expected.length+1600).fill(0)).passed,false);
   assert.equal(verifyAudioContent(expected,[...prefix,...expected.map((_,i)=>expected[Math.floor(i*2/3)])]).passed,false);
 });
+test('bounded clock alignment has the same outcome inside and outside an anchor',()=>{
+  for(const at of [16000,16480,20000,48000,48480,48800,80000,80480]){
+    for(const repeat of [false,true]){
+      const actual=repeat
+        ? [...prefix,...expected.slice(0,at+160),...expected.slice(at),...Array(1000).fill(0)]
+        : [...prefix,...expected.slice(0,at),...expected.slice(at+160),...Array(1000).fill(0)];
+      const result=verifyAudioContent(expected,actual);
+      assert.ok(result.passed,JSON.stringify({at,repeat,result}));
+    }
+  }
+});
+test('robust anchor cannot conceal a missing or repeated transport frame at an anchor',()=>{
+  for(const at of [16000,16480,48000,48480,80000,80480]){
+    for(const repeat of [false,true]){
+      const actual=repeat
+        ? [...prefix,...expected.slice(0,at+4096),...expected.slice(at)]
+        : [...prefix,...expected.slice(0,at),...expected.slice(at+4096)];
+      assert.equal(verifyAudioContent(expected,actual).passed,false,JSON.stringify({at,repeat}));
+    }
+  }
+});

@@ -3,6 +3,7 @@
 import { VoiceInterface } from "@/components/session/voice-interface";
 import { IntervieweeOnboarding } from "@/components/session/interviewee-onboarding";
 import { useRecruitmentOnboardingGate } from "@/hooks/use-recruitment-onboarding-gate";
+import { useRecruitmentMedia } from "@/hooks/use-recruitment-media";
 import { useEffect, useState } from "react";
 
 type FunctionalRelayEvent =
@@ -463,7 +464,6 @@ function installFunctionalRelayMocks(
     if (
       scenarioId === "recruitment-auto-retry"
       && !!constraints.audio
-      && !constraints.video
       && !window.__functionalMediaFailureInjected
     ) {
       window.__functionalMediaFailureInjected = true;
@@ -489,7 +489,9 @@ function installFunctionalRelayMocks(
       canvas.width = 640;
       canvas.height = 480;
       functionalVideoCanvases.push(canvas);
-      tracks.push(...canvas.captureStream(1).getVideoTracks());
+      const videoTracks = canvas.captureStream(1).getVideoTracks();
+      canvas.getContext("2d")?.fillRect(0, 0, canvas.width, canvas.height);
+      tracks.push(...videoTracks);
     }
     return new MediaStream(tracks);
   };
@@ -785,6 +787,7 @@ export function VoiceFunctionalHarness({
   const [mocksReady, setMocksReady] = useState(false);
   const isRecruitmentScenario = scenario.startsWith("recruitment-");
   const isAdvanceScenario = scenario.startsWith("advance-") || isRecruitmentScenario;
+  const entryMedia = useRecruitmentMedia("functional-session", isAdvanceScenario);
   const recruitmentOnboarding = useRecruitmentOnboardingGate({
     isRecruitmentInterview: scenario === "recruitment-entry",
     sessionId: "functional-session",
@@ -874,10 +877,11 @@ export function VoiceFunctionalHarness({
           voiceEnabled
           aiName="TestInterviewer"
           questionsReady
-          onComplete={recruitmentOnboarding.complete}
+          onComplete={() => { void entryMedia.request().catch(() => {}); recruitmentOnboarding.complete(); }}
         />
       ) : mocksReady && (
         <VoiceInterface
+          entryMedia={entryMedia}
           sessionId="functional-session"
           interviewId="functional-interview"
           interviewTitle={isAdvanceScenario ? "数君招聘 · Functional Voice Interview" : "Functional Voice Interview"}

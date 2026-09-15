@@ -162,9 +162,11 @@ export async function generateVoiceSummary(
         sentiment: parsed.sentiment ?? null,
         insights: insightsData,
       })
-      .eq("id", sessionId);
+      .eq("id", sessionId)
+      .select("id")
+      .maybeSingle();
 
-    if (saved.error) throw new Error("report_storage_failed");
+    if (saved.error || saved.data?.id !== sessionId) throw new Error("report_storage_failed");
 
     const themeCount = Array.isArray(parsed.themes) ? parsed.themes.length : 0;
     const insightCount = Array.isArray(parsed.keyInsights)

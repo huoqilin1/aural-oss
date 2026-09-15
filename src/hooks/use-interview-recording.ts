@@ -172,7 +172,9 @@ export function useInterviewRecording({
       ] as const) {
         if (!video || !stream) continue;
         if (video.srcObject !== stream) video.srcObject = stream;
-        if (video.paused) await video.play().catch(() => {});
+        // Embedded browsers may leave play() pending while awaiting a first frame.
+        // Camera preview must not block the recorder and its recovery timer.
+        if (video.paused) void video.play().catch(() => {});
       }
     } finally { cameraRecoveryInFlightRef.current = false; }
   }, [acquireStreams]);
@@ -303,9 +305,13 @@ export function useInterviewRecording({
 
   /** Start recording audio and periodic screenshots. */
   const start = useCallback(
-    async (micStream?: MediaStream) => {
+    async (micStream?: MediaStream, entryCameraStream?: MediaStream) => {
       if (!enabled || isRecording) return;
       stoppedRef.current = false;
+      if (entryCameraStream) {
+        cameraStreamRef.current = entryCameraStream;
+        setCameraStream(entryCameraStream);
+      }
       stopWorkRef.current = null;
       ttsPlayTimeRef.current = 0;
 

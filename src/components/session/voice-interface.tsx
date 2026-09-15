@@ -34,6 +34,8 @@ import {
 import { useInterviewRecording } from "@/hooks/use-interview-recording";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { useVoice, type InterviewContext } from "@/hooks/use-voice";
+import { useRecruitmentMedia } from "@/hooks/use-recruitment-media";
+import { ENTRY_MEDIA_MESSAGES, type RecruitmentMediaAccess } from "@/lib/voice/recruitment-media-access";
 import {
     isInternalQuestionDescription,
     OPRUN_PLANNED_MAIN_QUESTION_COUNT,
@@ -70,7 +72,7 @@ import {
     X,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 interface Message {
@@ -444,6 +446,7 @@ interface VoiceInterfaceProps {
   candidateName?: string;
   /** Start an invited recruitment interview as soon as the page opens. */
   autoStart?: boolean;
+  entryMedia?: RecruitmentMediaAccess;
   /** Render in static preview mode — shows full layout without connecting */
   preview?: boolean;
 }
@@ -467,10 +470,14 @@ export function VoiceInterface({
   videoMode = false,
   preview = false,
   autoStart = false,
+  entryMedia: providedEntryMedia,
 }: VoiceInterfaceProps) {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
   const isMobile = useIsMobile();
+  const ownedEntryMedia = useRecruitmentMedia(sessionId, videoMode);
+  const entryMedia = providedEntryMedia ?? ownedEntryMedia;
+  const entryMediaState = useSyncExternalStore(entryMedia.subscribe, entryMedia.getSnapshot, entryMedia.getSnapshot);
   const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(interviewTitle);
 
   const [messages, setMessages] = useState<Message[]>(
@@ -737,12 +744,13 @@ export function VoiceInterface({
 
   const handleError = useCallback((err: string) => {
     setError(err);
+    if (autoStart) return; // Startup errors remain visible until actual recovery.
     // 服务端终态错误必须持续可见。回调触发早于终端状态的渲染提交,
     // 因此把判断放进延时回调里(此时 terminalRef 一定已同步)。
     setTimeout(() => {
       setError((prev) => (terminalRef.current ? prev : ""));
     }, 5000);
-  }, []);
+  }, [autoStart]);
 
   const voice = useVoice({
     interviewId,
@@ -751,6 +759,7 @@ export function VoiceInterface({
     onTranscript: handleTranscript,
     onAIResponse: handleAIResponse,
     onError: handleError,
+    getEntryMedia: autoStart ? entryMedia.request : undefined,
     onTtsChunk: videoMode ? recording.addTtsChunk : undefined,
     onInterrupt: videoMode ? recording.cancelTts : undefined,
   });
@@ -788,9 +797,10 @@ export function VoiceInterface({
 
   useEffect(() => {
     if (!voice.isSessionTerminal || incompleteSaveStartedRef.current) return;
+    entryMedia.dispose();
     incompleteSaveStartedRef.current = true;
     void saveInterruptedInterview();
-  }, [voice.isSessionTerminal, saveInterruptedInterview]);
+  }, [voice.isSessionTerminal, saveInterruptedInterview, entryMedia]);
   const latestAssistantRequiresAnswer =
     !!voice.aiTranscript.trim() && looksLikeInterviewQuestion(voice.aiTranscript);
   const canAdvanceCurrentQuestion =
@@ -799,6 +809,7 @@ export function VoiceInterface({
   useEffect(() => {
     if (voice.isConnected) {
       setIsStartingInterview(false);
+      setError("");
     }
   }, [voice.isConnected]);
 
@@ -817,13 +828,16 @@ export function VoiceInterface({
   }, [error]);
 
   const autoStartInFlightRef = useRef(false);
+  const autoStartMountedRef = useRef(true);
   const autoStartAttemptsRef = useRef(0);
   const autoStartRetryTimerRef = useRef<number | null>(null);
   const [autoStartRetryNonce, setAutoStartRetryNonce] = useState(0);
-  useEffect(() => () => {
-    if (autoStartRetryTimerRef.current !== null) {
-      window.clearTimeout(autoStartRetryTimerRef.current);
-    }
+  useEffect(() => {
+    autoStartMountedRef.current = true;
+    return () => {
+      autoStartMountedRef.current = false;
+      if (autoStartRetryTimerRef.current !== null) window.clearTimeout(autoStartRetryTimerRef.current);
+    };
   }, []);
   useEffect(() => {
     // 招聘铁律:须知页的「开始面试」是唯一站内点击。进入本组件后自动
@@ -843,6 +857,7 @@ export function VoiceInterface({
     setIsStartingInterview(true);
     void voice.connect().then((connected) => {
       autoStartInFlightRef.current = false;
+      if (!autoStartMountedRef.current) return;
       if (connected) return;
       if (autoStartAttemptsRef.current >= 3) {
         setIsStartingInterview(false);
@@ -859,20 +874,38 @@ export function VoiceInterface({
     if (!autoStart || preview || voice.isConnected || voice.isSessionTerminal) return;
     // After the bounded immediate retries, wait for an actual browser/network
     // recovery signal rather than leaving the single-start flow stranded.
-    const resumeOnRecovery = () => {
-      if (autoStartInFlightRef.current || autoStartAttemptsRef.current < 3) return;
+    let disposed = false;
+    const resumeOnRecovery = async () => {
+      const recoveredMedia = await entryMedia.recover();
+      if (disposed || !autoStartMountedRef.current) return;
+      if (autoStartInFlightRef.current || (!recoveredMedia && autoStartAttemptsRef.current < 3)) return;
       autoStartAttemptsRef.current = 0;
       setAutoStartRetryNonce((value) => value + 1);
     };
     window.addEventListener("online", resumeOnRecovery);
     window.addEventListener("focus", resumeOnRecovery);
     navigator.mediaDevices?.addEventListener("devicechange", resumeOnRecovery);
+    const resumeOnVisibility = () => {
+      if (document.visibilityState === "visible") void resumeOnRecovery();
+    };
+    document.addEventListener("visibilitychange", resumeOnVisibility);
+    const permissions: PermissionStatus[] = [];
+    for (const name of ["microphone", "camera"]) {
+      void navigator.permissions?.query({ name: name as PermissionName }).then(permission => {
+        if (disposed) return;
+        permissions.push(permission);
+        permission.addEventListener("change", resumeOnRecovery);
+      }).catch(() => {});
+    }
     return () => {
+      disposed = true;
+      permissions.forEach(permission => permission.removeEventListener("change", resumeOnRecovery));
       window.removeEventListener("online", resumeOnRecovery);
       window.removeEventListener("focus", resumeOnRecovery);
+      document.removeEventListener("visibilitychange", resumeOnVisibility);
       navigator.mediaDevices?.removeEventListener("devicechange", resumeOnRecovery);
     };
-  }, [autoStart, preview, voice.isConnected, voice.isSessionTerminal]);
+  }, [autoStart, preview, voice.isConnected, voice.isSessionTerminal, entryMedia]);
 
   // ── Start recording when voice connects (video mode) ───────────
   const recordingStartedRef = useRef(false);
@@ -880,7 +913,7 @@ export function VoiceInterface({
     if (!videoMode || !voice.isConnected || recordingStartedRef.current) return;
     recordingStartedRef.current = true;
     const micStream = voice.mediaStreamRef.current;
-    recording.start(micStream ?? undefined);
+    recording.start(micStream ?? undefined, autoStart ? entryMedia.cameraStream() : undefined);
   }, [videoMode, voice.isConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Attach mic stream to recording when it becomes available
@@ -1491,6 +1524,7 @@ export function VoiceInterface({
       });
       if (!completed) throw new Error("面试记录尚未完整保存，请稍后重试结束面试");
       setLocallyCompleted(true);
+      entryMedia.dispose();
       onComplete?.();
     } catch (err) {
       console.error("[voice] Failed to end interview cleanly:", err);
@@ -1509,6 +1543,7 @@ export function VoiceInterface({
     sessionId,
     voice,
     onComplete,
+    entryMedia,
   ]);
 
   useEffect(() => {
@@ -1960,6 +1995,15 @@ export function VoiceInterface({
         </div>
 
         <div className="space-y-3 px-3 py-3 md:px-6 md:py-4">
+          {autoStart && !preview && !voice.isConnected && !voice.isSessionTerminal && (
+            <div role={error || ["denied", "unavailable", "failed"].includes(entryMediaState) ? "alert" : "status"}
+              data-testid="entry-status" aria-live="polite"
+              className="rounded-xl border border-primary/40 bg-card px-4 py-3 text-sm leading-6 text-foreground">
+              {ENTRY_MEDIA_MESSAGES[entryMediaState] || (error
+                ? "面试连接暂时中断，已有题目会保留，连接恢复后会自动继续。"
+                : "正在连接面试，连接成功后会自动开始。")}
+            </div>
+          )}
           <div className="grid gap-4 xl:grid-cols-[minmax(220px,0.58fr)_minmax(0,1.42fr)] xl:items-stretch">
             {displayedRemainingSeconds !== null && (
               <div className={`rounded-2xl border bg-card px-4 py-3 md:px-5 md:py-4 ${isTimeCritical ? "border-destructive/40" : isTimeWarning ? "border-amber-500/40" : "border-border"}`}>
@@ -2029,8 +2073,8 @@ export function VoiceInterface({
       </div>
 
       {/* Error display */}
-      {error && (
-        <div className="mx-6 mt-2 flex items-center gap-2 rounded-md bg-destructive/10 px-4 py-2 text-sm text-destructive">
+      {error && !(autoStart && !voice.isConnected && !voice.isSessionTerminal) && (
+        <div role="alert" className="mx-6 mt-2 flex shrink-0 items-center gap-2 rounded-md bg-destructive/10 px-4 py-2 text-sm text-destructive">
           <AlertCircle className="h-4 w-4 shrink-0" />
           {error}
           {incompleteSaveFailed && voice.isSessionTerminal && (
@@ -2535,7 +2579,7 @@ export function VoiceInterface({
                 </Button>
               )}
 
-              {!voice.isConnected && !preview && isStartingInterview && (
+              {!voice.isConnected && !preview && !autoStart && isStartingInterview && (
                 <p className="text-sm text-muted-foreground">
                   正在进入面试,需要几秒钟。
                 </p>

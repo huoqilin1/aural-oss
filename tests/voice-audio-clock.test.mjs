@@ -1,6 +1,6 @@
 // Real useVoice hook, real browser audio, local WebSocket peer; no production requests.
 import assert from "node:assert/strict";
-import { build } from "esbuild";
+import { build, transform } from "esbuild";
 import { chromium } from "playwright";
 import { resolve } from "node:path";
 import {writeFileSync,readFileSync} from "node:fs";
@@ -60,12 +60,29 @@ try {
       });
     };
   });
+  if(process.env.AURAL_AUDIO_CAPTURE_TAP)await context.addInitScript(()=>{
+    const NativeNode=AudioWorkletNode;
+    window.rawCaptureSources=[];
+    window.AudioWorkletNode=class extends NativeNode {
+      constructor(ctx,name,options){
+        super(ctx,name,options);
+        if(name==='oprun-microphone-capture'){
+          const record={rate:ctx.sampleRate,blocks:[]};window.rawCaptureSources.push(record);
+          // Passive observation of the same input delivered to the production handler.
+          this.port.addEventListener('message',event=>{
+            if(event.data instanceof Float32Array)record.blocks.push(event.data.slice());
+          });
+          this.port.start();
+        }
+      }
+    };
+  });
   await context.addInitScript(`window.makeSignal = ${makeSignal.toString()};`);
   const page = await context.newPage();
-  let socket, chunks=[];
+  let socket, chunks=[], packetTimes=[], allPackets=[];
   await page.routeWebSocket("**/ws/**", ws => {socket=ws;ws.onMessage(raw=>{const message=JSON.parse(String(raw));
     if(message.type==='init') ws.send(JSON.stringify({type:'ready',sessionId:'local'}));
-    if(message.type==='audio') chunks.push(Buffer.from(message.data,'hex'));
+    if(message.type==='audio') {chunks.push(Buffer.from(message.data,'hex'));allPackets.push(chunks.at(-1));packetTimes.push({at:performance.now(),bytes:chunks.at(-1).length});}
   });});
   await page.goto(base);await page.getByRole("button").click();
   await page.waitForFunction(()=>window.voice?.isListening);
@@ -78,15 +95,50 @@ try {
     socket.send(JSON.stringify({type:'input_ready'}));await page.waitForTimeout(300);
     const samples=makeSignal(q);
     if(q===2)await page.evaluate(()=>{window.stallNext=true;});
-    chunks=[];await page.evaluate(q=>window.speak(window.makeSignal(q)),q);await page.waitForTimeout(400);
+    chunks=[];packetTimes=[];const before=await page.evaluate(()=>({source:window.sourceClock(),contexts:window.contexts.map(c=>({time:c.currentTime,rate:c.sampleRate,state:c.state}))}));
+    await page.evaluate(q=>window.speak(window.makeSignal(q)),q);await page.waitForTimeout(400);
     const bytes=Buffer.concat(chunks);const actual=Array.from({length:bytes.length/2},(_,i)=>bytes.readInt16LE(i*2)/32768);
-    if(process.env.AURAL_AUDIO_EVIDENCE_DIR){writeFileSync(resolve(process.env.AURAL_AUDIO_EVIDENCE_DIR,`q${q}.pcm`),bytes);writeFileSync(resolve(process.env.AURAL_AUDIO_EVIDENCE_DIR,`q${q}.expected.f32`),Buffer.from(new Float32Array(samples).buffer));console.log(JSON.stringify({q,expected:samples.length/16000,actual:actual.length/16000,contexts:await page.evaluate(()=>window.contexts.map(c=>({time:c.currentTime,rate:c.sampleRate,state:c.state})))}));}
+    if(process.env.AURAL_AUDIO_EVIDENCE_DIR){
+      writeFileSync(resolve(process.env.AURAL_AUDIO_EVIDENCE_DIR,`q${q}.pcm`),bytes);
+      writeFileSync(resolve(process.env.AURAL_AUDIO_EVIDENCE_DIR,`q${q}.expected.f32`),Buffer.from(new Float32Array(samples).buffer));
+      const after=await page.evaluate(()=>({source:window.sourceClock(),contexts:window.contexts.map(c=>({time:c.currentTime,rate:c.sampleRate,state:c.state}))}));
+      writeFileSync(resolve(process.env.AURAL_AUDIO_EVIDENCE_DIR,`q${q}.timing.json`),JSON.stringify({q,before,after,packetTimes},null,2));
+      console.log(JSON.stringify({q,expected:samples.length/16000,actual:actual.length/16000,contexts:after.contexts}));
+    }
     const durationPassed=actual.length>=samples.length-8192;check(durationPassed,`Q${q}: capture duration truncated`);
     const content=verifyAudioContent(samples,actual);
     check(content.passed,`Q${q}: missing, repeated or shifted audio ${JSON.stringify(content)}`);
     assert.equal(await page.evaluate(()=>window.contexts.filter(c=>c.state!=='closed').length),3,'exactly playback, capture and recording contexts remain active');
     const cameraLive=await page.evaluate(()=>window.recording.cameraStream?.getVideoTracks()[0].readyState==='live');check(cameraLive,`Q${q}: camera ended`);
     console.log(JSON.stringify({question:q,expectedSeconds:samples.length/16000,sentSeconds:actual.length/16000,content,cameraLive,simulatedCamera:true,passed:durationPassed&&content.passed&&cameraLive,productionRequests:0}));
+  }
+  if(process.env.AURAL_AUDIO_CAPTURE_TAP){
+    await page.evaluate(()=>window.voice.stopListening());
+    const raw=await page.evaluate(()=>window.rawCaptureSources.map(source=>({rate:source.rate,blocks:source.blocks.map(block=>Array.from(block))})));
+    const compiled=await transform(readFileSync(resolve(root,'src/lib/voice/capture-pcm.ts'),'utf8'),{loader:'ts',format:'esm'});
+    const {MicrophonePcmFramer}=await import('data:text/javascript;base64,'+Buffer.from(compiled.code).toString('base64'));
+    const converted=raw.map((source,index)=>{
+      const framer=new MicrophonePcmFramer(source.rate),frames=[];
+      for(const block of source.blocks)for(const frame of framer.push(new Float32Array(block))){
+        const pcm=new Int16Array(frame.length);
+        for(let i=0;i<frame.length;i++)pcm[i]=Math.max(-32768,Math.min(32767,frame[i]*32768));
+        frames.push(Buffer.from(pcm.buffer));
+      }
+      if(process.env.AURAL_AUDIO_EVIDENCE_DIR)writeFileSync(resolve(process.env.AURAL_AUDIO_EVIDENCE_DIR,`capture-${index}.input.f32`),Buffer.concat(source.blocks.map(block=>Buffer.from(new Float32Array(block).buffer))));
+      return Buffer.concat(frames);
+    });
+    const cursors=converted.map(()=>0);let unmatched=0,nonSilentPackets=0;
+    for(const packet of allPackets){
+      if(!packet.some(byte=>byte!==0))continue;
+      nonSilentPackets++;
+      const source=converted.findIndex((data,index)=>data.indexOf(packet,cursors[index])>=0);
+      if(source<0){unmatched++;continue;}
+      cursors[source]=converted[source].indexOf(packet,cursors[source])+packet.length;
+    }
+    const tapResult={captureSources:raw.map(source=>({rate:source.rate,blocks:source.blocks.length})),nonSilentPackets,unmatchedPackets:unmatched,passed:unmatched===0};
+    if(process.env.AURAL_AUDIO_EVIDENCE_DIR)writeFileSync(resolve(process.env.AURAL_AUDIO_EVIDENCE_DIR,'capture-input-vs-wire.json'),JSON.stringify(tapResult,null,2));
+    console.log(JSON.stringify({captureInputVsWire:tapResult}));
+    check(unmatched===0,'Sent PCM differs from captured input');
   }
   assert.deepEqual(failures,[]);
 } finally { await browser.close(); await new Promise(resolve=>server.close(resolve)); }

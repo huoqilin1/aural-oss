@@ -11,12 +11,14 @@ import { chromium, type Browser, type BrowserContext, type BrowserContextOptions
 import { buildFunctionalComponent } from "./functional-component-browser";
 
 const componentOnly = process.env.AURAL_FUNCTIONAL_COMPONENT_ONLY === "1";
-const simulationCount = Number(process.env.AURAL_LOCAL_CONCURRENCY || (process.env.AURAL_LOCAL_TWENTY === "1" ? "20" : "0"));
-assert.ok([0, 10, 15, 20].includes(simulationCount), "Supported local simulation sizes are 10, 15 or 20");
+assert.notEqual(process.env.AURAL_LOCAL_TWENTY, "1", "The legacy twenty-session gate is retired; use AURAL_LOCAL_CONCURRENCY=10");
+const simulationCount = Number(process.env.AURAL_LOCAL_CONCURRENCY || "0");
+assert.ok([0, 10].includes(simulationCount), "This task accepts only 10 concurrent sessions; 0 disables the optional concurrency test");
 let mountComponent: ((context: BrowserContext) => Promise<void>) | undefined;
 async function newContext(options: BrowserContextOptions) {
   const selected = simulationBrowsers.length ? simulationBrowsers[simulationBrowserCursor++ % simulationBrowsers.length] : browser;
   const context = await selected.newContext(options);
+  context.setDefaultTimeout(15_000);
   if (mountComponent) await mountComponent(context);
   return context;
 }
@@ -63,16 +65,18 @@ async function getFreePort(): Promise<number> {
 
 async function waitForHttp(url: string, timeoutMs = 60_000): Promise<void> {
   const start = Date.now();
+  let lastStatus: number | undefined;
   while (Date.now() - start < timeoutMs) {
     try {
-      const response = await fetch(url);
-      if (response.ok || response.status === 404) return;
+      const response = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+      lastStatus = response.status;
+      if (response.ok) return;
     } catch {
       // server still starting
     }
     await delay(500);
   }
-  throw new Error(`Timed out waiting for ${url}`);
+  throw new Error(`Timed out waiting for ${url}; last HTTP status: ${lastStatus ?? "unreachable"}`);
 }
 
 function startAppServer(port: number): ChildProcess {
@@ -765,8 +769,19 @@ test("a late ASR final from the previous question is not saved twice", async () 
   await context.close();
 });
 
+let diagnosticTraceStarted = false;
 async function runEightQuestionScenario(scenario: string, ready?: () => Promise<void>, progress?: (stage: string, question: number) => void) {
   const context = await newContext({ locale: "zh-CN" });
+  const tracePath = process.env.AURAL_CONCURRENCY_TRACE === "1" && !diagnosticTraceStarted
+    ? resolve(APP_CWD, "output", `concurrency-${Date.now()}-${Math.random().toString(16).slice(2)}.zip`)
+    : undefined;
+  if (tracePath) {
+    diagnosticTraceStarted = true;
+    // Capture driver timings for one session without multiplying DOM/video
+    // snapshots across all concurrent recording sessions on the test host.
+    await context.tracing.start({ screenshots: false, snapshots: false, sources: false });
+  }
+  try {
   const page = await context.newPage();
   const browserErrors: string[] = [];
   page.on("console", message => { if (message.type() === "error") browserErrors.push(message.text().slice(0, 300)); });
@@ -920,7 +935,14 @@ async function runEightQuestionScenario(scenario: string, ready?: () => Promise<
   assert.equal(recordingWrites, 1);
 
   progress?.("passed", 8);
-  await context.close();
+  } finally {
+    try {
+      if (tracePath) {
+        await context.tracing.stop({ path: tracePath });
+        console.log("LOCAL_TRACE", tracePath);
+      }
+    } finally { await context.close(); }
+  }
 }
 
 for (const scenario of ["recruitment-eight-question", "recruitment-eight-question-premature", "recruitment-eight-question-save-retry", "recruitment-eight-question-progress-retry"]) {

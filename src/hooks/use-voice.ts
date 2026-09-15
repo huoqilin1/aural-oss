@@ -58,6 +58,7 @@ interface UseVoiceOptions {
   onTranscript?: (text: string, isFinal: boolean) => void;
   onAIResponse?: (text: string) => void;
   onError?: (error: string) => void;
+  getEntryMedia?: () => Promise<MediaStream>;
   onQuestionChange?: (index: number, total: number) => void;
   onTtsChunk?: (pcmData: ArrayBuffer) => void;
   onInterrupt?: () => void;
@@ -112,6 +113,7 @@ export function useVoice({
   onTranscript,
   onAIResponse,
   onError,
+  getEntryMedia,
   onQuestionChange,
   onTtsChunk,
   onInterrupt,
@@ -142,6 +144,9 @@ export function useVoice({
   const lastQuestionSetFingerprintRef = useRef("");
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const lifecycleRef = useRef(0);
+  const listeningAttemptRef = useRef(0);
+  const startingListeningRef = useRef(false);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const processorRef = useRef<any>(null);
   const playTimeRef = useRef(0);
@@ -201,7 +206,9 @@ export function useVoice({
 
   // Cleanup on unmount
   useEffect(() => {
+    const lifecycle = ++lifecycleRef.current;
     return () => {
+      lifecycleRef.current = lifecycle + 1;
       cleanup();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -482,9 +489,18 @@ export function useVoice({
   /** Connect to the voice relay server */
   const connect = useCallback(async (): Promise<boolean> => {
     if (sessionTerminalRef.current) return false;
+    const lifecycle = lifecycleRef.current;
     try {
-      // Request microphone permission
-      await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Reuse the permission stream; never discard a live microphone probe.
+      if (!mediaStreamRef.current?.getAudioTracks().some(track => track.readyState === "live")) {
+        const stream = getEntryMedia ? await getEntryMedia() : await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (lifecycle !== lifecycleRef.current || sessionTerminalRef.current) {
+          if (!getEntryMedia) stream.getTracks().forEach(track => track.stop());
+          return false;
+        }
+        mediaStreamRef.current = getEntryMedia
+          ? new MediaStream(stream.getAudioTracks().map(track => track.clone())) : stream;
+      }
 
       // Use the native output rate; TTS buffers retain their 24 kHz rate.
       // Capture has a separate processing-only context below, so speaker
@@ -565,13 +581,14 @@ export function useVoice({
       await connector.connect();
       return true;
     } catch (error) {
+      if (lifecycle !== lifecycleRef.current) return false;
       const msg =
         error instanceof Error ? error.message : "Voice connection failed";
       onError?.(msg);
       return false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onError, playAudio, interviewContext]);
+  }, [onError, playAudio, interviewContext, getEntryMedia]);
 
   /** Extract text from a Volcengine event payload, trying common field names */
   const extractText = useCallback(
@@ -1094,12 +1111,17 @@ export function useVoice({
 
   /** Start capturing microphone audio and sending to relay */
   const startListening = useCallback(async () => {
-    if (isListeningRef.current) return;
+    if (isListeningRef.current || startingListeningRef.current) return;
+    startingListeningRef.current = true;
+    const attempt = ++listeningAttemptRef.current;
+    const lifecycle = lifecycleRef.current;
     let setupStream: MediaStream | null = null;
     let setupContext: AudioContext | null = null;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      let stream = mediaStreamRef.current;
+      if (!stream?.getAudioTracks().some(track => track.readyState === "live")) {
+        const granted = getEntryMedia ? await getEntryMedia() : await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 16000,
           channelCount: 1,
@@ -1108,7 +1130,13 @@ export function useVoice({
           autoGainControl: true,
         },
       });
+        stream = getEntryMedia ? new MediaStream(granted.getAudioTracks().map(track => track.clone())) : granted;
+      }
       setupStream = stream;
+      if (lifecycle !== lifecycleRef.current || attempt !== listeningAttemptRef.current) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
       mediaStreamRef.current = stream;
 
       const ctx = new AudioContext();
@@ -1116,6 +1144,11 @@ export function useVoice({
       if (ctx.state === "suspended") void ctx.resume().catch(() => {});
       const source = ctx.createMediaStreamSource(stream);
       await ctx.audioWorklet.addModule("/audio/microphone-capture.worklet.js");
+      if (lifecycle !== lifecycleRef.current || attempt !== listeningAttemptRef.current) {
+        stream.getTracks().forEach(track => track.stop());
+        void ctx.close().catch(() => {});
+        return;
+      }
       const processor = new AudioWorkletNode(ctx, "oprun-microphone-capture", {
         channelCount: 1,
         channelCountMode: "explicit",
@@ -1186,14 +1219,19 @@ export function useVoice({
       setupStream?.getTracks().forEach(track => track.stop());
       if (mediaStreamRef.current === setupStream) mediaStreamRef.current = null;
       if (setupContext) void setupContext.close().catch(() => {});
+      if (lifecycle !== lifecycleRef.current || attempt !== listeningAttemptRef.current) return;
       const msg =
         error instanceof Error ? error.message : "Microphone access failed";
       onError?.(msg);
+    } finally {
+      if (attempt === listeningAttemptRef.current) startingListeningRef.current = false;
     }
-  }, [onError]);
+  }, [onError, getEntryMedia]);
 
   /** Stop capturing microphone */
   const stopListening = useCallback(() => {
+    ++listeningAttemptRef.current;
+    startingListeningRef.current = false;
     isListeningRef.current = false;
 
     if (processorRef.current) {

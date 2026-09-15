@@ -5,6 +5,35 @@ import vm from "node:vm";
 import ts from "typescript";
 import { validateReport } from "../src/lib/ai/validate-report";
 import { extractJson } from "../src/lib/ai/extract-json";
+import { createClient } from "@supabase/supabase-js";
+
+test("report update acknowledgement distinguishes zero rows using the real Supabase client", async () => {
+  for (const rows of [[], [{ id: "qa" }]]) {
+    let requests = 0;
+    const client = createClient("http://127.0.0.1:9", "synthetic-local-key", {
+      auth: { persistSession: false, autoRefreshToken: false },
+      global: { fetch: async (input, init) => {
+        requests++;
+        const url = new URL(String(input));
+        assert.equal(url.origin, "http://127.0.0.1:9");
+        assert.equal(init?.method, "PATCH");
+        assert.equal(url.searchParams.get("id"), "eq.qa");
+        assert.equal(url.searchParams.get("select"), "id");
+        assert.match(new Headers(init?.headers).get("prefer") ?? "", /return=representation/);
+        assert.equal(new Headers(init?.headers).get("accept"), "application/vnd.pgrst.object+json");
+        return rows.length === 1 ? Response.json(rows[0]) : Response.json({
+          code: "PGRST116", details: "The result contains 0 rows",
+          message: "JSON object requested, multiple (or no) rows returned",
+        }, { status: 406 });
+      } },
+    });
+    const saved = await client.from("sessions").update({ summary: "Synthetic report" })
+      .eq("id", "qa").select("id").maybeSingle();
+    assert.equal(requests, 1);
+    assert.equal(saved.error, null);
+    assert.equal(saved.data?.id === "qa", rows.length === 1);
+  }
+});
 
 test("report parsing preserves valid JSON containing quoted evidence and code fences", () => {
   for (const summary of [
@@ -51,7 +80,7 @@ for (const entry of [
   test(`${entry.stage} image rejection enters the governed text route and preserves save failures`, async () => {
     const source = ts.createSourceFile("report.ts", readFileSync(new URL(entry.path, import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
     const fn = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === entry.name)!;
-    let legacyCalls = 0, governedCalls = 0, failSave = false;
+    let legacyCalls = 0, governedCalls = 0, failSave = false, missingSave = false;
     const messages = [{ contentType: "TEXT", role: "USER", content: "Synthetic answer" }, { contentType: "WHITEBOARD", whiteboardData: { label: "Synthetic diagram" }, whiteboardImageUrl: "data:image/png;base64,cWE=" }];
     const row = { interview: { title: "数君招聘 · Synthetic", userId: "qa", questions: [] }, messages };
     const context = vm.createContext({
@@ -63,6 +92,7 @@ for (const entry of [
           select: () => query, eq: () => query, order: () => query,
           update: () => { saving = true; return query; },
           single: async () => ({ data: row }),
+          maybeSingle: async () => ({ data: missingSave ? null : { id: "qa" }, error: failSave ? { message: "synthetic storage failure" } : null }),
           then: (resolve: (result: unknown) => unknown) => Promise.resolve({ data: table === "messages" ? messages : row, error: saving && failSave ? { message: "synthetic storage failure" } : null }).then(resolve),
         };
         return query;
@@ -86,6 +116,11 @@ for (const entry of [
     if (entry.name === "POST") assert.equal((await invoke() as Response).status, 500);
     else await assert.rejects(invoke(), /report_storage_failed/);
     assert.equal(legacyCalls, 2); assert.equal(governedCalls, 2);
+    failSave = false;
+    missingSave = true;
+    if (entry.name === "POST") assert.equal((await invoke() as Response).status, 500);
+    else await assert.rejects(invoke(), /report_storage_failed/);
+    assert.equal(legacyCalls, 3); assert.equal(governedCalls, 3);
   });
 }
 
