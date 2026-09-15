@@ -35,7 +35,7 @@ function setup(index:number,answer:string,metadata:Record<string,unknown>={},con
   const sandbox=vm.createContext({supabaseAdmin:db,randomUUID,companyKnowledgeVersion,pinCompanyKnowledge,recruitmentInteractionReply,recruitmentUtterance,rememberRecruitmentInteraction,
     parseRecruitmentDecision,recruitmentDecisionSpeech,hasRecruitmentAnswer,readPersistedRecruitmentFollowUpBudget,
     mergePersistedRecruitmentFollowUpBudget,summarizeRecruitmentResumeBudget,buildInterviewerPrompt:()=>[],
-    getProvider:()=>({generateResponse:async()=>{calls++;return{content:JSON.stringify({action:"probe",evidence_quotes:[messages.at(-1)?.content||answer],missing_evidence:"验证",speech:"你如何验证？"})};}}),
+    getProvider:()=>({generateResponse:async(params:{disableThinking?:boolean})=>{calls++;return{content:params.disableThinking?JSON.stringify({action:"probe",evidence_quotes:[messages.at(-1)?.content||answer],missing_evidence:"验证",speech:"你如何验证？"}):"",finishReason:params.disableThinking?"stop":"length"};}}),
     interview:{id:"synthetic",title:"数君招聘 · 工程师",language:"zh",questions,llmProvider:"synthetic"},
   });
   vm.runInContext(ts.transpileModule(functions.join("\n"),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,sandbox);

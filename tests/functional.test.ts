@@ -1,24 +1,58 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { freemem } from "node:os";
+import { monitorEventLoopDelay } from "node:perf_hooks";
 
-import { chromium, type Browser, type BrowserContext, type BrowserContextOptions, type Page, type Route } from "playwright";
+import { chromium, type Browser, type BrowserContext, type BrowserContextOptions, type CDPSession, type Page, type Route } from "playwright";
 
 import { buildFunctionalComponent } from "./functional-component-browser";
 
 const componentOnly = process.env.AURAL_FUNCTIONAL_COMPONENT_ONLY === "1";
 assert.notEqual(process.env.AURAL_LOCAL_TWENTY, "1", "The legacy twenty-session gate is retired; use AURAL_LOCAL_CONCURRENCY=10");
 const simulationCount = Number(process.env.AURAL_LOCAL_CONCURRENCY || "0");
-assert.ok([0, 10].includes(simulationCount), "This task accepts only 10 concurrent sessions; 0 disables the optional concurrency test");
+assert.notEqual(process.env.AURAL_DIAGNOSTIC_CONCURRENCY20, "1", "Twenty-session diagnostics are retired by user instruction");
+const diagnosticConcurrency = process.env.AURAL_CONCURRENCY_DIAGNOSTICS === "1";
+assert.ok([0, 10].includes(simulationCount), "Only ten-session concurrency acceptance is authorized");
 let mountComponent: ((context: BrowserContext) => Promise<void>) | undefined;
 async function newContext(options: BrowserContextOptions) {
   const selected = simulationBrowsers.length ? simulationBrowsers[simulationBrowserCursor++ % simulationBrowsers.length] : browser;
   const context = await selected.newContext(options);
   context.setDefaultTimeout(15_000);
+  if (diagnosticConcurrency) await context.addInitScript({ content: `(() => {
+    let last = performance.now();
+    let maxGapMs = 0;
+    let longTaskMs = 0;
+    setInterval(() => {
+      const now = performance.now();
+      maxGapMs = Math.max(maxGapMs, now - last - 250);
+      last = now;
+    }, 250);
+    new PerformanceObserver(list => {
+      for (const entry of list.getEntries()) longTaskMs += entry.duration;
+    }).observe({ entryTypes: ["longtask"] });
+    Object.defineProperty(window, "__diagnosticScheduling", {
+      get: () => ({ maxGapMs, longTaskMs, visibility: document.visibilityState,
+        sinkTypes: window.__diagnosticSinkTypes || [] }),
+    });
+  })();` });
+  if (process.env.AURAL_DIAGNOSTIC_SILENT_SINK === "1") {
+    assert.ok(diagnosticConcurrency, "Silent sink is only an opt-in diagnostic control");
+    await context.addInitScript({ content: `(() => {
+      const NativeAudioContext = window.AudioContext;
+      window.__diagnosticSinkTypes = [];
+      window.AudioContext = class extends NativeAudioContext {
+        constructor(options) {
+          super({ ...options, sinkId: { type: "none" } });
+          window.__diagnosticSinkTypes.push(this.sinkId?.type || "default");
+        }
+      };
+    })();` });
+  }
   if (mountComponent) await mountComponent(context);
   return context;
 }
@@ -222,13 +256,22 @@ before(async () => {
     // Component scenarios mount an already-started interview, without the
     // real notice-page click that authorizes audio playback. Allow their
     // synthetic audio contexts to run; onboarding has its own click tests.
-    ...((componentOnly || simulationCount) ? { args: ["--autoplay-policy=no-user-gesture-required"] } : {}),
+    ...((componentOnly || simulationCount) ? { args: ["--autoplay-policy=no-user-gesture-required",
+      ...(diagnosticConcurrency && process.env.AURAL_DIAGNOSTIC_SOFTWARE_GPU === "1" ? ["--disable-gpu"] : []),
+    ] } : {}),
     ...(systemChrome ? { executablePath: systemChrome } : {}),
   };
   browser = await chromium.launch(launchOptions);
+  if (diagnosticConcurrency) console.log("LOCAL_BROWSER", JSON.stringify({
+    version: browser.version(), executablePath: systemChrome || chromium.executablePath(),
+    softwareGpu: process.env.AURAL_DIAGNOSTIC_SOFTWARE_GPU === "1",
+    silentSink: process.env.AURAL_DIAGNOSTIC_SILENT_SINK === "1",
+  }));
   if (simulationCount) {
     simulationBrowsers.push(browser);
-    for (let index = 1; index < Math.ceil(simulationCount / 5); index++) simulationBrowsers.push(await chromium.launch(launchOptions));
+    const browserCount = Number(process.env.AURAL_SIMULATION_BROWSER_COUNT || Math.ceil(simulationCount / 5));
+    assert.ok([1, Math.ceil(simulationCount / 5)].includes(browserCount), "Use original single-browser or current distributed-browser layout");
+    for (let index = 1; index < browserCount; index++) simulationBrowsers.push(await chromium.launch(launchOptions));
   }
 });
 
@@ -413,6 +456,7 @@ test("next-question control sends one request and waits for relay acknowledgemen
     async () => (await page.getByTestId("harness-ready").textContent()) === "true",
     5_000,
   );
+
   assert.equal(
     await page.getByRole("button", {
       name: /开启摄像头|摄像头测试|开始语音测试|允许麦克风并开始面试/,
@@ -772,6 +816,7 @@ test("a late ASR final from the previous question is not saved twice", async () 
 let diagnosticTraceStarted = false;
 async function runEightQuestionScenario(scenario: string, ready?: () => Promise<void>, progress?: (stage: string, question: number) => void) {
   const context = await newContext({ locale: "zh-CN" });
+  let profiler: CDPSession | undefined;
   const tracePath = process.env.AURAL_CONCURRENCY_TRACE === "1" && !diagnosticTraceStarted
     ? resolve(APP_CWD, "output", `concurrency-${Date.now()}-${Math.random().toString(16).slice(2)}.zip`)
     : undefined;
@@ -779,10 +824,16 @@ async function runEightQuestionScenario(scenario: string, ready?: () => Promise<
     diagnosticTraceStarted = true;
     // Capture driver timings for one session without multiplying DOM/video
     // snapshots across all concurrent recording sessions on the test host.
-    await context.tracing.start({ screenshots: false, snapshots: false, sources: false });
+    await context.tracing.start({ screenshots: false,
+      snapshots: diagnosticConcurrency && process.env.AURAL_DIAGNOSTIC_TRACE_SNAPSHOTS !== "0", sources: false });
   }
   try {
   const page = await context.newPage();
+  if (tracePath && process.env.AURAL_DIAGNOSTIC_CPU_PROFILE === "1") {
+    profiler = await context.newCDPSession(page);
+    await profiler.send("Profiler.enable");
+    await profiler.send("Profiler.start");
+  }
   const browserErrors: string[] = [];
   page.on("console", message => { if (message.type() === "error") browserErrors.push(message.text().slice(0, 300)); });
   const saveBodies: unknown[] = [];
@@ -831,6 +882,16 @@ async function runEightQuestionScenario(scenario: string, ready?: () => Promise<
     async () => (await page.getByTestId("harness-ready").textContent()) === "true",
     5_000,
   );
+
+  if (diagnosticConcurrency) {
+    const metrics = await page.evaluate(() =>
+      (window as unknown as { __diagnosticScheduling: { sinkTypes: string[] } }).__diagnosticScheduling);
+    assert.ok(metrics, "Diagnostic page telemetry must be installed before measuring");
+    if (process.env.AURAL_DIAGNOSTIC_SILENT_SINK === "1") {
+      assert.ok(metrics.sinkTypes.length > 0 && metrics.sinkTypes.every(type => type === "none"),
+        "Silent sink control must actually be active");
+    }
+  }
 
   if (ready) {
     await waitForText(page, "第 1 / 8 题", 10_000);
@@ -937,6 +998,16 @@ async function runEightQuestionScenario(scenario: string, ready?: () => Promise<
   progress?.("passed", 8);
   } finally {
     try {
+      if (profiler) {
+        const result = await profiler.send("Profiler.stop");
+        writeFileSync(`${tracePath}.cpuprofile`, JSON.stringify(result.profile));
+        console.log("LOCAL_CPU_PROFILE", `${tracePath}.cpuprofile`);
+      }
+      if (diagnosticConcurrency) for (const page of context.pages()) {
+        console.log("LOCAL_RENDERER", JSON.stringify({ scenario, metrics: await page.evaluate(() =>
+          (window as unknown as { __diagnosticScheduling: unknown }).__diagnosticScheduling,
+        ).catch(() => null) }));
+      }
       if (tracePath) {
         await context.tracing.stop({ path: tracePath });
         console.log("LOCAL_TRACE", tracePath);
@@ -953,6 +1024,10 @@ test(`recruitment completes only after eight distinct scored answers: ${scenario
 
 // Explicit local simulation gate. Mocks verify UI/save behavior, not live GLM or database capacity.
 test(`${simulationCount} concurrent local interview simulations finish all eight answers`, { skip: !simulationCount, timeout: 240_000 }, async () => {
+  const loopDelay = monitorEventLoopDelay({ resolution: 20 });
+  loopDelay.enable();
+  const samples: Array<{at: number; freeMb: number; driverRssMb: number; loopMaxMs: number}> = [];
+  const sampler = setInterval(() => samples.push({at: Date.now(), freeMb: Math.round(freemem()/1048576), driverRssMb: Math.round(process.memoryUsage().rss/1048576), loopMaxMs: Math.round(loopDelay.max/1000000)}), 1000);
   let readyCount = 0;
   let release!: () => void;
   const barrier = new Promise<void>(resolve => { release = resolve; });
@@ -973,7 +1048,10 @@ test(`${simulationCount} concurrent local interview simulations finish all eight
     const failures = results.flatMap((result, index) => result.status === "rejected" ? [{session: index + 1, ...stages.get(index + 1), error: String(result.reason)}] : []);
     console.log("LOCAL_CONCURRENCY_RESULT", JSON.stringify({requested: simulationCount, browsers: simulationBrowsers.length, ready: readyCount, passed: results.length - failures.length, failed: failures.length, failures, providerCalls: 0, persistence: "mocked"}));
     assert.equal(failures.length, 0, JSON.stringify(failures));
-  } finally { clearTimeout(watchdog); }
+  } finally {
+    clearTimeout(watchdog); clearInterval(sampler); loopDelay.disable();
+    console.log("LOCAL_RESOURCE_SAMPLES", JSON.stringify(samples));
+  }
 });
 
 test("voice completion shows the farewell, waits for final save, and only then notifies the parent", async () => {

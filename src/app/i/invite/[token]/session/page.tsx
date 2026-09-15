@@ -127,6 +127,7 @@ export default function InviteSessionPage() {
       id: message.id,
       role: message.role,
       content: message.content,
+      timestamp: String(message.timestamp),
     }));
   const resumeDrawings = resumeState.orderedMessages
     .filter((message: any) => message.contentType === "WHITEBOARD" && message.whiteboardData)
@@ -258,6 +259,8 @@ export default function InviteSessionPage() {
           })),
         }}
         durationMinutes={interview.timeLimitMinutes ?? undefined}
+        initialMessages={resumeState.isResuming ? resumeTextMessages : undefined}
+        initialQuestionIndex={resumeState.questionIndex}
         onComplete={handleComplete}
       />
     </>

@@ -21,6 +21,7 @@ export async function middleware(request: NextRequest) {
     process.env.SUPABASE_URL!,
     process.env.SUPABASE_ANON_KEY!,
     {
+      auth: { storageKey: "sb-oprun-auth-token" },
       cookies: {
         getAll() {
           return request.cookies.getAll();

@@ -88,7 +88,9 @@ export async function respondToRecruitmentChat(interview:Interview, sessionId:st
       conversationHistory:messages.filter(m=>m.role==="USER"||m.role==="ASSISTANT")
         .map(m=>({role:m.role==="USER"?"user" as const:"assistant" as const,content:m.content}))});
     const generated=await getProvider(interview.llmProvider).generateResponse({messages:prompt,
-      model:interview.llmModel||undefined,temperature:0.7,maxTokens:1024});
+      // This is a short navigation decision, not the final assessment. Thinking
+      // can exhaust the JSON budget and leave an empty, non-advancing reply.
+      model:interview.llmModel||undefined,temperature:0.7,maxTokens:1024,disableThinking:true});
     const decision=parseRecruitmentDecision(generated.content,answer);
     content=recruitmentDecisionSpeech(generated.content,answer,isZh).replace("[NEXT]","").trim();
     advance=decision?.action==="advance";
