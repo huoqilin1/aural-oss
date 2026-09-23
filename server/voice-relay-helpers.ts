@@ -1,6 +1,11 @@
 import { recruitmentAnswerContent, recruitmentSpeechIntent, recruitmentControlOnly } from "../src/lib/voice/recruitment-turn-policy";
 import { recruitmentUtterance, recruitmentEvidenceText } from "../src/lib/voice/recruitment-quality";
 
+export function isChineseInterviewLanguage(language: string): boolean {
+  const normalized = language.trim().toLowerCase();
+  return /^zh(?:$|[-_])/.test(normalized) || normalized.includes('chinese');
+}
+
 /** Question openings need not be duplicated in the per-question transcript. */
 export function latestAnsweredExchange(
   transcript: readonly { role: string; text: string }[],

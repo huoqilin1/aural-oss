@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {chooseSpeech} from './local-ten-driver-policy.mjs';
+const state={ready:true,terminal:false,error:false,playing:false,q:2,index:131,mainSent:false,seq:4,lastHandledSeq:3,prompt:'请说明你的具体职责',supplements:0};
+assert.equal(chooseSpeech(state).kind,'main');
+assert.equal(chooseSpeech({...state,mainSent:true}).kind,'supplement');
+assert.equal(chooseSpeech({...state,mainSent:true,supplements:1}).kind,'no-more');
+assert.equal(chooseSpeech({...state,mainSent:true,prompt:'这题你答完了吗？'}).kind,'done');
+assert.equal(chooseSpeech({...state,mainSent:true,q:8,prompt:'你还有什么问题想问我？'}).kind,'finish');
+for(const patch of [{ready:false},{terminal:true},{error:true},{playing:true},{q:0},{q:9},{mainSent:true,lastHandledSeq:4}])assert.equal(chooseSpeech({...state,...patch}),null);
+console.log('12 driver decisions passed; zero model calls');

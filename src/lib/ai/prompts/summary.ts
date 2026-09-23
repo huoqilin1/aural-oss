@@ -23,6 +23,11 @@ export function buildSummaryPrompt(
   whiteboardDrawings?: WhiteboardDrawingInput[] | null,
   codeSnippets?: CodeSnippetInput[] | null
 ): LLMMessage[] {
+  if (/^数君招聘\s*·/.test(interviewTitle) && questions) {
+    // The candidate's optional closing question is conversation, not a ninth
+    // scored answer. Keep the canonical Q1-Q8 order for report coverage.
+    questions = questions.filter(q => q.order >= 0 && q.order < 8).sort((a,b) => a.order-b.order);
+  }
   const transcript = (interviewTitle.includes("数君招聘") ? recruitmentScoringMessages(messages) : messages)
     .map((m) => `${m.role.toLowerCase() === "user" ? "Participant" : "Interviewer"}: ${m.content}`)
     .join("\n\n");
@@ -97,7 +102,7 @@ export function buildSummaryPrompt(
   // ── Per-question evaluation section ────────────────────────────
   const questionEvalInstruction =
     questions && questions.length > 0
-      ? `6. For EACH interview question, evaluate the participant's response: how well they addressed the question, key strengths, areas for improvement, and a score (1-10)\n`
+      ? `6. Return questionEvaluations as an ARRAY with exactly ${questions.length} entries in the listed order, one per listed interview question. Copy the question text exactly. Evaluate the participant's response: how well they addressed the question, key strengths, areas for improvement, and a score (1-10). Do not score closing conversation or add questions. Put any general caveat in summary; do not wrap evaluation arrays in objects.\n`
       : "";
 
   const questionEvalJsonField =

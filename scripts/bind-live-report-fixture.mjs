@@ -1,0 +1,10 @@
+import assert from 'node:assert/strict';
+import {readFileSync,writeFileSync} from 'node:fs';
+import {createClient} from '@supabase/supabase-js';
+const file='output/local-sandbox/real-report/live-fixture-private.json';
+const fixture=JSON.parse(readFileSync(file,'utf8'));
+const cfg=JSON.parse(readFileSync('output/local-sandbox/supabase-status-private.json','utf8').replace(/^\uFEFF/,''));assert.equal(cfg.API_URL,'http://127.0.0.1:55321');
+const db=createClient(cfg.API_URL,cfg.SERVICE_ROLE_KEY,{auth:{persistSession:false,autoRefreshToken:false}});
+const row=await db.from('candidates').select('sessionId').eq('id',fixture.candidateId).single();assert.ifError(row.error);assert.ok(row.data.sessionId);
+fixture.sessionId=row.data.sessionId;writeFileSync(file,JSON.stringify(fixture));
+console.log(JSON.stringify({sessionCreatedByPage:true,sessionId:fixture.sessionId}));

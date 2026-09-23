@@ -1,6 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { selectVoiceRoute, parseVoiceRoute, offlineVoiceEndpoint, loadVoiceRoute, synthesizeOffline } from '../server/voice-provider-route';
+import { selectVoiceRoute, parseVoiceRoute, offlineVoiceEndpoint, loadVoiceRoute, synthesizeOffline, assertVoiceRouteAvailable, validateOfflineVoiceRuntime } from '../server/voice-provider-route';
+
+test('offline-only runtime needs local database and refuses paid saved routes', () => {
+  assert.equal(validateOfflineVoiceRuntime({}), false);
+  assert.equal(validateOfflineVoiceRuntime({VOICE_OFFLINE_ONLY:'1', SUPABASE_URL:'http://127.0.0.1:55321'}), true);
+  for (const SUPABASE_URL of ['', 'https://example.com', 'http://user:secret@127.0.0.1:55321']) {
+    assert.throws(() => validateOfflineVoiceRuntime({VOICE_OFFLINE_ONLY:'1', SUPABASE_URL}));
+  }
+  assertVoiceRouteAvailable({provider:'offline', test:true}, true);
+  assert.throws(() => assertVoiceRouteAvailable({provider:'volcengine', test:false}, true));
+  assertVoiceRouteAvailable({provider:'volcengine', test:false}, false);
+});
 
 test('test speech stays offline even when production is paid',()=>{
   assert.deepEqual(selectVoiceRoute(true,{VOICE_PRODUCTION_PROVIDER:'volcengine'}),{provider:'offline',test:true});

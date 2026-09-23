@@ -1,0 +1,18 @@
+import assert from 'node:assert/strict';
+import {readFileSync,writeFileSync,existsSync} from 'node:fs';
+import {createClient} from '@supabase/supabase-js';
+const root='output/local-sandbox/real-report/';
+if(existsSync(root+'live-fixture-private.json'))throw new Error('Existing live fixture must be reused');
+const cfg=JSON.parse(readFileSync('output/local-sandbox/supabase-status-private.json','utf8').replace(/^\uFEFF/,''));assert.equal(cfg.API_URL,'http://127.0.0.1:55321');
+const original=JSON.parse(readFileSync(root+'fixture-private.json','utf8'));
+const db=createClient(cfg.API_URL,cfg.SERVICE_ROLE_KEY,{auth:{persistSession:false,autoRefreshToken:false}});
+const created=await db.from('interviews').insert({title:'数君招聘 · 页面逐题报告验收',userId:original.userId,projectId:original.projectId,language:'zh-CN',voiceEnabled:false,videoEnabled:false,llmProvider:'zhipu',llmModel:'glm-5.3',isActive:true,objective:'全部为虚构测试资料，验证页面提交与报告。按回答证据评价，不推断真实人员能力。'}).select('id').single();assert.ifError(created.error);
+const texts=['请做自我介绍，说明订单核对工作中你的职责、行动及结果。','你发现订单数量与交付记录不一致时如何处理？','需求临时变化时怎样协调销售和交付负责人？','多个任务同时到期时如何确定优先级？','你如何核实交付结果并保留可验证记录？','请说明一次台账失误后的处理与复盘。','你怎样使用AI辅助核对，并验证其输出？','如果接手新岗位，第一个月准备如何推进？'];
+assert.ifError((await db.from('questions').insert(texts.map((text,order)=>({interviewId:created.data.id,order,text,type:'OPEN_ENDED',description:'oprun_dimension:execution'})))).error);
+const key=JSON.parse(readFileSync(root+'reconcile-key-private.json','utf8')).key;
+const response=await fetch('http://127.0.0.1:3300/api/v1/interviews/'+created.data.id+'/candidates',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+key},body:JSON.stringify({name:'虚构逐题页面测试',email:'local-page-report@example.invalid',notes:'仅为隔离本地测试，所有回答为虚构，不通知任何真实人员。'})});
+assert.equal(response.status,200);const body=await response.json();const candidate=body.data[0];assert.ok(candidate.inviteToken);
+const fixture={...original,interviewId:created.data.id,sessionId:null,candidateId:candidate.id,inviteToken:candidate.inviteToken,synthetic:true,mode:'actual text page; no voice/device claim'};
+delete fixture.cookies;delete fixture.accessToken;
+writeFileSync(root+'live-fixture-private.json',JSON.stringify(fixture));
+console.log(JSON.stringify({created:true,interviewId:fixture.interviewId,questions:8,seededMessages:0,mode:fixture.mode}));

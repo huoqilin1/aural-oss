@@ -5,6 +5,22 @@ import type { TtsChunkEvent } from './volcengine-tts';
 export type VoiceProvider = 'volcengine' | 'offline';
 export interface VoiceRoute { provider: VoiceProvider; test: boolean }
 
+export function assertVoiceRouteAvailable(route: VoiceRoute, offlineOnly: boolean): void {
+  if (offlineOnly && route.provider !== 'offline') {
+    throw new Error('Paid speech is disabled in offline-only runtime');
+  }
+}
+
+export function validateOfflineVoiceRuntime(env: Record<string, string | undefined>): boolean {
+  if (env.VOICE_OFFLINE_ONLY !== '1') return false;
+  const url = new URL(env.SUPABASE_URL || '');
+  if (url.protocol !== 'http:' || !['127.0.0.1', '[::1]'].includes(url.hostname)
+      || url.username || url.password || url.search || url.hash) {
+    throw new Error('Offline-only runtime requires isolated local Supabase');
+  }
+  return true;
+}
+
 export function selectVoiceRoute(test: boolean, env: Record<string, string | undefined> = process.env): VoiceRoute {
   const provider = test ? 'offline' : (env.VOICE_PRODUCTION_PROVIDER?.trim() || 'volcengine');
   if (provider !== 'offline' && provider !== 'volcengine') throw new Error('Invalid voice provider');

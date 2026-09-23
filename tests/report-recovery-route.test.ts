@@ -130,7 +130,7 @@ test("report recovery enforces ownership, completion, storage acknowledgement an
   const row = { status: "COMPLETED", summary: "", interview: { projectId: "owned", title: "数君招聘 · Synthetic", questions: [] } };
   let authorized = true, failSave = false, calls = 0;
   const query = { select: () => query, eq: () => query, maybeSingle: async () => ({ data: row, error: null }) };
-  const context = vm.createContext({ Response,
+  const context = vm.createContext({ Response, validateReport,
     validateApiKey: async () => authorized ? { projectIds: ["owned"] } : new Response(null, { status: 401 }),
     isAuthError: (value: unknown) => value instanceof Response,
     apiError: (_code: string, _message: string, status: number) => new Response(null, { status }),
@@ -152,4 +152,28 @@ test("report recovery enforces ownership, completion, storage acknowledgement an
   assert.equal((await invoke()).status, 200);
   assert.equal((await invoke()).status, 200);
   assert.equal(calls, 2);
+});
+
+test("report recovery normalizes complete saved evaluations without paying for regeneration and rejects a lost storage acknowledgement", async () => {
+  const source = ts.createSourceFile("route.ts", readFileSync(new URL("../src/app/api/v1/sessions/[id]/report/route.ts", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true);
+  const post = source.statements.find(n => ts.isFunctionDeclaration(n) && n.name?.text === "POST")!;
+  const items=Array.from({length:8},(_,i)=>({question:`Q${i+1}`,score:4,evaluation:'Synthetic evidence.'}));
+  const row={id:'synthetic',status:'COMPLETED',summary:'Saved summary',insights:{questionEvaluations:{note:'Not independently verified.',items}} as Record<string,unknown>,interview:{projectId:'owned',title:'数君招聘 · Synthetic',questions:items}};
+  let calls=0, writes=0, missing=false, updating=false;
+  const query={select:()=>query,eq:()=>query,update:(patch:{insights:Record<string,unknown>})=>{updating=true;writes++;if(!missing)row.insights=patch.insights;return query;},maybeSingle:async()=>({data:updating&&missing?null:row,error:null})};
+  const context=vm.createContext({Response,validateReport,
+    validateApiKey:async()=>({projectIds:['owned']}),isAuthError:()=>false,
+    apiError:(_code:string,_message:string,status:number)=>new Response(null,{status}),
+    supabaseAdmin:{from:()=>{updating=false;return query;}},
+    generateVoiceSummary:async()=>{calls++;},
+  });
+  vm.runInContext(ts.transpileModule(post.getText(source).replace(/^export\s+/,''),{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context);
+  const invoke=()=>vm.runInContext('POST({}, {params:Promise.resolve({id:"synthetic"})})',context) as Promise<Response>;
+  missing=true;assert.equal((await invoke()).status,503);assert.equal(calls,0);
+  missing=false;assert.equal((await invoke()).status,200);assert.equal(calls,0);
+  assert.equal(row.insights.questionEvaluations,items);
+  assert.equal(row.insights.questionEvaluationsNote,'Not independently verified.');
+  assert.equal((await invoke()).status,200);assert.equal(writes,2);assert.equal(calls,0);
+  row.insights={questionEvaluations:items.slice(1)};
+  assert.equal((await invoke()).status,200);assert.equal(calls,1);
 });

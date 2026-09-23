@@ -11,6 +11,29 @@ import {
 } from "../src/lib/relay-llm-route";
 import { relayLlmRouteFromInterview } from "../server/interview-llm-route";
 
+test("production ignores stale GLM/test-route flags while explicit isolated test locks GLM", () => {
+  const keys = ["NODE_ENV", "RECRUIT_MODEL_MODE", "RECRUIT_GLM_ONLY", "RECRUIT_TEST_MODEL_ROUTING"];
+  const previous = keys.map(key => process.env[key]);
+  try {
+    Object.assign(process.env, { NODE_ENV: "production" });
+    delete process.env.RECRUIT_MODEL_MODE;
+    process.env.RECRUIT_GLM_ONLY = "1";
+    process.env.RECRUIT_TEST_MODEL_ROUTING = "1";
+    assert.equal(recruitGlmOnlyEnabled(), false);
+    assert.equal(recruitTestModelRoutingEnabled(), false);
+    process.env.RECRUIT_MODEL_MODE = "test";
+    assert.equal(recruitGlmOnlyEnabled(), true);
+    assert.equal(recruitTestModelRoutingEnabled(), false);
+    process.env.RECRUIT_MODEL_MODE = "production";
+    assert.equal(recruitGlmOnlyEnabled(), false);
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  }
+});
+
 test("GLM restriction overrides test routing and rejects standard API defaults", () => {
   const keys = ["RECRUIT_GLM_ONLY", "RECRUIT_TEST_MODEL_ROUTING", "ZHIPU_BASE_URL"];
   const previous = keys.map(key => process.env[key]);
