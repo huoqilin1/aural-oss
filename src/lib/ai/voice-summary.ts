@@ -18,6 +18,7 @@ export async function generateVoiceSummary(
   questions?: { text: string; order: number; type?: string }[] | null,
   assessmentCriteria?: { name: string; description: string }[] | null,
 ): Promise<void> {
+  const expectedQuestionCount = /^数君招聘\s*·/.test(interviewTitle) && questions?.length ? 8 : undefined;
   try {
     const { data: allMessages } = await supabaseAdmin
       .from("messages")
@@ -87,7 +88,7 @@ export async function generateVoiceSummary(
     let response;
     if (/^数君招聘\s*·/.test(interviewTitle) && !drawingsInput?.some(drawing => drawing.imageDataUrl)) {
       response = { content: await generateGovernedText({ session_id: sessionId, stage: "interview.voice_report" },
-        promptMessages, text => { validateReport(extractJson(text)); }) };
+        promptMessages, text => { validateReport(extractJson(text), expectedQuestionCount); }) };
     } else try {
       response = await generateWithFallback(reportChain, {
         messages: promptMessages,
@@ -118,7 +119,7 @@ export async function generateVoiceSummary(
         );
         response = /^数君招聘\s*·/.test(interviewTitle)
           ? { content: await generateGovernedText({ session_id: sessionId, stage: "interview.voice_report" },
-              fallbackMessages, text => { validateReport(extractJson(text)); }) }
+              fallbackMessages, text => { validateReport(extractJson(text), expectedQuestionCount); }) }
           : await generateWithFallback(reportChain, {
           messages: fallbackMessages,
           temperature: 0.3,
@@ -132,7 +133,7 @@ export async function generateVoiceSummary(
     let parsed: Record<string, unknown>;
     try {
       parsed = extractJson(response.content);
-      validateReport(parsed);
+      validateReport(parsed, expectedQuestionCount);
     } catch (parseErr) {
       log.error("Report JSON validation failed");
       throw parseErr;
@@ -141,6 +142,9 @@ export async function generateVoiceSummary(
     const insightsData: Record<string, unknown> = {
       keyInsights: parsed.keyInsights ?? [],
     };
+    for (const field of ["questionEvaluationsNote", "criteriaEvaluationsNote"]) {
+      if (parsed[field]) insightsData[field] = parsed[field];
+    }
     if (parsed.criteriaEvaluations) {
       insightsData.criteriaEvaluations = parsed.criteriaEvaluations;
     }

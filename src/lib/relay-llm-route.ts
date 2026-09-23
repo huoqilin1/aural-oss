@@ -41,10 +41,14 @@ export const DEFAULT_RELAY_LLM_ROUTE: RelayLlmRoute = {
 };
 
 export function recruitGlmOnlyEnabled(): boolean {
+  const mode = process.env.RECRUIT_MODEL_MODE?.trim().toLowerCase();
+  if (mode === "test") return true;
+  if (mode === "production" || process.env.NODE_ENV === "production") return false;
   return process.env.RECRUIT_GLM_ONLY?.trim() === "1";
 }
 
 export function recruitTestModelRoutingEnabled(): boolean {
+  if (process.env.RECRUIT_MODEL_MODE?.trim().toLowerCase() === "production" || process.env.NODE_ENV === "production") return false;
   return !recruitGlmOnlyEnabled() && process.env.RECRUIT_TEST_MODEL_ROUTING?.trim() === "1";
 }
 

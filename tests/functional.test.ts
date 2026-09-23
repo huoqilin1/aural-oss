@@ -13,11 +13,10 @@ import { chromium, type Browser, type BrowserContext, type BrowserContextOptions
 import { buildFunctionalComponent } from "./functional-component-browser";
 
 const componentOnly = process.env.AURAL_FUNCTIONAL_COMPONENT_ONLY === "1";
-assert.notEqual(process.env.AURAL_LOCAL_TWENTY, "1", "The legacy twenty-session gate is retired; use AURAL_LOCAL_CONCURRENCY=10");
-const simulationCount = Number(process.env.AURAL_LOCAL_CONCURRENCY || "0");
-assert.notEqual(process.env.AURAL_DIAGNOSTIC_CONCURRENCY20, "1", "Twenty-session diagnostics are retired by user instruction");
-const diagnosticConcurrency = process.env.AURAL_CONCURRENCY_DIAGNOSTICS === "1";
-assert.ok([0, 10].includes(simulationCount), "Only ten-session concurrency acceptance is authorized");
+// Local acceptance uses 10 on this workstation; this is not a product capacity cap.
+const simulationCount = Number(process.env.AURAL_LOCAL_CONCURRENCY || (process.env.AURAL_LOCAL_TWENTY === "1" ? "20" : "0"));
+const diagnosticConcurrency = process.env.AURAL_CONCURRENCY_DIAGNOSTICS === "1" || process.env.AURAL_DIAGNOSTIC_CONCURRENCY20 === "1";
+assert.ok(Number.isSafeInteger(simulationCount) && simulationCount >= 0, "Concurrency must be a non-negative integer");
 let mountComponent: ((context: BrowserContext) => Promise<void>) | undefined;
 async function newContext(options: BrowserContextOptions) {
   const selected = simulationBrowsers.length ? simulationBrowsers[simulationBrowserCursor++ % simulationBrowsers.length] : browser;

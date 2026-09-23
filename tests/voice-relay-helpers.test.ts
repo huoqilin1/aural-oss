@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { speakWithBackgroundSummary } from "../server/question-summary-transition";
+import { isChineseInterviewLanguage } from "../server/voice-relay-helpers";
+
+test('Chinese locale tags select Chinese opening speech', () => {
+    for (const language of ['zh', 'zh-CN', 'ZH-TW', 'zh_Hans', 'Chinese']) {
+        assert.equal(isChineseInterviewLanguage(language), true);
+    }
+    for (const language of ['', 'en', 'en-US', 'ja', 'zhinvalid']) {
+        assert.equal(isChineseInterviewLanguage(language), false);
+    }
+});
 
 test("slow summaries do not block the next question or lose original evidence", async () => {
     const summaries: string[] = [];

@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import {readFileSync,writeFileSync} from 'node:fs';
+import {createHash,randomBytes} from 'node:crypto';
+import {createClient} from '@supabase/supabase-js';
+const root='output/local-sandbox/real-report/';
+const cfg=JSON.parse(readFileSync('output/local-sandbox/supabase-status-private.json','utf8').replace(/^\uFEFF/,''));
+assert.equal(cfg.API_URL,'http://127.0.0.1:55321');
+const live=process.argv.includes('--live');
+const prefix=live?'live-':'';
+const fixture=JSON.parse(readFileSync(root+prefix+'fixture-private.json','utf8'));
+assert.equal(fixture.synthetic,true);
+const db=createClient(cfg.API_URL,cfg.SERVICE_ROLE_KEY,{auth:{persistSession:false,autoRefreshToken:false}});
+const started=Date.now();let session;
+do {
+ const result=await db.from('sessions').select('id,status,summary,themes,sentiment,insights').eq('id',fixture.sessionId).single();assert.ifError(result.error);
+ session=result.data;if(session.summary)break;
+ await new Promise(resolve=>setTimeout(resolve,5000));
+} while(Date.now()-started<240000);
+assert.ok(session.summary,'Report not persisted within observation window');
+assert.equal(session.status,'COMPLETED');
+const messages=await db.from('messages').select('id,role,content,questionId').eq('sessionId',fixture.sessionId).order('timestamp');assert.ifError(messages.error);
+const answers=messages.data.filter(m=>m.role==='USER');assert.ok(answers.length>=8);
+assert.equal(new Set(answers.map(m=>m.questionId)).size,8);
+assert.equal(session.insights?.questionEvaluations?.length,8);
+const snapshot={session,answers};writeFileSync(root+prefix+'persisted-report.json',JSON.stringify(snapshot,null,2));
+const receipt={passed:true,sessionId:fixture.sessionId,status:session.status,summaryCharacters:session.summary.length,answers:answers.length,reportHash:createHash('sha256').update(JSON.stringify(session)).digest('hex'),source:'real local Supabase read after normal report page request',liveInterviewCompleted:live};
+writeFileSync(root+prefix+'persistence-receipt.json',JSON.stringify(receipt,null,2));
+const prior=await db.from('api_keys').select('key').eq('userId',fixture.userId).eq('name','local-report-reconcile').maybeSingle();assert.ifError(prior.error);
+let key=prior.data?.key;
+if(!key){key='dlv_'+randomBytes(24).toString('hex');assert.ifError((await db.from('api_keys').insert({userId:fixture.userId,name:'local-report-reconcile',key})).error);}
+writeFileSync(root+'reconcile-key-private.json',JSON.stringify({key}));
+console.log(JSON.stringify(receipt));

@@ -97,15 +97,20 @@ import { SessionConnectionRegistry } from "./session-connection-registry";
 import { publishVoiceOnline } from "./voice-online-state";
 import { createAnswerCommitGate } from "./answer-commit-gate";
 import { loadInterviewRelayLlmRoute } from "./interview-llm-route";
-import { loadVoiceRoute, offlineVoiceEndpoint, synthesizeOffline } from './voice-provider-route';
+import { loadVoiceRoute, offlineVoiceEndpoint, synthesizeOffline, assertVoiceRouteAvailable, validateOfflineVoiceRuntime } from './voice-provider-route';
 import { closeAsrSocket } from './close-asr-socket';
 import { resetOfflineAsr } from './offline-asr-reset';
 import { OfflineAsrDrain } from './offline-asr-drain';
+import { isChineseInterviewLanguage } from './voice-relay-helpers';
 
 const log = createLogger("voice-relay");
 
-config({ path: ".env.local", override: true });
-config({ path: ".env" });
+// Local offline acceptance must never load production or paid-provider files.
+if (process.env.VOICE_OFFLINE_ONLY !== '1') {
+  config({ path: ".env.local", override: true });
+  config({ path: ".env" });
+}
+const offlineOnly = validateOfflineVoiceRuntime(process.env);
 
 const dynamicQuestionClient =
   process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
@@ -279,7 +284,7 @@ function getTtsOptions(language?: string): TtsSynthesisOptions {
   };
 }
 
-if (!ASR_ACCESS_TOKEN && !ASR_API_KEY) {
+if (!offlineOnly && !ASR_ACCESS_TOKEN && !ASR_API_KEY) {
   log.error("Missing DOUBAO_ACCESS_TOKEN or DOUBAO_API_KEY in .env.local");
   process.exit(1);
 }
@@ -676,9 +681,7 @@ function shouldIgnoreVolcContinuationFragment(
 // ── Build prompts from interview context ─────────────────────────────
 
 function isChineseInterview(ctx: InterviewContext): boolean {
-  return (
-    ctx.language === "zh" || ctx.language.toLowerCase().includes("chinese")
-  );
+  return isChineseInterviewLanguage(ctx.language);
 }
 
 function buildChoiceSuffix(
@@ -807,7 +810,7 @@ async function summarizeQuestion(
 
 // ── Relay server ────────────────────────────────────────────────────
 
-const wss = new WebSocketServer({ port: RELAY_PORT });
+const wss = new WebSocketServer({ port: RELAY_PORT, ...(offlineOnly ? { host: '127.0.0.1' } : {}) });
 log.info(`ASR: resource=${ASR_RESOURCE_ID}, auth=${ASR_API_KEY ? `X-Api-Key(${ASR_API_KEY.slice(0, 8)}...)` : "AppKey+AccessKey"}`);
 log.info(`ASR VAD: end_window_size=${ASR_END_WINDOW_MS}ms, force_to_speech=${ASR_FORCE_SPEECH_MS}ms`);
 log.info(`ASR final coalescing: normal=${ASR_FINAL_COALESCE_MS}ms, long=${ASR_LONG_FINAL_COALESCE_MS}ms, quiet=${ASR_PENDING_FINAL_QUIET_MS}ms, active_speech_hold=${ASR_ACTIVE_SPEECH_HOLD_MS}ms, max_active_hold=${ASR_MAX_ACTIVE_SPEECH_HOLD_MS}ms, session_max_speech=${ASR_SESSION_MAX_CONTINUOUS_SPEECH_MS}ms, stuck_rotate=${ASR_STUCK_TEXT_ROTATE_MS}ms`);
@@ -860,6 +863,10 @@ wss.on("connection", (browserWs) => {
       if (msg.type === "mic_test") {
         clearTimeout(timeout);
         browserWs.removeListener("message", handler);
+        if (offlineOnly) {
+          browserWs.close(1008, "mic_test_disabled_in_offline_runtime");
+          return;
+        }
         handleMicTestConnection(browserWs);
       } else if (msg.type === "init" && msg.context) {
         clearTimeout(timeout);
@@ -1307,6 +1314,7 @@ async function handleBrowserConnection(
   llmRoute?: RelayLlmRoute,
 ) {
   const voiceRoute = await loadVoiceRoute(dynamicQuestionClient, ctx.interviewId);
+  assertVoiceRouteAvailable(voiceRoute, offlineOnly);
   // ── 服务端收尾登记:本连接活跃时持续摸时间,关页后由宽限/硬限兜底 ──
   const ctxSessionId = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
   const connectionClaim = ctxSessionId

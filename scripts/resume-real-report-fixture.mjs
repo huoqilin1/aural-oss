@@ -1,0 +1,17 @@
+import assert from 'node:assert/strict';
+import {readFileSync,writeFileSync} from 'node:fs';
+import {randomBytes} from 'node:crypto';
+import {createClient} from '@supabase/supabase-js';
+const base='output/local-sandbox/real-report/';
+const cfg=JSON.parse(readFileSync('output/local-sandbox/supabase-status-private.json','utf8').replace(/^\uFEFF/,''));
+assert.equal(cfg.API_URL,'http://127.0.0.1:55321');
+const fixture=JSON.parse(readFileSync(base+'fixture-private.json','utf8'));
+assert.equal(fixture.synthetic,true);
+const db=createClient(cfg.API_URL,cfg.SERVICE_ROLE_KEY,{auth:{persistSession:false,autoRefreshToken:false}});
+const user=await db.auth.admin.getUserById(fixture.userId);assert.ifError(user.error);
+assert.ok(user.data.user.email.endsWith('@example.invalid'));
+const session=await db.from('sessions').select('id,status,summary').eq('id',fixture.sessionId).single();assert.ifError(session.error);
+const password=randomBytes(24).toString('hex');
+assert.ifError((await db.auth.admin.updateUserById(fixture.userId,{password})).error);
+writeFileSync(base+'browser-login-private.json',JSON.stringify({email:user.data.user.email,password,interviewId:fixture.interviewId,sessionId:fixture.sessionId}));
+console.log(JSON.stringify({fixtureReused:true,status:session.data.status,reportAlreadyExists:!!session.data.summary,synthetic:true}));

@@ -58,6 +58,7 @@ export async function POST(req: Request) {
     }[];
 
     const criteria = interview.assessmentCriteria;
+    const expectedQuestionCount = /^数君招聘\s*·/.test(interview.title) && interview.questions?.length ? 8 : undefined;
 
     const whiteboardDrawingsRaw = msgs
       .filter((m) => m.contentType === "WHITEBOARD" && m.whiteboardData)
@@ -106,7 +107,7 @@ export async function POST(req: Request) {
     let response;
     if (/^数君招聘\s*·/.test(interview.title) && !drawingsInput?.some(drawing => drawing.imageDataUrl)) {
       response = { content: await generateGovernedText({ session_id: sessionId, stage: "interview.summary_report" },
-        messages, text => { validateReport(extractJson(text)); }) };
+        messages, text => { validateReport(extractJson(text), expectedQuestionCount); }) };
     } else try {
       response = await generateWithFallback(reportChain, {
         messages,
@@ -137,7 +138,7 @@ export async function POST(req: Request) {
         );
         response = /^数君招聘\s*·/.test(interview.title)
           ? { content: await generateGovernedText({ session_id: sessionId, stage: "interview.summary_report" },
-              fallbackMessages, text => { validateReport(extractJson(text)); }) }
+              fallbackMessages, text => { validateReport(extractJson(text), expectedQuestionCount); }) }
           : await generateWithFallback(reportChain, {
           messages: fallbackMessages,
           temperature: 0.3,
@@ -149,11 +150,14 @@ export async function POST(req: Request) {
     }
 
     const parsed = extractJson(response.content);
-    validateReport(parsed);
+    validateReport(parsed, expectedQuestionCount);
 
     const insightsData: Record<string, unknown> = {
       keyInsights: parsed.keyInsights ?? [],
     };
+    for (const field of ["questionEvaluationsNote", "criteriaEvaluationsNote"]) {
+      if (parsed[field]) insightsData[field] = parsed[field];
+    }
     if (parsed.criteriaEvaluations) {
       insightsData.criteriaEvaluations = parsed.criteriaEvaluations;
     }
