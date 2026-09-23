@@ -88,7 +88,7 @@ test("rejects duplicate, missing, and unknown providers", () => {
 });
 
 test("omitted providers stay disabled rather than being restored as fallbacks", () => {
-  for (const fallbacks of [[], ["kimi"]]) {
+  for (const fallbacks of [[], ["kimi", "doubao"]] as string[][]) {
     const route = parseRelayLlmRoute({primary: "zhipu", fallbacks});
     assert.ok(route);
     assert.deepEqual(relayLlmRouteOrder(route), ["zhipu", ...fallbacks]);

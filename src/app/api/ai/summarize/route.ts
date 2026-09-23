@@ -85,7 +85,13 @@ export async function POST(req: Request) {
       }))
       .filter((s) => s.code.trim().length > 0);
 
-    const reportChain = await resolveHrModelChain([REPORT_MODEL, ...REPORT_FALLBACK_CHAIN]);
+    let reportChain = [REPORT_MODEL, ...REPORT_FALLBACK_CHAIN];
+    try {
+      reportChain = await resolveHrModelChain([REPORT_MODEL, ...REPORT_FALLBACK_CHAIN]);
+    } catch {
+      // The unified-policy bridge is optional; report generation must never
+      // fail because it is unreachable in this runtime.
+    }
     const textMessages = msgs
       .filter((m) => m.contentType === "TEXT")
       .map((m) => ({ role: m.role, content: m.content }));

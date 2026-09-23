@@ -391,7 +391,7 @@ test("silence reminder restores actual ASR readiness before starting the next in
       armSilenceConfirm:()=>events.push("confirm_timer"),
       markResponseGenerationBlocked:()=>events.push("system_failure"),
       connectAsr:async()=>{events.push("asr_ready");},keepAliveInterval:1,
-      pendingUserUtteranceWhileSuppressed:"", suppressAsrResults:false,
+      pendingUserUtteranceWhileSuppressed:"", pendingUserUtteranceIsRevision:false, suppressAsrResults:false,
       browserWs:{readyState:1,send:(data:string)=>events.push(JSON.parse(data).type)},WebSocket:{OPEN:1},
     });
     vm.runInContext("armSilenceAutoSkip()",sandbox);
