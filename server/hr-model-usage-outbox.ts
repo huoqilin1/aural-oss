@@ -5,11 +5,13 @@ import path from 'node:path';
 export type UsageEvent={id:string;call_id:string;provider:string;model:string;scene:string;started_at:string;ended_at:string;
   status:'success'|'failed'|'empty'|'timeout';usage:null|{prompt_tokens?:number;completion_tokens?:number;prompt_cache_hit_tokens?:number}};
 
-export class UsageOutbox {
+export class UsageOutbox<Event extends {id:string} = UsageEvent> {
   private running:Promise<void>|null=null;
-  constructor(private directory:string,private send:(event:UsageEvent)=>Promise<void>){}
+  private generation=0;
+  private cursor='';
+  constructor(private directory:string,private send:(event:Event)=>Promise<void>){}
   async ready(){await mkdir(this.directory,{recursive:true,mode:0o700});}
-  async enqueue(event:UsageEvent){
+  async enqueue(event:Event){
     if(!/^[0-9a-f-]{36}$/.test(event.id))throw new Error('Invalid usage event id');
     await this.ready();const file=path.join(this.directory,event.id+'.json');
     const body=JSON.stringify(event);
@@ -19,19 +21,31 @@ export class UsageOutbox {
       try {await link(temporary,file);}
       catch(error){if((error as NodeJS.ErrnoException).code!=='EEXIST' || await readFile(file,'utf8')!==body)throw error;}
     } finally {await unlink(temporary);}
+    this.generation++;
   }
   flush(){
     if(this.running)return this.running;
-    this.running=this.drain().finally(()=>{this.running=null;});return this.running;
+    this.running=(async()=>{
+      let observed:number;
+      do { observed=this.generation; await this.drain(); } while(observed!==this.generation);
+    })().finally(()=>{this.running=null;});return this.running;
   }
   private async drain(){
     await this.ready();
-    const files=(await readdir(this.directory)).filter(f=>/^[0-9a-f-]{36}\.json$/.test(f)).sort().slice(0,100);
+    const pending=(await readdir(this.directory)).filter(f=>/^[0-9a-f-]{36}\.json$/.test(f)).sort();
+    // Keep each pass bounded while moving past retained failures on the next
+    // pass. One unavailable record must not hide unrelated newer records.
+    const files=[...pending.filter(f=>f>this.cursor),...pending.filter(f=>f<=this.cursor)].slice(0,100);
+    let failures=0;
     for(const file of files){
-      const event=JSON.parse(await readFile(path.join(this.directory,file),'utf8')) as UsageEvent;
-      await this.send(event);
-      await unlink(path.join(this.directory,file));
+      this.cursor=file;
+      try {
+        const event=JSON.parse(await readFile(path.join(this.directory,file),'utf8')) as Event;
+        await this.send(event);
+        await unlink(path.join(this.directory,file));
+      } catch { failures++; }
     }
+    if(failures)throw new Error(`Outbox retained ${failures} unacknowledged records`);
   }
 }
 
@@ -43,7 +57,10 @@ function current(){
   const policyUrl=process.env.HR_MODEL_CONTROL_URL?.trim();
   const secret=process.env.HR_MODEL_CONTROL_SECRET?.trim();
   if(!directory || !path.isAbsolute(directory) || !policyUrl || !secret)throw new Error('HR model usage outbox configuration incomplete');
-  const url=new URL(policyUrl);url.pathname=url.pathname.replace(/model-policy$/,'model-usage');
+  const url=new URL(policyUrl);
+  if(url.username || url.password || url.search || url.hash ||
+    (url.protocol!=='https:' && !(url.protocol==='http:' && ['localhost','127.0.0.1'].includes(url.hostname))))throw new Error('Invalid HR model control URL');
+  url.pathname=url.pathname.replace(/model-policy$/,'model-usage');
   if(url.pathname===new URL(policyUrl).pathname)throw new Error('Invalid HR model control path');
   const key=directory+'|'+url.href+'|'+secret;
   if(!instance || key!==instanceKey){

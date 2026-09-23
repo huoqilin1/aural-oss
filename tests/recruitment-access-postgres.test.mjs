@@ -44,7 +44,7 @@ test('PostgreSQL: recruitment cannot bypass server authorization through permiss
       await client.query(`SET ROLE "${anon}"`);
       assert.equal((await client.query(`SELECT * FROM ${table('candidates')}`)).rowCount,2,'reproduce permissive pre-migration read');
       await client.query('RESET ROLE');
-      const completionMigration=(await readFile(new URL('../supabase/migrations/007_recruit_voice_completion_guard.sql',import.meta.url),'utf8'))
+      const completionMigration=(await readFile(new URL('./fixtures/pending-completion-guard.sql',import.meta.url),'utf8'))
         .replaceAll('public.',`"${schema}".`).replaceAll('search_path = public',`search_path = "${schema}"`);
       let migration=await readFile(new URL('../supabase/migrations/008_recruitment_access_boundary.sql',import.meta.url),'utf8');
       migration=migration.replaceAll('public.',`"${schema}".`).replaceAll('storage.',`"${schema}".`).replace(/\banon\b/g,`"${anon}"`).replace(/\bauthenticated\b/g,`"${authenticated}"`).replace(/\bservice_role\b/g,`"${service}"`);

@@ -19,20 +19,20 @@
  * Usage:  npx tsx server/voice-relay.ts
  */
 import { randomUUID } from "crypto";
+import { waitForBrowserPlayback } from "./browser-playback-receipt";
+import { createAsrAudioReplayBuffer } from "./asr-audio-replay";
+import { speakWithBackgroundSummary } from "./question-summary-transition";
+import { questionMemory } from "./question-memory";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
-import {authorizeRelayContext} from './relay-session-access';
-import {socketOpenAttempt} from './socket-open-attempt';
-import {answerRevisionMessage} from '../src/lib/voice/answer-revision';
-import {persistVoiceMessages, type StoredVoiceMessage} from '../src/app/api/voice/save/message-storage';
-import {RevisionWriteBarrier} from './revision-write-barrier';
-import {AsrUtteranceReplayGuard} from './asr-utterance-replay';
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
+import { createAsrInitialConnectQueue } from "./asr-initial-connect-queue";
+import { waitForAsrSocketOpen } from "./asr-socket-open";
+import { hasEightScoredAnswers, recruitmentQ1Transition, recruitmentControlOnly, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
 import type { RelayLlmRoute } from "../src/lib/relay-llm-route";
 import {
-  isProgressiveOpeningOnly,
   mergeExpandedQuestionSet,
   shouldWaitForQuestionExpansion,
 } from "../src/lib/voice/dynamic-question-sync";
@@ -43,6 +43,7 @@ import {
 } from "./relay-llm";
 import {
     collapseInternalAsrRepetitions,
+    latestAnsweredExchange,
     decidePendingFinalSpeechHold,
     evaluateTranscriptManualAdvance,
     failClosedRecruitmentResumeBudget,
@@ -51,6 +52,8 @@ import {
     readPersistedRecruitmentFollowUpBudget,
     shouldConsumeFollowUpBudget,
     isRecruitmentConversationControl,
+    hasRecruitmentAnswer,
+    restoreRecruitmentQuestionTranscript,
     recruitmentMetricEvidenceFollowUp,
     isUserEndRequest,
     isUserSkipRequest,
@@ -59,13 +62,15 @@ import {
     responseInvitesUserReply,
     shouldHoldBargeInInterimForFinal,
     shouldSuppressAnsweredAsrFinal,
-    answeredAsrRevision,
     shouldSuppressRecentAsrFinal,
     summarizeRecruitmentResumeBudget,
     trimCrossTurnOverlap,
     type RecentAsrFinal,
 } from "./voice-relay-helpers";
 import { PROMPTS, SPOKEN } from "./voice-relay-prompts";
+import { recruitmentInteractionReply, rememberRecruitmentInteraction } from "../src/lib/voice/recruitment-quality";
+import { recruitmentDecisionSpeech } from "../src/lib/voice/recruitment-decision";
+import { companyKnowledgeVersion, pinCompanyKnowledge } from "../src/lib/recruitment-company-knowledge";
 import {
     BIGMODEL_ASR_URL,
     buildBigModelAudioRequest,
@@ -89,7 +94,13 @@ import {
   type LiveSessionRecord,
 } from "./session-finalization";
 import { SessionConnectionRegistry } from "./session-connection-registry";
+import { publishVoiceOnline } from "./voice-online-state";
+import { createAnswerCommitGate } from "./answer-commit-gate";
 import { loadInterviewRelayLlmRoute } from "./interview-llm-route";
+import { loadVoiceRoute, offlineVoiceEndpoint, synthesizeOffline } from './voice-provider-route';
+import { closeAsrSocket } from './close-asr-socket';
+import { resetOfflineAsr } from './offline-asr-reset';
+import { OfflineAsrDrain } from './offline-asr-drain';
 
 const log = createLogger("voice-relay");
 
@@ -276,10 +287,10 @@ if (!ASR_ACCESS_TOKEN && !ASR_API_KEY) {
 // ── Interview context type ──────────────────────────────────────────
 
 interface InterviewContext {
+  clientPlaybackReceipt?: boolean;
   interviewId?: string;
   /** 真实会话 ID(tRPC 建的 sessions 行):relay 据此做服务端收尾落库 */
   sessionId?: string;
-  inviteToken?: string;
   /** 面试硬限(分钟):服务端兜底,浏览器关掉/后台挂着也必须按时结束 */
   timeLimitMinutes?: number | null;
   title: string;
@@ -774,23 +785,24 @@ async function summarizeQuestion(
   transcript: TranscriptEntry[],
   isZh: boolean,
   llmRoute?: RelayLlmRoute,
+  sessionId?: string,
+  interviewId?: string,
+  recruitment = false,
 ): Promise<string> {
-  if (transcript.length === 0) return "";
-
-  const t = transcript
-    .map((m) => `${m.role === "user" ? "Participant" : "Interviewer"}: ${m.text}`)
-    .join("\n");
-
-  try {
-    const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), undefined, {
-      stage: "q-summary",
-    }, llmRoute);
-    log.info(`Q summary: "${result.slice(0, 100)}..."`);
-    return result;
-  } catch (err) {
-    log.error("LLM summarization failed:", err);
-    return bt(isZh, PROMPTS.summaryError);
-  }
+  return questionMemory(transcript, recruitment, async t => {
+    try {
+      const result = await callRelayLLM(bt(isZh, PROMPTS.summarize(questionText, t)), undefined, {
+        stage: "q-summary",
+        session: sessionId,
+        interview: interviewId,
+      }, llmRoute);
+      log.info("Question context summary generated");
+      return result;
+    } catch (err) {
+      log.error("LLM summarization failed:", err);
+      return t;
+    }
+  });
 }
 
 // ── Relay server ────────────────────────────────────────────────────
@@ -811,10 +823,13 @@ log.info(`Listening on ws://localhost:${RELAY_PORT}`);
 
 // 方案B(2026-09-03):ASR 并发连接配额有限(生产实测约 20 路)。20 路同场
 // 切题时各会话独立断开/重连,新旧连接短暂叠加会瞬时冲破配额,被拒的会话
-// 卡在重连循环。全局串行化所有 connectAsr 并强制最小间隔,消除叠加窗口。
+// 卡在重连循环。替换已有连接时串行化并保持最小间隔，首次连接另用有界并发。
 let asrConnectChain: Promise<void> = Promise.resolve();
 let asrLastConnectAt = 0;
 const ASR_CONNECT_MIN_INTERVAL_MS = 1500;
+// New sessions have no old ASR socket to overlap. Four bounded handshakes
+// keep their greeting independent of the serialized replacement queue.
+const scheduleInitialAsrConnect = createAsrInitialConnectQueue(4);
 function scheduleAsrConnect(task: () => Promise<void>): Promise<void> {
   const run = async () => {
     const waitMs = asrLastConnectAt + ASR_CONNECT_MIN_INTERVAL_MS - Date.now();
@@ -849,10 +864,11 @@ wss.on("connection", (browserWs) => {
       } else if (msg.type === "init" && msg.context) {
         clearTimeout(timeout);
         browserWs.removeListener("message", handler);
-        void authorizeRelayContext(dynamicQuestionClient,msg.context as InterviewContext)
-          .then(async (context) => {
-            const llmRoute=await loadInterviewRelayLlmRoute(dynamicQuestionClient, context.interviewId);
-            await assertRelayLlmReady({ route: llmRoute });
+        const context = msg.context as InterviewContext;
+        void loadInterviewRelayLlmRoute(dynamicQuestionClient, context.interviewId)
+          .then(async (llmRoute) => {
+            // Q1/Q2 are persisted; a probe must not restart a failed model chain.
+            if (!llmRoute || ![0, 3].includes(llmRoute.fallbacks.length)) await assertRelayLlmReady({ route: llmRoute });
             if (browserWs.readyState !== WebSocket.OPEN) return;
             // 终态会话(COMPLETED/ABANDONED)拒绝重新 init:不能因为刷新或
             // interview_incomplete 后的自动重连,从 Q1 重播一场已结束的面试。
@@ -891,15 +907,24 @@ const SESSION_DISCONNECT_GRACE_MS =
 
 const liveSessions = new Map<string, LiveSessionRecord>();
 const browserSessionConnections = new SessionConnectionRegistry<WebSocket>();
+let onlinePublishRunning = false;
+const onlinePublishTimer = setInterval(() => {
+  if (onlinePublishRunning) return;
+  onlinePublishRunning = true;
+  const ids = browserSessionConnections.onlineSessionIds().filter(id => liveSessions.get(id)?.status === "live");
+  void publishVoiceOnline(ids).catch(() => log.warn("Voice online telemetry write failed"))
+    .finally(() => { onlinePublishRunning = false; });
+}, 15_000);
+onlinePublishTimer.unref();
 
 async function persistSessionStatus(
   sessionId: string,
   status: string,
   reason: string,
-): Promise<void> {
+): Promise<boolean> {
   if (!dynamicQuestionClient) {
     log.warn(`session persist skipped (${sessionId} -> ${status} ${reason}): no service client`);
-    return;
+    return false;
   }
   const nowIso = new Date().toISOString();
   const patch: Record<string, unknown> = {
@@ -912,19 +937,25 @@ async function persistSessionStatus(
   // 已终态(COMPLETED/ABANDONED)的会话不得被重复放弃/迟到完成/重连清扫改写。
   const { data: currentRow, error: readError } = await dynamicQuestionClient
     .from("sessions")
-    .select("status")
+    .select("status, audioRecordingUrl, interview:interviews(title)")
     .eq("id", sessionId)
     .maybeSingle();
   if (readError) {
     log.error(`session persist status read failed (${sessionId}): ${readError.message}`);
-    return;
+    return false;
   }
   const currentStatus = currentRow?.status as string | null | undefined;
+  const interview = currentRow?.interview as {title?:string} | null;
+  if (status === "COMPLETED" && /^数君招聘\s*·\s*/.test(interview?.title || "")
+    && !currentRow?.audioRecordingUrl) {
+    log.info("Recruitment completion deferred until recording is durably linked");
+    return false;
+  }
   if (!shouldPersistSessionStatus(status, currentStatus)) {
     log.info(`Session ${sessionId} finalize ${status} skipped (current=${currentStatus ?? "unknown"})`);
-    return;
+    return currentStatus === status;
   }
-  const { error } = await dynamicQuestionClient
+  const { data: updatedRows, error } = await dynamicQuestionClient
     .from("sessions")
     .update(patch)
     .eq("id", sessionId)
@@ -933,9 +964,11 @@ async function persistSessionStatus(
     .select("id");
   if (error) {
     log.error(`session persist failed (${sessionId} -> ${status}):`, error.message);
-    return;
+    return false;
   }
+  if (!updatedRows?.length) return false;
   log.info(`Session ${sessionId} -> ${status} (${reason})`);
+  return true;
 }
 
 async function rejectInitForTerminalSession(
@@ -1062,8 +1095,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
         asrWs.send(buildBigModelAudioRequest(Buffer.alloc(0), asrAudioSeq, true));
       } catch { /* ignore */ }
     }
-    asrWs?.removeAllListeners();
-    asrWs?.close();
+    closeAsrSocket(asrWs);
     asrWs = null;
     asrAlive = false;
   }
@@ -1091,8 +1123,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
     }
     const failedWs = asrWs;
     asrWs = null;
-    failedWs?.removeAllListeners();
-    try { failedWs?.close(); } catch { /* ignore */ }
+    closeAsrSocket(failedWs);
 
     while (!intentionalClose && browserWs.readyState === WebSocket.OPEN
         && reconnectAttempts < maxReconnectAttempts) {
@@ -1186,10 +1217,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
 
   async function connectMicTestAsr(isInitial: boolean): Promise<void> {
     if (asrWs) {
-      asrWs.removeAllListeners();
-      try {
-        asrWs.close();
-      } catch { /* ignore */ }
+      closeAsrSocket(asrWs);
       asrWs = null;
       asrAlive = false;
     }
@@ -1224,8 +1252,7 @@ async function handleMicTestConnection(browserWs: WebSocket) {
       });
       });
     } catch (error) {
-      nextWs.removeAllListeners();
-      try { nextWs.close(); } catch { /* ignore */ }
+      closeAsrSocket(nextWs);
       throw error;
     }
 
@@ -1279,6 +1306,7 @@ async function handleBrowserConnection(
   ctx: InterviewContext,
   llmRoute?: RelayLlmRoute,
 ) {
+  const voiceRoute = await loadVoiceRoute(dynamicQuestionClient, ctx.interviewId);
   // ── 服务端收尾登记:本连接活跃时持续摸时间,关页后由宽限/硬限兜底 ──
   const ctxSessionId = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
   const connectionClaim = ctxSessionId
@@ -1292,6 +1320,9 @@ async function handleBrowserConnection(
     log.info("New browser connection superseded the previous relay for this session");
   }
   registerLiveSession(ctx);
+  browserWs.on("pong", () => {
+    if (connectionClaim) browserSessionConnections.touch(ctxSessionId, connectionClaim.lease);
+  });
   browserWs.on("message", () => {
     if (!ownsPersistedSession()) return;
     const record = ctxSessionId ? liveSessions.get(ctxSessionId) : undefined;
@@ -1300,23 +1331,14 @@ async function handleBrowserConnection(
 
   // ── ASR state ──────────────────────────────────────────────────
   let asrWs: WebSocket | null = null;
-  let asrConnectAttempt:ReturnType<typeof socketOpenAttempt>|null=null;
-  browserWs.once('close',cancelPendingAsrConnection);
-  function cancelPendingAsrConnection() {
-    if(!asrConnectAttempt)return;
-    const attempt=asrConnectAttempt;
-    const socket=asrWs;
-    asrConnectAttempt=null;
-    asrWs=null;
-    asrAlive=false;
-    attempt.cancel();
-    if(socket) {
-      socket.once('error',()=>{});
-      try {socket.close();}catch{/* already closed */}
-    }
-  }
   let asrAlive = false;
+  let asrConnectionAttempted = false;
+  let asrConnectPending: Promise<void> | null = null;
+  const asrAudioReplay = createAsrAudioReplayBuffer();
+  let asrProtocolFailureQuestion = -1;
+  let asrProtocolFailures = 0;
   let asrAudioSeq = 1;
+  const offlineAsrDrain = new OfflineAsrDrain();
   let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 
   // ── TTS state ──────────────────────────────────────────────────
@@ -1347,6 +1369,9 @@ async function handleBrowserConnection(
   let pendingAsrFinalStartedAt = 0;
   let pendingAsrFinalLastChangedAt = 0;
   let lastUserAudioActivityAt = 0;
+  let lastListeningAudioActivityAt = 0;
+  let receivedMicrophoneFrames = 0;
+  let receivedActiveMicrophoneFrames = 0;
   let asrSessionFirstSpeechAt = 0;
   let lastAsrStuckRotationAt = 0;
   let consecutiveDuplicateSkips = 0;
@@ -1381,6 +1406,9 @@ async function handleBrowserConnection(
   let generatingResponse = false;
   let userTurnsOnCurrentQ = 0;
   const isOprunRecruitmentInterview = ctx.title.includes("数君招聘");
+  const answerCommitGate = createAnswerCommitGate((event) => browserWs.send(JSON.stringify(event)));
+  browserWs.on("close", () => answerCommitGate.close());
+  const recruitmentAnsweredQuestions = new Set<number>();
   // Recruitment interviews may use up to three concise verification follow-ups:
   // Q2-Q7 share up to two in-place checks and Q8 may use one optional final
   // cross-question verification. No individual scored question may receive
@@ -1416,20 +1444,26 @@ async function handleBrowserConnection(
   let unansweredQuestionsStreak = 0;
   /** Wall time when the latest assistant line was appended to questionTranscript (split-noise heuristic). */
   let lastAssistantMessageWallClockMs = 0;
-  const recentAcceptedUserFinals: RecentAsrFinal[] = [];
+  const recentAcceptedUserFinals: Array<RecentAsrFinal & { questionIndex: number }> = [];
+  let consumedRecruitmentControlKey = "";
+  function recruitmentControlKey(text: string): string {
+    if (!isOprunRecruitmentInterview || !recruitmentControlOnly(text)) return "";
+    const answers = questionTranscript.filter((entry) => entry.role === "user" && hasRecruitmentAnswer(entry.text));
+    return `${currentQuestionIndex}:${answers.map((entry) => normalizeUserUtteranceKey(entry.text)).join("|")}:${recruitmentSpeechIntent(text)}`;
+  }
 
   function rememberAcceptedUserFinal(text: string) {
     const finalText = text.replace(/\s+/g, " ").trim();
     if (!finalText) return;
 
     const last = recentAcceptedUserFinals[recentAcceptedUserFinals.length - 1];
-    if (last && shouldSuppressAnsweredAsrFinal(last.text, finalText)) {
+    if (last && last.questionIndex === currentQuestionIndex && shouldSuppressAnsweredAsrFinal(last.text, finalText)) {
       last.text = mergeAsrSegments(last.text, finalText);
       last.at = Date.now();
       return;
     }
 
-    recentAcceptedUserFinals.push({ text: finalText, at: Date.now() });
+    recentAcceptedUserFinals.push({ text: finalText, at: Date.now(), questionIndex: currentQuestionIndex });
     while (recentAcceptedUserFinals.length > 8) recentAcceptedUserFinals.shift();
   }
 
@@ -1439,9 +1473,19 @@ async function handleBrowserConnection(
       return false;
     }
 
+    // Similar wording is common across scored questions. Once the new prompt
+    // has played and fresh microphone speech arrived, a prior question cannot
+    // make this answer a replay. With no fresh speech, keep the cross-question
+    // guard against delayed old ASR finals.
+    const freshQuestionSpeech = !isTransitioning && !generatingResponse && !suppressAsrResults && !ttsSpeaking
+      && lastAssistantMessageWallClockMs > 0
+      && lastListeningAudioActivityAt > lastAssistantMessageWallClockMs;
+    const comparableFinals = freshQuestionSpeech
+      ? recentAcceptedUserFinals.filter((entry) => entry.questionIndex === currentQuestionIndex)
+      : recentAcceptedUserFinals;
     return shouldSuppressRecentAsrFinal(
       text,
-      recentAcceptedUserFinals,
+      comparableFinals,
       Date.now(),
       {
         ttlMs: ASR_RECENT_FINAL_REPLAY_TTL_MS,
@@ -1491,12 +1535,14 @@ async function handleBrowserConnection(
   let sortedQuestions = [...ctx.questions].sort((a, b) => a.order - b.order);
   let questionRefreshInFlight = false;
   let pendingProgressiveTransition = false;
+  let responseGenerationBlocked = false;
 
   function normalizeDynamicQuestions(rows: unknown): typeof sortedQuestions {
     if (!Array.isArray(rows)) return [];
     return rows.map((row) => {
       const item = row as Record<string, unknown>;
       return {
+        id: typeof item.id === "string" ? item.id : undefined,
         text: String(item.text || ""),
         type: String(item.type || "OPEN_ENDED"),
         description: typeof item.description === "string" ? item.description : null,
@@ -1519,29 +1565,32 @@ async function handleBrowserConnection(
       if (incoming.length > sortedQuestions.length) {
         log.warn(`Rejected ${source} question refresh that changed an active question`);
       }
-      return false;
+    } else {
+      sortedQuestions = merged;
+      if (browserWs.readyState === WebSocket.OPEN) {
+        browserWs.send(JSON.stringify({
+          type: "question_count_update",
+          totalQuestions: sortedQuestions.length,
+          questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
+        }));
+      }
+      log.info(`Dynamic questions refreshed from ${source}: total=${sortedQuestions.length}`);
     }
-    sortedQuestions = merged;
-    if (browserWs.readyState === WebSocket.OPEN) {
-      browserWs.send(JSON.stringify({
-        type: "question_count_update",
-        totalQuestions: sortedQuestions.length,
-      }));
-    }
-    log.info(`Dynamic questions refreshed from ${source}: total=${sortedQuestions.length}`);
     if (
       pendingProgressiveTransition
-      && !isProgressiveOpeningOnly(sortedQuestions)
       && currentQuestionIndex < sortedQuestions.length - 1
     ) {
-      pendingProgressiveTransition = false;
       setTimeout(() => {
-        if (!isTransitioning && !interviewDone) {
+        // Keep the pending transition until handleTransition actually accepts
+        // it. A refresh during playback/speech must retry on the next poll,
+        // even if the question set has not grown since the last poll.
+        if (pendingProgressiveTransition && !isTransitioning && !interviewDone
+          && !ttsSpeaking && !generatingResponse && !responseGenerationBlocked) {
           handleTransition(true).catch(log.error);
         }
       }, 0);
     }
-    return true;
+    return Boolean(merged);
   }
 
   async function refreshDynamicQuestions(): Promise<boolean> {
@@ -1552,7 +1601,7 @@ async function handleBrowserConnection(
     try {
       const { data, error } = await dynamicQuestionClient
         .from("questions")
-        .select("text,type,description,options,timeLimitSeconds,order")
+        .select("id,text,type,description,options,timeLimitSeconds,order")
         .eq("interviewId", ctx.interviewId)
         .order("order", { ascending: true });
       if (error) {
@@ -1645,7 +1694,7 @@ async function handleBrowserConnection(
       .eq("id", ctx.sessionId)
       .single();
     if (!sessionError) {
-      recruitmentParticipantMetadata = sessionData?.participantMetadata ?? null;
+      recruitmentParticipantMetadata = pinCompanyKnowledge(sessionData?.participantMetadata);
       recruitmentParticipantMetadataLoaded = true;
     } else {
       log.warn(`Recruitment follow-up metadata hydration failed: ${sessionError.message}`);
@@ -1677,12 +1726,17 @@ async function handleBrowserConnection(
     );
     totalFollowUpsUsed = recruitmentInlineFollowUpsUsed + recruitmentFinalFollowUpsUsed;
     userTurnsOnCurrentQ = new Map(summary.answersByQuestion).get(currentQuestionIndex) || 0;
+    for (const [index, count] of summary.answersByQuestion) {
+      if (count > 0) recruitmentAnsweredQuestions.add(index);
+    }
+    questionTranscript = restoreRecruitmentQuestionTranscript(sortedQuestions[currentQuestionIndex]?.id, data ?? []);
     log.info(
       `Hydrated recruitment resume budget: inline=${recruitmentInlineFollowUpsUsed}/2 `
       + `final=${recruitmentFinalFollowUpsUsed}/1 current_turns=${userTurnsOnCurrentQ}`,
     );
     if (
       !persistedBudget
+      || !(sessionData?.participantMetadata as Record<string,unknown>|null)?.recruitmentCompanyKnowledgeVersion
       || persistedBudget.inlineFollowUpsUsed < recruitmentInlineFollowUpsUsed
       || persistedBudget.finalFollowUpsUsed < recruitmentFinalFollowUpsUsed
     ) {
@@ -1744,7 +1798,8 @@ async function handleBrowserConnection(
   }
 
   function noteIncomingAudioActivity(pcm: Buffer) {
-    if (pcm.length < 2) return;
+    receivedMicrophoneFrames++;
+    if (pcm.length < 2) return false;
 
     let sumSq = 0;
     let samples = 0;
@@ -1753,16 +1808,38 @@ async function handleBrowserConnection(
       sumSq += sample * sample;
       samples++;
     }
-    if (samples === 0) return;
+    if (samples === 0) return false;
 
     const rms = Math.sqrt(sumSq / samples);
     if (rms >= ASR_AUDIO_ACTIVITY_RMS_THRESHOLD) {
+      receivedActiveMicrophoneFrames++;
       lastUserAudioActivityAt = Date.now();
+      // Speech activity arrives before the ASR final. Never let a silence
+      // deadline advance or end the interview while that answer is arriving.
+      if (isOprunRecruitmentInterview && !ttsSpeaking && !suppressAsrResults) {
+        lastListeningAudioActivityAt = Date.now();
+        if (pendingLastQuestionTimeout) {
+          clearTimeout(pendingLastQuestionTimeout);
+          pendingLastQuestionTimeout = null;
+        }
+        if (finalResponseTimeout) {
+          clearTimeout(finalResponseTimeout);
+          finalResponseTimeout = null;
+        }
+      }
     }
+    return rms >= ASR_AUDIO_ACTIVITY_RMS_THRESHOLD;
+  }
+
+  function logVoiceInputProgress(reason: string) {
+    if (!isOprunRecruitmentInterview) return;
+    const audioAgeMs = lastUserAudioActivityAt > 0 ? Date.now() - lastUserAudioActivityAt : -1;
+    log.info(`Voice input progress: session=${ctxSessionId} q=${currentQuestionIndex + 1} reason=${reason} audio_frames=${receivedMicrophoneFrames} active_frames=${receivedActiveMicrophoneFrames} audio_age_ms=${audioAgeMs} asr_alive=${asrAlive} asr_open=${asrWs?.readyState === WebSocket.OPEN} suppressed=${suppressAsrResults}`);
   }
 
   function shouldHoldPendingAsrFinalForActiveSpeech(finalText: string): boolean {
     if (!finalText || ASR_ACTIVE_SPEECH_HOLD_MS <= 0) return false;
+    if (voiceRoute.provider === 'offline' && offlineAsrDrain.pending) return true;
     // 王总 2026-09-03：删除"短句(<12词/80字)不受保护"的豁免——答题开头的短段
     // 停顿后继续讲时最容易被打断；真正答完的人此时麦是静的，不受影响。
     const heldForMs = pendingAsrFinalStartedAt ? Date.now() - pendingAsrFinalStartedAt : 0;
@@ -1784,6 +1861,11 @@ async function handleBrowserConnection(
       return false;
     }
     if (!holdDecision.hold) return false;
+
+    // Offline recognition emits completed VAD segments, not streaming interim
+    // text. A quiet transcript while speech continues is expected; rotating the
+    // socket here would discard the segment still buffered by the recognizer.
+    if (voiceRoute.provider === 'offline') return true;
 
     const textStuckMs =
       pendingAsrFinalLastChangedAt > 0
@@ -1825,7 +1907,7 @@ async function handleBrowserConnection(
    * Prevents mid-sentence cutoff while refreshing a degraded ASR session.
    */
   function rotateAsrSession() {
-    cancelPendingAsrConnection();
+    if (asrWs?.readyState === WebSocket.CONNECTING) return;
     asrIntentionalClose = true;
     if (keepAliveInterval) {
       clearInterval(keepAliveInterval);
@@ -1838,8 +1920,7 @@ async function handleBrowserConnection(
       } catch { /* ignore */ }
     }
     if (asrWs) {
-      asrWs.removeAllListeners();
-      try { asrWs.close(); } catch { /* ignore */ }
+      closeAsrSocket(asrWs);
     }
     asrWs = null;
     asrAlive = false;
@@ -1983,6 +2064,8 @@ async function handleBrowserConnection(
   }
 
   function schedulePendingAsrFinal(text: string, reason: string) {
+    const controlKey = recruitmentControlKey(text);
+    if (controlKey && controlKey === consumedRecruitmentControlKey) return;
     const prev = pendingAsrFinalText;
     const merged = mergeAsrSegments(pendingAsrFinalText, text);
     const unchanged =
@@ -2037,6 +2120,7 @@ async function handleBrowserConnection(
    * Returns true if TTS completed without cancellation.
    */
   async function speakText(text: string): Promise<boolean> {
+    const speakingQuestionIndex = currentQuestionIndex;
     cancelTts();
     currentTtsText = text;
 
@@ -2059,7 +2143,7 @@ async function handleBrowserConnection(
     const sendTranscriptTextOnce = () => {
       if (sentTranscriptText || browserWs.readyState !== WebSocket.OPEN) return;
       sentTranscriptText = true;
-      browserWs.send(JSON.stringify({ type: "tts_text", data: { text } }));
+      browserWs.send(JSON.stringify({ type: "tts_text", questionIndex: speakingQuestionIndex, data: { text } }));
     };
 
     // 单次合成尝试。返回 ok=收到完整 done;audioBytes 用于判断能否安全重试
@@ -2068,7 +2152,10 @@ async function handleBrowserConnection(
       let ok = false;
       let audioBytes = 0;
       try {
-        for await (const event of synthesizeSpeech(text, auth, ttsOpts, abortController.signal)) {
+        const speech = voiceRoute.provider === 'offline'
+          ? synthesizeOffline(text, abortController.signal)
+          : synthesizeSpeech(text, auth, ttsOpts, abortController.signal);
+        for await (const event of speech) {
           if (abortController.signal.aborted) break;
           if (browserWs.readyState !== WebSocket.OPEN) break;
 
@@ -2123,7 +2210,7 @@ async function handleBrowserConnection(
       log.error("TTS unavailable after retry — delivering text-only fallback");
     }
 
-    // Wait for client-side playback to finish before declaring TTS done.
+    // Legacy clients only support an estimate; current clients confirm playback below.
     // Audio is PCM int16 @ 24kHz = 48000 bytes/sec.
     if (completed && !abortController.signal.aborted) {
       const playbackDurationMs = (totalAudioBytes / 48000) * 1000;
@@ -2138,16 +2225,30 @@ async function handleBrowserConnection(
       }
     }
 
-    ttsSpeaking = false;
-    currentTtsText = "";
+    let playbackDelivered = true;
+    if ((completed || degradedTextOnly) && !abortController.signal.aborted && ctx.clientPlaybackReceipt === true) {
+      const receiptStartedAt = Date.now();
+      const receipt = await waitForBrowserPlayback(browserWs, speakingQuestionIndex, abortController.signal);
+      log.info(`Browser playback receipt session=${ctxSessionId || "none"} question=${speakingQuestionIndex + 1} result=${receipt} wait_ms=${Date.now() - receiptStartedAt}`);
+      playbackDelivered = receipt === "played";
+      if (receipt === "timeout") {
+        // Transport/playback failure must never become candidate inactivity.
+        log.warn("Browser playback receipt timed out; retaining incomplete session for reconnect");
+        interviewDone = true;
+        browserWs.close(1011, "playback receipt timeout");
+      }
+    }
+
     if (ttsAbortController === abortController) {
+      ttsSpeaking = false;
+      currentTtsText = "";
       ttsAbortController = null;
     }
 
-    const delivered = (completed || degradedTextOnly) && !abortController.signal.aborted;
+    const delivered = (completed || degradedTextOnly) && playbackDelivered && !abortController.signal.aborted;
     if (delivered && browserWs.readyState === WebSocket.OPEN) {
       sendTranscriptTextOnce();
-      browserWs.send(JSON.stringify({ type: "tts_ended" }));
+      browserWs.send(JSON.stringify({ type: "tts_ended", questionIndex: speakingQuestionIndex }));
     }
 
     return delivered;
@@ -2164,8 +2265,10 @@ async function handleBrowserConnection(
     pendingFarewell?: boolean;
     pendingFinalTimeout?: boolean;
   }): Promise<void> {
+    if (options?.pendingFarewell && rejectIncompleteRecruitmentEnd()) return;
+    const speechGeneration = transitionGeneration;
     const completed = await speakText(text);
-    if (!completed) return;
+    if (!completed || speechGeneration !== transitionGeneration || interviewDone) return;
 
     if (options?.trackInTranscript !== false) {
       questionTranscript.push({ role: "assistant", text });
@@ -2193,7 +2296,8 @@ async function handleBrowserConnection(
     }
 
     if (options?.pendingTransition && !isTransitioning && !interviewDone) {
-      const isLastQuestion = currentQuestionIndex >= sortedQuestions.length - 1;
+      const isLastQuestion = currentQuestionIndex >= sortedQuestions.length - 1
+        && !shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex);
       if (isLastQuestion) {
         log.info("TTS ended on last Q — waiting 15s for user response before wrap-up");
         pendingLastQuestionTimeout = setTimeout(() => {
@@ -2219,28 +2323,23 @@ async function handleBrowserConnection(
 
   // ── Interview lifecycle ────────────────────────────────────────
 
-  let finalizingInterview = false;
-  const revisionWriteBarrier = new RevisionWriteBarrier();
-  async function endInterview() {
-    if (interviewDone) return;
-    if (finalizingInterview) return;
-    finalizingInterview = true;
-    // Revisions are written directly by the relay as well as retried by the
-    // browser. Do not signal completion while those durable writes are pending.
-    try {
-      await revisionWriteBarrier.flush();
-    } catch {
-      finalizingInterview = false;
-      // Keep the session recoverable. A failed revision is not a completed
-      // interview; the next finalization attempt retries only failed writes.
-      if (browserWs.readyState === WebSocket.OPEN) {
-        browserWs.send(JSON.stringify({type: 'error', code: 'revision_save_pending',
-          message: isZh ? '回答修订尚未保存成功，请保持页面打开并重试保存。' :
-            'An answer correction is not saved yet. Keep this page open and retry saving.'}));
-      }
-      log.error('Interview completion withheld: answer revision persistence failed');
-      return;
+  function rejectIncompleteRecruitmentEnd(): boolean {
+    if (!isOprunRecruitmentInterview || hasEightScoredAnswers(recruitmentAnsweredQuestions)) return false;
+    endingInterview = false;
+    awaitingFinalResponse = false;
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({
+        type: "transition_rejected", reason: "scored_answers_pending",
+        message: isZh ? "我们还有问题没聊完，请继续回答当前题。" : "We still have questions to discuss. Please continue with the current question.",
+        questionIndex: currentQuestionIndex,
+      }));
     }
+    return true;
+  }
+
+  function endInterview() {
+    if (interviewDone) return;
+    if (rejectIncompleteRecruitmentEnd()) return;
     if (!ownsPersistedSession()) {
       interviewDone = true;
       return;
@@ -2257,9 +2356,7 @@ async function handleBrowserConnection(
       clearTimeout(pendingLastQuestionTimeout);
       pendingLastQuestionTimeout = null;
     }
-    if (browserWs.readyState === WebSocket.OPEN) {
-      browserWs.send(JSON.stringify({ type: "interview_complete" }));
-    }
+    browserWs.send(JSON.stringify({ type: "interview_complete" }));
     log.info("Interview complete signal sent");
     farewellCompleted = true;
     // Recruitment completion is authoritative only after /api/voice/save has
@@ -2276,12 +2373,15 @@ async function handleBrowserConnection(
 
   function queueFarewellAndEnd(reason: string) {
     if (interviewDone || endingInterview) return;
+    if (isOprunRecruitmentInterview) retainDeferredAnswerBeforeTransition();
+    if (rejectIncompleteRecruitmentEnd()) return;
     if (!ownsPersistedSession()) {
       interviewDone = true;
       endingInterview = true;
       return;
     }
     endingInterview = true;
+    transitionGeneration++;
 
     awaitingFinalResponse = false;
     generatingResponse = false;
@@ -2300,7 +2400,7 @@ async function handleBrowserConnection(
     const currentQ = sortedQuestions[currentQuestionIndex];
     const transcriptSnapshot = [...questionTranscript];
     if (transcriptSnapshot.length > 0) {
-      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute)
+      summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId, isOprunRecruitmentInterview)
         .then((summary) => questionSummaries.push(summary))
         .catch(log.error);
     }
@@ -2399,16 +2499,37 @@ async function handleBrowserConnection(
   }
 
   async function generateControlledResponse(opts?: { forceSkip?: boolean }): Promise<string> {
+    const responseGeneration = transitionGeneration;
+    const isCurrentResponse = () => responseGeneration === transitionGeneration && !interviewDone;
     const forceSkip = opts?.forceSkip ?? false;
     const currentQ = sortedQuestions[currentQuestionIndex];
     const history = PROMPTS.formatHistory(questionTranscript, isZh);
-    const agentCtx = await buildAgentContext();
     const latestAnsweredExchange = getLatestAnsweredExchange();
+    const interactionReply = isOprunRecruitmentInterview && latestAnsweredExchange?.participant
+      ? recruitmentInteractionReply(latestAnsweredExchange.participant, ctx.title, new Date(),
+          recruitmentParticipantMetadataLoaded ? companyKnowledgeVersion(recruitmentParticipantMetadata) : "") : null;
+    if (interactionReply) {
+      recruitmentParticipantMetadata=rememberRecruitmentInteraction(recruitmentParticipantMetadata,currentQ?.id||"",interactionReply);
+      await persistRecruitmentFollowUpBudget();
+      return isCurrentResponse()?interactionReply.text:"";
+    }
     const isRecruitmentControlTurn = Boolean(
       isOprunRecruitmentInterview
       && latestAnsweredExchange?.participant
       && isRecruitmentConversationControl(latestAnsweredExchange.participant),
     );
+
+    const q1Transition = recruitmentQ1Transition({
+      recruitment: isOprunRecruitmentInterview, questionIndex: currentQuestionIndex,
+      hasAnswer: recruitmentAnsweredQuestions.has(currentQuestionIndex),
+      controlOnly: isRecruitmentControlTurn, isZh,
+    });
+    if (q1Transition) return q1Transition;
+    if (isOprunRecruitmentInterview && forceSkip && recruitmentAnsweredQuestions.has(currentQuestionIndex)) {
+      return isZh ? "好的，谢谢你的分享。 [NEXT]" : "Thanks for sharing. [NEXT]";
+    }
+    const agentCtx = await buildAgentContext();
+    if (!isCurrentResponse()) return "";
 
     const qOpts = currentQ.options as { options: string[]; allowMultiple?: boolean } | null | undefined;
     let choiceInstruction = "";
@@ -2468,8 +2589,8 @@ async function handleBrowserConnection(
 
     if (!forceSkip && isRecruitmentControlTurn) {
       followUpInstruction = isZh
-        ? `候选人刚才只是寒暄、确认声音或请求重述，并没有回答当前计分题。请像真人面试官一样简短回应，然后自然、原意不变地重述当前题目。不要追问证据，不要加 ${NEXT_TOKEN}，这次不计入追问预算。`
-        : `The participant only greeted you, checked audio, or asked for repetition; they did not answer the scored question. Respond briefly and naturally, then restate the current question without changing its meaning. Do not probe evidence, do not append ${NEXT_TOKEN}, and do not consume a follow-up.`;
+        ? `候选人发出互动或事实纠正。简短回应；如果纠正了事实，承认原前提有误并采用更正，不能照读错误前提。只有明确请求重述时才重复题意，其他互动接回当前目标即可。不要追问新证据，不要加 ${NEXT_TOKEN}，这次不计入追问预算。`
+        : `The participant made an interaction or factual correction. Acknowledge it and adopt corrected facts. Repeat the question only when explicitly requested; otherwise resume its goal. Do not probe new evidence, append ${NEXT_TOKEN}, or consume a follow-up.`;
     } else if (forceSkip) {
       const skipOverride = isZh
         ? `⚠️ 受访者已明确要求跳过/进入下一题。你必须简短回应（如"好的，没问题"），然后在回复末尾加上 ${NEXT_TOKEN}。不要试图继续提问或鼓励。`
@@ -2566,10 +2687,18 @@ async function handleBrowserConnection(
       : null;
     let response = deterministicMetricFollowUp || await callRelayLLM(prompt, undefined, {
       stage: "interview-turn",
+      session: ctxSessionId,
+      interview: ctx.interviewId,
       question: currentQuestionIndex + 1,
     }, llmRoute);
+    // A fast spoken/chat "next" can move the question while this call is pending.
+    // Discard that response before it can consume a budget or speak on the new card.
+    if (!isCurrentResponse()) return "";
     if (deterministicMetricFollowUp) {
       log.info("Using deterministic Q4 metric-evidence follow-up");
+    }
+    if (isOprunRecruitmentInterview && !deterministicMetricFollowUp) {
+      response = recruitmentDecisionSpeech(response, latestParticipantAnswer, isZh);
     }
 
     response = response.replace(/^(追问型|结束型|FOLLOW[- ]?UP|WRAP[- ]?UP)\s*[:：]\s*/i, "").trim();
@@ -2741,16 +2870,42 @@ async function handleBrowserConnection(
     return true;
   }
 
+  function retainDeferredAnswerBeforeTransition() {
+    const deferred = mergeAsrSegments(queuedUserUtteranceWhileGenerating,
+      mergeAsrSegments(pendingUserUtteranceWhileSuppressed, pendingAsrFinalText)).trim();
+    queuedUserUtteranceWhileGenerating = "";
+    queuedUserUtteranceIsChat = false;
+    pendingUserUtteranceWhileSuppressed = "";
+    clearPendingAsrFinal();
+    if (!deferred || !hasRecruitmentAnswer(deferred)
+      || looksLikeAssistantPlaybackEcho(deferred, questionTranscript)
+      || isDuplicateUserFinal(deferred)) return;
+    rememberAcceptedUserFinal(deferred);
+    questionTranscript.push({ role: "user", text: deferred });
+    userTurnsOnCurrentQ++;
+    recruitmentAnsweredQuestions.add(currentQuestionIndex);
+    // Emit before the commit request on the same socket, so this final is
+    // durably stored under its old question, not replayed after question_change.
+    if (browserWs.readyState === WebSocket.OPEN) browserWs.send(JSON.stringify({
+      type: "asr_ended", text: deferred, questionIndex: currentQuestionIndex,
+    }));
+  }
+
   async function handleTransition(auto = false) {
     if (interviewDone) return;
+    if (auto && isOprunRecruitmentInterview && (
+      (voiceRoute.provider === 'offline' && offlineAsrDrain.pending)
+      || (lastListeningAudioActivityAt > 0
+        && Date.now() - lastListeningAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS)
+    )) return;
     if (isTransitioning) {
       if (!auto) queueManualTransition("next");
       return;
     }
+    if (isOprunRecruitmentInterview) retainDeferredAnswerBeforeTransition();
     const hasSubstantiveRecruitmentAnswer = questionTranscript.some(
       (entry) => entry.role === "user"
-        && !isRecruitmentConversationControl(entry.text)
-        && !isUserSkipRequest(entry.text),
+        && hasRecruitmentAnswer(entry.text),
     );
     if (
       isOprunRecruitmentInterview
@@ -2776,21 +2931,43 @@ async function handleBrowserConnection(
     silenceConfirmPending = false;
     const transitionId = ++transitionGeneration;
     isTransitioning = true;
+    generatingResponse = false;
+    cancelTts();
     pendingProgressiveTransition = false;
+
+    // The browser saves the still-current question before any index/ASR reset.
+    if (isOprunRecruitmentInterview && !(await answerCommitGate.request(currentQuestionIndex))) {
+      isTransitioning = false;
+      consumedRecruitmentControlKey = "";
+      for (let i = recentAcceptedUserFinals.length - 1; i >= 0; i--) {
+        if (recruitmentControlOnly(recentAcceptedUserFinals[i].text)) recentAcceptedUserFinals.splice(i, 1);
+      }
+      if (browserWs.readyState === WebSocket.OPEN) {
+        browserWs.send(JSON.stringify({ type: "transition_rejected", direction: "next",
+          reason: "answer_save_failed", questionIndex: currentQuestionIndex,
+          message: "刚才的回答暂未保存成功，请稍后再点下一题，你也可以继续补充。" }));
+        await reopenAsr().catch(log.error);
+      }
+      return;
+    }
+    if (interviewDone || browserWs.readyState !== WebSocket.OPEN) { isTransitioning = false; return; }
+    responseGenerationBlocked = false;
 
     // Only wait when the candidate reaches the final currently available
     // progressive question. If a conditional transition Q2 already exists,
     // Q1 must advance to it immediately.
     if (shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex)) {
       const waitUntil = Date.now() + 10_000;
-      while (isProgressiveOpeningOnly(sortedQuestions) && Date.now() < waitUntil) {
+      while (shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex) && Date.now() < waitUntil) {
         await refreshDynamicQuestions();
-        if (!isProgressiveOpeningOnly(sortedQuestions)) break;
+        if (!shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex)) break;
         await new Promise((resolve) => setTimeout(resolve, 2_000));
       }
-      if (isProgressiveOpeningOnly(sortedQuestions)) {
+      if (shouldWaitForQuestionExpansion(sortedQuestions, currentQuestionIndex)) {
         isTransitioning = false;
         pendingProgressiveTransition = true;
+        clearSilenceAutoSkip();
+        silenceConfirmPending = false;
         if (browserWs.readyState === WebSocket.OPEN) {
           browserWs.send(JSON.stringify({
             type: "next_question_not_ready",
@@ -2800,8 +2977,8 @@ async function handleBrowserConnection(
         }
         await speakAndHandle(
           isZh
-            ? "抱歉，下一道个性化题暂未准备好，这是系统异常，我会继续自动重试。本次等待不会作为额外面试题。"
-            : "Sorry, the next personalized question is not ready yet. This is a system issue and I will keep retrying automatically. This wait is not an additional interview question.",
+            ? "我正在结合你的经历准备接下来的问题，请稍候，准备好后我们会自动继续。"
+            : "I am preparing the next questions based on your experience. We will continue automatically when they are ready.",
           { trackInTranscript: false },
         );
         return;
@@ -2833,15 +3010,17 @@ async function handleBrowserConnection(
       }
 
       await refreshDynamicQuestions();
-      currentQuestionIndex++;
+      const nextQuestionIndex = currentQuestionIndex + 1;
 
-      if (currentQuestionIndex < sortedQuestions.length) {
+      if (nextQuestionIndex < sortedQuestions.length) {
+        currentQuestionIndex = nextQuestionIndex;
         const nextQ = sortedQuestions[currentQuestionIndex];
-        const transition = buildTransitionSayHello(currentQuestionIndex, nextQ, isZh);
+        const transition = isOprunRecruitmentInterview ? nextQ.text : buildTransitionSayHello(currentQuestionIndex, nextQ, isZh);
 
         browserWs.send(
           JSON.stringify({
             type: "question_change",
+            questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
             questionIndex: currentQuestionIndex,
             totalQuestions: sortedQuestions.length,
             auto,
@@ -2850,21 +3029,25 @@ async function handleBrowserConnection(
 
         log.info(`→ Q${currentQuestionIndex + 1}/${sortedQuestions.length}: ${nextQ.text.slice(0, 60)}...`);
         const previousQuestionIndex = currentQuestionIndex - 1;
-        const summaryPromise = transcriptSnapshot.length > 0
-          ? summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute)
-          : Promise.resolve("");
-        const [, summary] = await Promise.all([
-          speakAndHandle(transition, { trackInTranscript: false }),
-          summaryPromise,
-        ]);
-        questionSummaries[previousQuestionIndex] = summary;
+        await speakWithBackgroundSummary(
+          questionSummaries, previousQuestionIndex,
+          transcriptSnapshot.map(entry => `${entry.role}: ${entry.text}`).join("\n"),
+          () => summarizeQuestion(currentQ.text, transcriptSnapshot, isZh, llmRoute, ctxSessionId, ctx.interviewId, isOprunRecruitmentInterview),
+          () => speakAndHandle(transition, { trackInTranscript: false }),
+        );
       } else {
+        // Wrap-up is still spoken on the last valid question. Advancing past
+        // the list makes the browser discard its audio/playback receipt and
+        // leaves the otherwise completed interview waiting forever.
         if (transcriptSnapshot.length > 0) {
           const lastSummary = await summarizeQuestion(
             currentQ.text,
             transcriptSnapshot,
             isZh,
             llmRoute,
+            ctxSessionId,
+            ctx.interviewId,
+            isOprunRecruitmentInterview,
           );
           questionSummaries.push(lastSummary);
         }
@@ -2937,6 +3120,9 @@ async function handleBrowserConnection(
           transcriptSnapshot,
           isZh,
           llmRoute,
+          ctxSessionId,
+          ctx.interviewId,
+          isOprunRecruitmentInterview,
         );
         questionSummaries.push(summary);
       }
@@ -2949,6 +3135,7 @@ async function handleBrowserConnection(
       browserWs.send(
         JSON.stringify({
           type: "question_change",
+          questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
           questionIndex: currentQuestionIndex,
           totalQuestions: sortedQuestions.length,
           auto: false,
@@ -2976,41 +3163,15 @@ async function handleBrowserConnection(
     return text.replace(/\s+/g, " ").trim().toLowerCase();
   }
 
-  function deliverAnswerRevision(text: string) {
-    const questionIndex=currentQuestionIndex;
-    const questionId=sortedQuestions[questionIndex]?.id;
-    const event={type:'asr_revision',text,questionIndex,questionId,
-      messageId:randomUUID(),timestamp:new Date().toISOString()};
-    if (browserWs.readyState === WebSocket.OPEN) browserWs.send(JSON.stringify(event));
-    const message=answerRevisionMessage(event,index=>sortedQuestions[index]?.id);
-    const client=dynamicQuestionClient;
-    if (!message || !ctxSessionId || !client) return;
-    const revisionSessionId = ctxSessionId;
-    const write=revisionWriteBarrier.track(() => persistVoiceMessages(revisionSessionId,[message],{
-      async insertIfAbsent(rows) {
-        const {error}=await client.from('messages').upsert(rows,{onConflict:'id',ignoreDuplicates:true})
-          .abortSignal(AbortSignal.timeout(10000));
-        if (error) throw new Error('Relay revision persistence failed');
-      },
-      async read(sessionId,ids) {
-        const {data,error}=await client.from('messages').select('*').eq('sessionId',sessionId).in('id',ids)
-          .abortSignal(AbortSignal.timeout(10000));
-        if (error) throw new Error('Relay revision acknowledgement failed');
-        return (data??[]) as StoredVoiceMessage[];
-      },
-    },randomUUID));
-    // Attach a rejection handler immediately; the browser outbox retains the
-    // identical message ID for retry if this independent write fails.
-    void write.catch(()=>log.error('Answer revision write failed; browser retry remains pending'));
-  }
-
   /**
    * Volcengine sometimes emits a second definite for the same utterance while ASR results are
    * suppressed (or two finals race before generatingResponse is set). If we already stored this
    * user line and an assistant reply followed, skip — otherwise the flush/queue paths call
    * handleUserUtterance again and the agent speaks twice.
    */
-  function isDuplicateUserFinal(userText: string, forwardRevision = false): boolean {
+  function isDuplicateUserFinal(userText: string): boolean {
+    const controlKey = recruitmentControlKey(userText);
+    if (controlKey && controlKey === consumedRecruitmentControlKey) return true;
     const key = normalizeUserUtteranceKey(userText);
     if (!key) return false;
 
@@ -3021,20 +3182,31 @@ async function handleBrowserConnection(
         break;
       }
     }
-    if (forwardRevision && lastUserIdx >= 0 && lastUserIdx === questionTranscript.length - 1) {
-      return isReplayOfPendingUserTurn(userText);
+    // A response can wait longer than the recent-final TTL in the model queue.
+    // The exact unanswered turn is still pending regardless of wall time.
+    // Do not apply fuzzy matching here: additions/corrections need processing,
+    // and the same words after an assistant reply can be a genuine new answer.
+    if (lastUserIdx >= 0 && lastUserIdx === questionTranscript.length - 1
+      && (generatingResponse || suppressAsrResults)
+      && key === normalizeUserUtteranceKey(questionTranscript[lastUserIdx].text)) {
+      return true;
     }
     if (lastUserIdx >= 0 && lastUserIdx !== questionTranscript.length - 1) {
       const hasAssistantAfter = questionTranscript.slice(lastUserIdx + 1).some(e => e.role === "assistant");
 
       if (hasAssistantAfter) {
+        // A candidate can genuinely repeat or refine similar wording after a
+        // follow-up. Only delayed recognition without fresh listening speech
+        // should be discarded as the previously answered turn.
+        if (!isTransitioning && !generatingResponse && !suppressAsrResults && !ttsSpeaking
+          && lastAssistantMessageWallClockMs > 0
+          && lastListeningAudioActivityAt > lastAssistantMessageWallClockMs) return false;
         const lastUserText = questionTranscript[lastUserIdx].text;
         if (shouldSuppressAnsweredAsrFinal(lastUserText, userText)) {
-          const revision = answeredAsrRevision(lastUserText, userText);
-          if (forwardRevision && revision) {
-            deliverAnswerRevision(revision);
-            questionTranscript[lastUserIdx] = { role: "user", text: revision };
-            rememberAcceptedUserFinal(revision);
+          const merged = mergeAsrSegments(lastUserText, userText);
+          if (normalizeUserUtteranceKey(merged).length > normalizeUserUtteranceKey(lastUserText).length) {
+            questionTranscript[lastUserIdx] = { role: "user", text: merged };
+            rememberAcceptedUserFinal(merged);
           }
           return true;
         }
@@ -3049,11 +3221,10 @@ async function handleBrowserConnection(
     if (lastEntry?.role !== "user") return false;
     if (!shouldSuppressAnsweredAsrFinal(lastEntry.text, userText)) return false;
 
-    const revision = answeredAsrRevision(lastEntry.text, userText);
-    if (revision) {
-      deliverAnswerRevision(revision);
-      questionTranscript[questionTranscript.length - 1] = { role: "user", text: revision };
-      rememberAcceptedUserFinal(revision);
+    const merged = mergeAsrSegments(lastEntry.text, userText);
+    if (normalizeUserUtteranceKey(merged).length > normalizeUserUtteranceKey(lastEntry.text).length) {
+      questionTranscript[questionTranscript.length - 1] = { role: "user", text: merged };
+      rememberAcceptedUserFinal(merged);
     }
     return true;
   }
@@ -3071,20 +3242,8 @@ async function handleBrowserConnection(
   }
 
   function getLatestAnsweredExchange(): { interviewer: string; participant: string } | null {
-    const lastEntry = questionTranscript[questionTranscript.length - 1];
-    if (lastEntry?.role !== "user") return null;
-
-    for (let i = questionTranscript.length - 2; i >= 0; i--) {
-      const entry = questionTranscript[i];
-      if (entry.role === "assistant" && entry.text.trim()) {
-        return {
-          interviewer: entry.text.trim(),
-          participant: lastEntry.text.trim(),
-        };
-      }
-    }
-
-    return null;
+    return latestAnsweredExchange(questionTranscript,
+      isOprunRecruitmentInterview ? sortedQuestions[currentQuestionIndex]?.text || "" : "");
   }
 
   /**
@@ -3109,6 +3268,16 @@ async function handleBrowserConnection(
     return false;
   }
 
+  function interruptAssistantPlayback() {
+    cancelTts();
+    suppressAsrResults = false;
+    // The active response cycle still owns its model request. Keep its busy
+    // flag so a new final is queued and drained after that cycle settles.
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({ type: "interrupt" }));
+    }
+  }
+
   async function handleUserUtterance(
     userText: string,
     options?: { allowRecentReplay?: boolean; isChatInput?: boolean },
@@ -3116,8 +3285,8 @@ async function handleBrowserConnection(
     if (!userText || isTransitioning || interviewDone) return;
 
     // Fast-path commands work even during TTS/response generation
-    if (isUserEndRequest(userText)) {
-      queueFarewellAndEnd(`Explicit interview end request: "${userText.slice(0, 80)}"`);
+    if (isUserEndRequest(userText, { isRecruitmentInterview: isOprunRecruitmentInterview })) {
+      queueFarewellAndEnd("Explicit interview end request");
       return;
     }
     if (isFastPrevRequest(userText) || isUserPrevRequest(userText)) {
@@ -3125,8 +3294,11 @@ async function handleBrowserConnection(
       handlePreviousTransition().catch(log.error);
       return;
     }
-    if (isFastNextRequest(userText)) {
+    if ((!isOprunRecruitmentInterview && isFastNextRequest(userText)) || (isOprunRecruitmentInterview
+      && isUserSkipRequest(userText, { isRecruitmentInterview: true }) && !hasRecruitmentAnswer(userText))) {
       log.info("Fast-path: next question request");
+      consumedRecruitmentControlKey = recruitmentControlKey(userText);
+      rememberAcceptedUserFinal(userText);
       handleTransition().catch(log.error);
       return;
     }
@@ -3139,7 +3311,7 @@ async function handleBrowserConnection(
       !options?.isChatInput &&
       !options?.allowRecentReplay &&
       !retryingPendingUserTurnCandidate &&
-      isDuplicateUserFinal(userText, true)
+      isDuplicateUserFinal(userText)
     ) {
       log.info(
         `Skipping duplicate USER final (reply already recorded): "${userText.slice(0, 72)}..."`,
@@ -3150,6 +3322,7 @@ async function handleBrowserConnection(
     // A second final can arrive while we're still in handleUserUtterance (LLM/TTS).
     // The client has already received asr_ended — queue and run after this cycle finishes.
     // 候选人开口:取消"询问后确认切题",留在本题继续听,重置 AFK 计数与静默询问计数
+    asrAudioReplay.acknowledge(currentQuestionIndex);
     clearSilenceAutoSkip();
     silenceAskCount = 0;
     silenceConfirmPending = false;
@@ -3159,19 +3332,20 @@ async function handleBrowserConnection(
       const duplicateWhileGenerating =
         !options?.isChatInput &&
         (isReplayOfPendingUserTurn(userText) ||
-          (!options?.allowRecentReplay && isDuplicateUserFinal(userText, true)));
+          (!options?.allowRecentReplay && isDuplicateUserFinal(userText)));
       if (duplicateWhileGenerating) {
         log.info(
           `Skipping duplicate USER final while response is generating: "${userText.slice(0, 72)}..."`,
         );
         return;
       }
-      queuedUserUtteranceWhileGenerating = userText;
+      queuedUserUtteranceWhileGenerating = mergeAsrSegments(queuedUserUtteranceWhileGenerating, userText);
       queuedUserUtteranceIsChat = Boolean(options?.isChatInput);
       log.info(`Queueing user utterance until current response cycle completes: "${userText.slice(0, 60)}"`);
       return;
     }
 
+    const userResponseGeneration = transitionGeneration;
     generatingResponse = true;
     if (browserWs.readyState === WebSocket.OPEN) {
       browserWs.send(JSON.stringify({ type: "response_started" }));
@@ -3197,9 +3371,10 @@ async function handleBrowserConnection(
         questionTranscript.push({ role: "user", text: userText });
         if (
           !isOprunRecruitmentInterview
-          || !isRecruitmentConversationControl(userText)
+          || hasRecruitmentAnswer(userText)
         ) {
           userTurnsOnCurrentQ++;
+          if (isOprunRecruitmentInterview) recruitmentAnsweredQuestions.add(currentQuestionIndex);
         }
       }
       lastResponseWasCorrection = false;
@@ -3222,7 +3397,7 @@ async function handleBrowserConnection(
         return;
       }
 
-      const userWantsSkip = isUserSkipRequest(userText);
+      const userWantsSkip = isUserSkipRequest(userText, { isRecruitmentInterview: isOprunRecruitmentInterview });
       if (userWantsSkip) log.info(`User skip intent detected: "${userText.slice(0, 80)}"`);
 
       // Suppress ASR result processing during the response cycle.
@@ -3237,7 +3412,8 @@ async function handleBrowserConnection(
       try {
         const response = await generateControlledResponse({ forceSkip: userWantsSkip });
 
-        if (!response || browserWs.readyState !== WebSocket.OPEN) return;
+        if (!response || userResponseGeneration !== transitionGeneration || interviewDone || browserWs.readyState !== WebSocket.OPEN) return;
+        responseGenerationBlocked = false;
 
         let shouldTransition = response.includes(NEXT_TOKEN);
         let shouldGoPrev = response.includes(PREV_TOKEN);
@@ -3278,6 +3454,7 @@ async function handleBrowserConnection(
             );
             return;
           }
+          if (userResponseGeneration !== transitionGeneration || interviewDone) return;
           log.info("Sent controlled response via TTS");
           await speakAndHandle(spokenText, {
             pendingTransition: shouldTransition,
@@ -3294,10 +3471,12 @@ async function handleBrowserConnection(
         }
       } catch (err) {
         log.error("Response generation failed:", err);
+        if (userResponseGeneration === transitionGeneration) markResponseGenerationBlocked();
       } finally {
-        generatingResponse = false;
+        if (userResponseGeneration === transitionGeneration) generatingResponse = false;
         if (
-          !interviewDone
+          userResponseGeneration === transitionGeneration
+          && !interviewDone
           && !isTransitioning
           && browserWs.readyState === WebSocket.OPEN
         ) {
@@ -3323,7 +3502,7 @@ async function handleBrowserConnection(
         }
       }
     } finally {
-      generatingResponse = false;
+      if (userResponseGeneration === transitionGeneration) generatingResponse = false;
     }
   }
 
@@ -3333,7 +3512,6 @@ async function handleBrowserConnection(
 
   /** Gracefully close the current ASR session (send end-of-stream). */
   function disconnectAsr() {
-    cancelPendingAsrConnection();
     asrIntentionalClose = true;
     clearPendingAsrFinal();
     clearHeldBargeInInterim();
@@ -3347,11 +3525,12 @@ async function handleBrowserConnection(
         asrWs.send(buildBigModelAudioRequest(Buffer.alloc(0), asrAudioSeq, true));
       } catch { /* ignore */ }
     }
-    if (asrWs) {
-      asrWs.removeAllListeners();
-      try { asrWs.close(); } catch { /* ignore */ }
+    const retainOfflineSocket = voiceRoute.provider === 'offline'
+      && asrWs?.readyState === WebSocket.OPEN && !interviewDone;
+    if (asrWs && !retainOfflineSocket) {
+      closeAsrSocket(asrWs);
     }
-    asrWs = null;
+    if (!retainOfflineSocket) asrWs = null;
     asrAlive = false;
     asrAccumulator = "";
     asrSessionFirstSpeechAt = 0;
@@ -3366,21 +3545,33 @@ async function handleBrowserConnection(
     }
   }
   /** 静默计时:先问是否答完,绝不直接切题(王总 2026-08-21) */
+  function markResponseGenerationBlocked() {
+    if (!isOprunRecruitmentInterview || interviewDone) return;
+    responseGenerationBlocked = true;
+    clearSilenceAutoSkip();
+    silenceConfirmPending = false;
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({ type: "error",
+        message: "面试暂时无法继续，请联系招聘负责人。已收到的回答会保留。" }));
+    }
+  }
+
   function armSilenceAutoSkip() {
     clearSilenceAutoSkip();
-    if (interviewDone || endingInterview) return;
-    silenceAutoSkipTimer = setTimeout(() => {
+    if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
+    silenceAutoSkipTimer = setTimeout(async () => {
       silenceAutoSkipTimer = null;
-      if (interviewDone || endingInterview) return;
+      if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
       // 小君还在说话/出题/切题时,顺延再看(不打断小君)
-      if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+      if (!asrAlive || isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
         armSilenceAutoSkip();
         return;
       }
+      if (await recoverDeferredUserTurnBeforeInactivity()) return;
       if (silenceAskCount >= MAX_SILENT_ASKS_PER_QUESTION) {
         if (isOprunRecruitmentInterview) {
           log.warn("正式计分题两次提醒后仍无回应,标记面试未完成,绝不跳题");
-          abandonForInactivity();
+          void abandonForInactivity().catch(log.error);
         } else {
           log.info("本题已询问 2 次仍无回应,进入下一题");
           void advanceAfterSilence();
@@ -3389,22 +3580,39 @@ async function handleBrowserConnection(
       }
       silenceAskCount += 1;
       silenceConfirmPending = true;
+      logVoiceInputProgress("silence_prompt");
       log.info(`候选人静默 ${SILENCE_ASK_MS / 1000}s,小君询问是否答完(第 ${silenceAskCount} 次)`);
-      void speakText(bt(isZh, SPOKEN.silenceAsk())).catch((err) =>
-        log.error("静默询问 TTS 失败:", err),
-      );
-      armSilenceConfirm();
+      const reminderGeneration = transitionGeneration;
+      try {
+        // tts_text closes browser input. Restore it only after playback and
+        // actual ASR readiness; a reminder is still part of the same question.
+        const reminderPlayed = await speakText(bt(isZh, SPOKEN.silenceAsk()));
+        if (reminderGeneration !== transitionGeneration || interviewDone
+          || endingInterview || isTransitioning || !silenceConfirmPending) return;
+        if (!reminderPlayed) {
+          markResponseGenerationBlocked();
+          return;
+        }
+        await reopenAsr();
+        if (reminderGeneration === transitionGeneration && asrAlive
+          && !generatingResponse && !ttsSpeaking && silenceConfirmPending) {
+          armSilenceConfirm();
+        }
+      } catch (err) {
+        log.error("静默询问 TTS 失败:", err);
+        markResponseGenerationBlocked();
+      }
     }, SILENCE_ASK_MS);
   }
 
   /** 询问后继续沉默：招聘面试继续留在原题，绝不把沉默当成回答。 */
   function armSilenceConfirm() {
     clearSilenceAutoSkip();
-    if (interviewDone || endingInterview || !silenceConfirmPending) return;
+    if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked || !silenceConfirmPending) return;
     silenceAutoSkipTimer = setTimeout(() => {
       silenceAutoSkipTimer = null;
-      if (interviewDone || endingInterview || !silenceConfirmPending) return;
-      if (isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+      if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked || !silenceConfirmPending) return;
+      if (!asrAlive || isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
         armSilenceConfirm();
         return;
       }
@@ -3412,7 +3620,7 @@ async function handleBrowserConnection(
       if (isOprunRecruitmentInterview) {
         if (silenceAskCount >= MAX_SILENT_ASKS_PER_QUESTION) {
           log.warn("正式计分题持续静默,标记面试未完成,绝不跳题");
-          abandonForInactivity();
+          void abandonForInactivity().catch(log.error);
         } else {
           log.info("正式计分题提醒后仍静默,继续停留原题并再次等待");
           armSilenceAutoSkip();
@@ -3428,7 +3636,7 @@ async function handleBrowserConnection(
     // AFK 守卫:连续 2 道题零回答(两次询问均无回应) → 提前诚实收尾
     if (unansweredQuestionsStreak >= MAX_UNANSWERED_QUESTIONS_STREAK) {
       log.warn("连续多题零回答,判定候选人已离开,提前收尾");
-      abandonForInactivity();
+      await abandonForInactivity();
       return;
     }
     unansweredQuestionsStreak += 1;
@@ -3438,8 +3646,58 @@ async function handleBrowserConnection(
   }
 
   /** AFK 守卫:页面开着但人不在,空转两题后诚实收尾,不留全空回答记录 */
-  function abandonForInactivity() {
-    if (interviewDone || endingInterview) return;
+  async function recoverDeferredUserTurnBeforeInactivity(): Promise<boolean> {
+    if (!isOprunRecruitmentInterview) return false;
+    if (voiceRoute.provider === 'offline' && offlineAsrDrain.pending) {
+      armSilenceAutoSkip();
+      return true;
+    }
+    // Raw microphone speech is activity even if the recognizer has not
+    // produced a first token yet. Never wait for text to protect a speaker.
+    if (lastUserAudioActivityAt > 0
+      && Date.now() - lastUserAudioActivityAt < ASR_ACTIVE_SPEECH_HOLD_MS) {
+      armSilenceAutoSkip();
+      return true;
+    }
+    const deferred = mergeAsrSegments(queuedUserUtteranceWhileGenerating,
+      mergeAsrSegments(pendingUserUtteranceWhileSuppressed,
+        mergeAsrSegments(pendingAsrFinalText, mergeAsrSegments(asrAccumulator, heldBargeInInterimText)))).trim();
+    if (deferred.length < 2 || looksLikeAssistantPlaybackEcho(deferred, questionTranscript)
+      || isDuplicateUserFinal(deferred)) return false;
+
+    // A final waiting in our own queue is a response, not candidate inactivity.
+    const isChatInput = queuedUserUtteranceIsChat;
+    log.info(`Deferred candidate turn state: session=${ctxSessionId} q=${currentQuestionIndex + 1} suppressed=${suppressAsrResults} suppressed_chars=${pendingUserUtteranceWhileSuppressed.length} final_chars=${pendingAsrFinalText.length} queued_chars=${queuedUserUtteranceWhileGenerating.length} interim_chars=${asrAccumulator.length} barge_chars=${heldBargeInInterimText.length}`);
+    queuedUserUtteranceWhileGenerating = "";
+    queuedUserUtteranceIsChat = false;
+    pendingUserUtteranceWhileSuppressed = "";
+    asrAccumulator = "";
+    clearHeldBargeInInterim();
+    clearPendingAsrFinal();
+    silenceAskCount = 0;
+    silenceConfirmPending = false;
+    suppressAsrResults = false;
+    log.info(`Recovering deferred candidate turn before inactivity: session=${ctxSessionId} q=${currentQuestionIndex + 1} chars=${deferred.length}`);
+    if (browserWs.readyState === WebSocket.OPEN) browserWs.send(JSON.stringify({
+      type: "asr_ended", text: deferred, questionIndex: currentQuestionIndex,
+      ...(isChatInput ? { source: "chat" } : {}),
+    }));
+    try {
+      await handleUserUtterance(deferred, isChatInput ? { isChatInput: true } : undefined);
+    } catch {
+      log.error("Deferred candidate turn recovery failed");
+      markResponseGenerationBlocked();
+    }
+    armSilenceAutoSkip();
+    return true;
+  }
+
+  async function abandonForInactivity() {
+    if (interviewDone || endingInterview || pendingProgressiveTransition || responseGenerationBlocked) return;
+    if (!asrAlive || isTransitioning || generatingResponse || ttsSpeaking || awaitingFinalResponse) {
+      armSilenceAutoSkip();
+      return;
+    }
     if (!ownsPersistedSession()) {
       interviewDone = true;
       endingInterview = true;
@@ -3448,16 +3706,56 @@ async function handleBrowserConnection(
       cancelTts();
       return;
     }
+    if (await recoverDeferredUserTurnBeforeInactivity()) return;
+    // The optional closing conversation is not a ninth scored question.
+    // Silence here can finish only after all eight scored answers exist.
+    if (isOprunRecruitmentInterview && currentQuestionIndex >= 8
+      && hasEightScoredAnswers(recruitmentAnsweredQuestions)) {
+      queueFarewellAndEnd("Optional closing conversation finished after silence");
+      return;
+    }
+    logVoiceInputProgress("inactivity_finalization");
     endingInterview = true;
-    interviewDone = true;
     clearSilenceAutoSkip();
-    clearPendingAsrFinal();
     cancelTts();
+    const inactiveQuestionIndex = currentQuestionIndex;
+    const inactiveAudioAt = lastUserAudioActivityAt;
+    if (isOprunRecruitmentInterview) {
+      let saved = false;
+      try {
+        retainDeferredAnswerBeforeTransition();
+        saved = await answerCommitGate.request(currentQuestionIndex);
+      } catch {
+        log.warn("Inactivity answer persistence unavailable; retaining the current turn");
+      }
+      if (!ownsPersistedSession()) return;
+      if (!saved || currentQuestionIndex !== inactiveQuestionIndex || lastUserAudioActivityAt !== inactiveAudioAt) {
+        // Keep the same question and retained answer available for retry.
+        // A transport/storage failure must not publish a successful terminal.
+        endingInterview = false;
+        log.warn("Inactivity finalization deferred: answer save not acknowledged");
+        armSilenceAutoSkip();
+        return;
+      }
+    }
+    clearPendingAsrFinal();
     if (ctxSessionId) {
+      let persisted = false;
+      try {
+        persisted = await persistSessionStatus(ctxSessionId, "ABANDONED", "candidate_inactive");
+      } catch {
+        log.warn("Inactivity status persistence unavailable; deferring finalization");
+      }
+      if (!ownsPersistedSession()) return;
+      if (!persisted) {
+        endingInterview = false;
+        armSilenceAutoSkip();
+        return;
+      }
       const record = liveSessions.get(ctxSessionId);
       if (record) record.status = "ended";
-      void persistSessionStatus(ctxSessionId, "ABANDONED", "candidate_inactive");
     }
+    interviewDone = true;
     if (browserWs.readyState === WebSocket.OPEN) {
       browserWs.send(JSON.stringify({
         type: "interview_incomplete",
@@ -3532,6 +3830,7 @@ async function handleBrowserConnection(
         && !ttsSpeaking
         && browserWs.readyState === WebSocket.OPEN
       ) {
+        logVoiceInputProgress("input_ready");
         browserWs.send(JSON.stringify({ type: "input_ready" }));
       }
     } catch (err) {
@@ -3570,12 +3869,43 @@ async function handleBrowserConnection(
   }
 
   async function connectAsr() {
-    await scheduleAsrConnect(connectAsrUngated);
+    if (asrConnectPending) return await asrConnectPending;
+    // The offline engine has no paid-provider reconnect-rate restriction.
+    // Bound all its handshakes to four without serializing ten clients behind
+    // one slow replacement. Preserve the provider-specific production queue.
+    const schedule = voiceRoute.provider === 'offline' || !asrConnectionAttempted
+      ? scheduleInitialAsrConnect : scheduleAsrConnect;
+    asrConnectionAttempted = true;
+    const operation = schedule(connectAsrUngated);
+    asrConnectPending = operation;
+    try {
+      await operation;
+    } finally {
+      if (asrConnectPending === operation) asrConnectPending = null;
+    }
   }
 
   async function connectAsrUngated() {
-    if (interviewDone || !ownsPersistedSession() || browserWs.readyState!==WebSocket.OPEN) return;
     asrIntentionalClose = false;
+    offlineAsrDrain.reset();
+    if (voiceRoute.provider === 'offline' && asrWs?.readyState === WebSocket.OPEN) {
+      const retained = asrWs;
+      asrAlive = false;
+      try {
+        await resetOfflineAsr(retained);
+      } catch (error) {
+        closeAsrSocket(retained);
+        if (asrWs === retained) asrWs = null;
+        throw error;
+      }
+      if (asrWs !== retained || interviewDone || browserWs.readyState !== WebSocket.OPEN) {
+        throw new Error('ASR connection superseded');
+      }
+      asrAudioSeq = 1;
+      asrAlive = true;
+      armSilenceAutoSkip();
+      return;
+    }
     const reqid = randomUUID().replace(/-/g, "");
     asrAudioSeq = 1;
 
@@ -3598,37 +3928,49 @@ async function handleBrowserConnection(
     };
 
     if (asrWs) {
-      asrWs.removeAllListeners();
-      try { asrWs.close(); } catch { /* ignore */ }
+      closeAsrSocket(asrWs);
     }
 
     const wsHeaders = buildBigModelHeaders(
       ASR_APP_ID, ASR_ACCESS_TOKEN, reqid, ASR_RESOURCE_ID,
       ASR_API_KEY || undefined,
     );
-    const socket = new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
-    asrWs=socket;
-    const attempt=socketOpenAttempt(socket);
-    asrConnectAttempt=attempt;
-    try {await attempt.promise;}
-    finally {if(asrConnectAttempt===attempt)asrConnectAttempt=null;}
-    if(asrWs!==socket || interviewDone || !ownsPersistedSession() || browserWs.readyState!==WebSocket.OPEN) {
-      socket.close();return;
+    asrWs = voiceRoute.provider === 'offline'
+      ? new WebSocket(offlineVoiceEndpoint('asr'))
+      : new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
+
+    const openingSocket = asrWs;
+    const handshakeStartedAt = Date.now();
+    try {
+      await waitForAsrSocketOpen(openingSocket);
+    } catch (error) {
+      if (asrWs === openingSocket) { asrWs = null; asrAlive = false; }
+      log.warn(`ASR handshake failed session=${ctxSessionId} provider=${voiceRoute.provider} elapsed_ms=${Date.now()-handshakeStartedAt} state=${openingSocket.readyState}`);
+      throw error;
+    }
+    if (asrWs !== openingSocket || browserWs.readyState !== WebSocket.OPEN || interviewDone) {
+      closeAsrSocket(openingSocket);
+      throw new Error('ASR connection superseded');
     }
     log.info(`ASR connected: resource=${ASR_RESOURCE_ID}`);
 
     asrWs.send(buildBigModelFullRequest(asrConfig, reqid));
     asrAlive = true;
     armSilenceAutoSkip();
-    const utteranceReplayGuard = new AsrUtteranceReplayGuard();
 
+    const connectedAsrWs = asrWs;
     asrWs.on("message", (data: Buffer) => {
-      if(asrWs!==socket || interviewDone || !ownsPersistedSession())return;
+      if (asrWs !== connectedAsrWs) return;
+      if (voiceRoute.provider === 'offline' && !asrAlive) return;
       try {
         const resp = parseAsrResponse(Buffer.from(data));
+        if (voiceRoute.provider === 'offline' && resp.message === 'offline_audio_processed') {
+          offlineAsrDrain.acknowledge(resp.audioSequence);
+          return;
+        }
 
         if (resp.errorCode != null) {
-          log.error(`ASR error: ${resp.errorCode} ${resp.errorMessage}`);
+          handleAsrProtocolError(resp.errorCode);
           return;
         }
 
@@ -3638,9 +3980,7 @@ async function handleBrowserConnection(
         const results: { text: string; definite: boolean }[] = [];
         if (resp.utterances) {
           for (const utt of resp.utterances) {
-            if (utt.text && !utteranceReplayGuard.isDuplicate(utt)) {
-              results.push({ text: utt.text, definite: !!utt.definite });
-            }
+            if (utt.text) results.push({ text: utt.text, definite: !!utt.definite });
           }
         } else if (resp.text) {
           results.push({ text: resp.text, definite: !!resp.isLastPackage });
@@ -3661,12 +4001,7 @@ async function handleBrowserConnection(
           })) {
             log.info(`Barge-in detected via ASR (interim: "${r.text.slice(0, 40)}") — cancelling TTS`);
             holdBargeInInterim(r.text);
-            cancelTts();
-            suppressAsrResults = false;
-            generatingResponse = false;
-            if (browserWs.readyState === WebSocket.OPEN) {
-              browserWs.send(JSON.stringify({ type: "interrupt" }));
-            }
+            interruptAssistantPlayback();
             continue;
           }
 
@@ -3713,7 +4048,7 @@ async function handleBrowserConnection(
                   continue;
                 }
                 const prevPending = pendingUserUtteranceWhileSuppressed.trim();
-                const incomingDup = isDuplicateUserFinal(suppressedFinal, true);
+                const incomingDup = isDuplicateUserFinal(suppressedFinal);
                 const sameAsPending =
                   normalizeUserUtteranceKey(suppressedFinal)
                   === normalizeUserUtteranceKey(prevPending);
@@ -3729,7 +4064,7 @@ async function handleBrowserConnection(
                     `Keeping deferred utterance — ignoring stale duplicate: "${suppressedFinal.slice(0, 72)}..."`,
                   );
                 } else if (!incomingDup || sameAsPending) {
-                  pendingUserUtteranceWhileSuppressed = suppressedFinal;
+                  pendingUserUtteranceWhileSuppressed = mergeAsrSegments(prevPending, suppressedFinal);
                 } else if (!prevPending) {
                   log.info(
                     `Suppressed ASR final skipped (already answered, nothing deferred): "${suppressedFinal.slice(0, 72)}..."`,
@@ -3802,7 +4137,7 @@ async function handleBrowserConnection(
     });
 
     asrWs.on("close", (code: number, reason: Buffer) => {
-      if(asrWs!==socket || !ownsPersistedSession())return;
+      if (asrWs !== connectedAsrWs) return;
       const reasonStr = reason?.toString() || "";
       log.warn(`ASR WS closed (code=${code}, reason="${reasonStr}")`);
       asrAlive = false;
@@ -3831,6 +4166,26 @@ async function handleBrowserConnection(
   const MAX_RECONNECT_ATTEMPTS = 3;
   const RECONNECT_DELAY_MS = 1000;
 
+  function handleAsrProtocolError(code: number) {
+    if (!asrAlive || interviewDone) return;
+    asrAlive = false;
+    clearSilenceAutoSkip();
+    if (asrProtocolFailureQuestion !== currentQuestionIndex) {
+      asrProtocolFailureQuestion = currentQuestionIndex;
+      asrProtocolFailures = 0;
+    }
+    asrProtocolFailures++;
+    log.warn(`ASR protocol failure session=${ctxSessionId || "none"} question=${currentQuestionIndex + 1} code=${code} attempt=${asrProtocolFailures}`);
+    if (asrProtocolFailures >= MAX_RECONNECT_ATTEMPTS) {
+      // An unavailable recognizer is not evidence that a candidate left.
+      interviewDone = true;
+      browserWs.close(1011, "speech recognition unavailable");
+    }
+    // The existing close handler reconnects, including while the old socket
+    // would otherwise remain OPEN and reject every subsequent audio packet.
+    asrWs?.terminate();
+  }
+
   async function autoReconnectAsr(): Promise<void> {
     browserWs.send(JSON.stringify({ type: "session_reconnecting" }));
 
@@ -3846,6 +4201,15 @@ async function handleBrowserConnection(
       try {
         await connectAsr();
 
+        const replay = asrAudioReplay.snapshot(currentQuestionIndex);
+        if (replay === null) throw new Error("Unacknowledged speech exceeds safe replay capacity");
+        for (const pcm of replay) {
+          if (!asrWs || asrWs.readyState !== WebSocket.OPEN || !asrAlive) throw new Error("ASR disconnected during replay");
+          asrAudioSeq++;
+          if (voiceRoute.provider === 'offline') offlineAsrDrain.sent(asrAudioSeq, pcm.length, true);
+          asrWs.send(buildBigModelAudioRequest(pcm, asrAudioSeq));
+        }
+
         if (!keepAliveInterval) {
           keepAliveInterval = setInterval(() => {
             if (!asrAlive || !asrWs || asrWs.readyState !== WebSocket.OPEN) return;
@@ -3855,6 +4219,7 @@ async function handleBrowserConnection(
         }
 
         browserWs.send(JSON.stringify({ type: "session_reconnected" }));
+        logVoiceInputProgress("input_reconnected");
         browserWs.send(JSON.stringify({ type: "input_ready" }));
         log.info(`ASR auto-reconnect succeeded on attempt ${attempt}`);
         return;
@@ -3879,9 +4244,14 @@ async function handleBrowserConnection(
 
     browserWs.send(JSON.stringify({ type: "ready", sessionId: randomUUID() }));
 
+    if (isOprunRecruitmentInterview && connectionClaim) {
+      browserSessionConnections.establish(ctxSessionId, connectionClaim.lease);
+    }
+
     browserWs.send(
       JSON.stringify({
         type: "question_change",
+        questionIds: sortedQuestions.map(({ id, order }) => ({ id, order })),
         questionIndex: currentQuestionIndex,
         totalQuestions: sortedQuestions.length,
       })
@@ -3922,19 +4292,18 @@ async function handleBrowserConnection(
 
       if (msg.type === "audio" && msg.data) {
         const pcm = Buffer.from(msg.data, "hex");
-        noteIncomingAudioActivity(pcm);
+        const activeSpeech = noteIncomingAudioActivity(pcm);
+        if (!isTransitioning && !ttsSpeaking && !suppressAsrResults && !interviewDone) {
+          asrAudioReplay.append(currentQuestionIndex, pcm);
+        }
         if (!asrAlive || isTransitioning || !asrWs || asrWs.readyState !== WebSocket.OPEN) return;
         asrAudioSeq++;
+        if (voiceRoute.provider === 'offline') offlineAsrDrain.sent(asrAudioSeq, pcm.length, activeSpeech);
         asrWs.send(buildBigModelAudioRequest(pcm, asrAudioSeq));
       } else if (msg.type === "barge_in") {
         if (ttsSpeaking || generatingResponse) {
           log.info("Client barge-in signal received — cancelling TTS");
-          cancelTts();
-          suppressAsrResults = false;
-          generatingResponse = false;
-          if (browserWs.readyState === WebSocket.OPEN) {
-            browserWs.send(JSON.stringify({ type: "interrupt" }));
-          }
+          interruptAssistantPlayback();
         }
       } else if (msg.type === "text_input" && msg.content) {
         const userText = (msg.content as string).trim();
@@ -3961,6 +4330,8 @@ async function handleBrowserConnection(
           ).catch(log.error);
           log.info(`Text input${source ? ` (${source})` : ""}: "${userText.slice(0, 60)}..."`);
         }
+      } else if (msg.type === "answer_commit_ack") {
+        answerCommitGate.acknowledge(msg);
       } else if (msg.type === "question_set_update") {
         if (
           ctx.interviewId
@@ -3970,9 +4341,7 @@ async function handleBrowserConnection(
           log.warn("Rejected browser question refresh for a different interview");
           return;
         }
-        if (/^数君招聘\s*·\s*/.test(ctx.title)) {
-          void refreshDynamicQuestions().catch(() => log.warn('Verified question refresh failed'));
-        } else applyDynamicQuestionSet(msg.questions, "browser");
+        applyDynamicQuestionSet(msg.questions, "browser");
       } else if (msg.type === "next_question") {
         log.info("Browser requested next question");
         const latestEntry = questionTranscript[questionTranscript.length - 1];
@@ -4039,7 +4408,6 @@ async function handleBrowserConnection(
 
   browserWs.on("close", () => {
     log.info("Browser disconnected");
-    cancelPendingAsrConnection();
     if (ctxSessionId && connectionClaim) {
       browserSessionConnections.release(ctxSessionId, connectionClaim.lease);
     }
@@ -4058,8 +4426,7 @@ async function handleBrowserConnection(
         asrWs.send(buildBigModelAudioRequest(Buffer.alloc(0), asrAudioSeq, true));
       } catch { /* ignore */ }
     }
-    asrWs?.removeAllListeners();
-    asrWs?.close();
+    closeAsrSocket(asrWs);
     // Non-recruitment sessions retain relay-side completion fallback. A
     // recruitment session must pass the eight-answer save API instead.
     if (wasFarewellDone && ctxSessionId) {

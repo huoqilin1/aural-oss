@@ -16,6 +16,23 @@ const opening = {
   description: "oprun_dimension:communication",
 };
 
+test("ten live sessions retain all eight relay question IDs despite stale HTTP renders", () => {
+  for (let session = 0; session < 10; session++) {
+    const questions = Array.from({length:8}, (_,order)=>({id:`s${session}-q${order}`,order}));
+    const lookup = new LiveQuestionIdLookup(questions.slice(0,2));
+    const persisted: string[] = [];
+    for (let q=0;q<8;q++) {
+      lookup.updateFromRelay(questions.slice(0,Math.max(2,q+1)));
+      lookup.update(questions.slice(0,2)); // delayed background-page poll
+      persisted.push(lookup.idAt(q)!);
+    }
+    assert.deepEqual(persisted,questions.map(q=>q.id));
+    lookup.updateFromRelay([{id:null,order:0}]);
+    lookup.updateFromRelay([{id:'wrong-session',order:0}]);
+    assert.equal(lookup.idAt(0),questions[0].id);
+  }
+});
+
 const openingWithFallback = [
   opening,
   { text: "条件式岗位过渡题", order: 1, description: "oprun_dimension:job_duty_primary" },

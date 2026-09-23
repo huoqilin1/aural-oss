@@ -10,7 +10,7 @@ export function shouldBlockRecruitmentCompletion(input: {
   answeredCurrentQuestion: boolean;
   plannedMainQuestionCount: number;
 }): boolean {
-  if (!input.isRecruitmentInterview || input.interviewComplete) return false;
+  if (!input.isRecruitmentInterview) return false;
 
   const hasAllowedQuestionCount =
     input.totalQuestions === input.plannedMainQuestionCount
@@ -22,7 +22,7 @@ export function shouldBlockRecruitmentCompletion(input: {
   return (
     !hasAllowedQuestionCount
     || input.currentQuestionIndex < input.plannedMainQuestionCount - 1
-    || !input.answeredCurrentQuestion
+    || (!input.answeredCurrentQuestion && !input.interviewComplete)
   );
 }
 

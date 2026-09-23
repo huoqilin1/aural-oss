@@ -1,5 +1,30 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { speakWithBackgroundSummary } from "../server/question-summary-transition";
+
+test("slow summaries do not block the next question or lose original evidence", async () => {
+    const summaries: string[] = [];
+    let finish!: (text: string) => void;
+    const slow = new Promise<string>(resolve => { finish = resolve; });
+    let spoken = false;
+    await speakWithBackgroundSummary(summaries, 0, "user: original evidence", () => slow, async () => { spoken = true; });
+    assert.equal(spoken, true);
+    assert.equal(summaries[0], "user: original evidence");
+    finish("compressed evidence");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(summaries[0], "compressed evidence");
+});
+
+test("late summaries cannot replace newer context and failures retain the transcript", async () => {
+    const summaries: string[] = [];
+    let finish!: (text: string) => void;
+    const slow = new Promise<string>(resolve => { finish = resolve; });
+    await speakWithBackgroundSummary(summaries, 0, "old evidence", () => slow, async () => {});
+    await speakWithBackgroundSummary(summaries, 0, "new evidence", async () => { throw new Error("synthetic failure"); }, async () => {});
+    finish("stale summary");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(summaries[0], "new evidence");
+});
 
 import {
     collapseInternalAsrRepetitions,
@@ -200,7 +225,7 @@ test("Q4 unsupported numeric claims receive one deterministic evidence check", (
       "当时我说准确率达到99%，但没有保留原始样本，也不是独立核验。",
       true,
     ) || "",
-    /时间范围和样本量/,
+    /统计口径/,
   );
   assert.equal(
     recruitmentMetricEvidenceFollowUp(2, "提升99%，但没有原始数据", true),

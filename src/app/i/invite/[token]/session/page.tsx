@@ -17,6 +17,7 @@ import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useRecruitmentOnboardingGate } from "@/hooks/use-recruitment-onboarding-gate";
+import { useRecruitmentMedia } from "@/hooks/use-recruitment-media";
 
 const ChatInterface = dynamic(
   () => import("@/components/session/chat-interface").then((m) => m.ChatInterface),
@@ -47,6 +48,7 @@ export default function InviteSessionPage() {
 
   const candidateInterview = (candidate.data as any)?.interview;
   const candidateSession = (candidate.data as any)?.session;
+  const entryMedia = useRecruitmentMedia(candidateSession?.id ?? "", !!candidateInterview?.videoEnabled);
   const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(
     String(candidateInterview?.title ?? ""),
   );
@@ -60,7 +62,7 @@ export default function InviteSessionPage() {
   const {
     ready: onboardingReady,
     done: onboardingDone,
-    complete: completeOnboarding,
+    complete: persistOnboarding,
   } = useRecruitmentOnboardingGate({
     isRecruitmentInterview: isOprunRecruitmentInterview,
     sessionId: candidateSession?.id,
@@ -70,6 +72,11 @@ export default function InviteSessionPage() {
     candidateInterview?.questions ?? [],
   );
   const refetchCandidate = candidate.refetch;
+  const completeOnboarding = () => {
+    // Start browser permission in the original click, before loading/rendering voice UI.
+    if (isOprunRecruitmentInterview && candidateInterview?.voiceEnabled) void entryMedia.request().catch(() => {});
+    persistOnboarding();
+  };
 
   useEffect(() => {
     if (!isWaitingForGeneratedQuestions) return;
@@ -120,6 +127,7 @@ export default function InviteSessionPage() {
       id: message.id,
       role: message.role,
       content: message.content,
+      timestamp: String(message.timestamp),
     }));
   const resumeDrawings = resumeState.orderedMessages
     .filter((message: any) => message.contentType === "WHITEBOARD" && message.whiteboardData)
@@ -218,6 +226,7 @@ export default function InviteSessionPage() {
         {/* 招聘进入铁律:阅读须知 -> 只点一次开始面试 -> 自动连接摄像头和麦克风。
             摄像头必须保留;不得在这里插入任何设备测试或第二次开始按钮。 */}
         <VoiceInterface
+          entryMedia={entryMedia}
           sessionId={session.id}
           interviewId={interview.id}
           interviewTitle={interview.title}
@@ -250,6 +259,8 @@ export default function InviteSessionPage() {
           })),
         }}
         durationMinutes={interview.timeLimitMinutes ?? undefined}
+        initialMessages={resumeState.isResuming ? resumeTextMessages : undefined}
+        initialQuestionIndex={resumeState.questionIndex}
         onComplete={handleComplete}
       />
     </>

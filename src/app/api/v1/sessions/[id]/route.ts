@@ -4,6 +4,7 @@ import {
     validateApiKey,
 } from "@/lib/api-key-auth";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { readVoiceOnline } from "../../../../../../server/voice-online-state";
 
 type InterviewJoin = {
   id: string;
@@ -24,7 +25,7 @@ export async function GET(
   const { data: session, error } = await supabaseAdmin
     .from("sessions")
     .select(
-      "id, status, participantName, participantEmail, summary, insights, themes, sentiment, totalDurationSeconds, createdAt, currentQuestionId, interview:interviews!inner(id, title, objective, projectId), messages(id, role, content, timestamp, questionId, transcription)",
+      "id, status, participantName, participantEmail, participantMetadata, summary, insights, themes, sentiment, totalDurationSeconds, createdAt, currentQuestionId, interview:interviews!inner(id, title, objective, projectId), messages(id, role, content, timestamp, questionId, transcription)",
     )
     .eq("id", sessionId)
     .order("timestamp", { ascending: true, foreignTable: "messages" })
@@ -60,6 +61,7 @@ export async function GET(
     transcription: string | null;
   }[];
 
+  const metadata=session.participantMetadata as Record<string,unknown>|null;
   return Response.json({
     data: {
       id: session.id,
@@ -73,6 +75,11 @@ export async function GET(
       totalDurationSeconds: session.totalDurationSeconds,
       createdAt: session.createdAt,
       currentQuestionId: session.currentQuestionId,
+      companyKnowledge: {
+        version: typeof metadata?.recruitmentCompanyKnowledgeVersion==="string"?metadata.recruitmentCompanyKnowledgeVersion:null,
+        replies: Array.isArray(metadata?.recruitmentCompanyReplies)?metadata.recruitmentCompanyReplies:[],
+      },
+      voiceConnection: await readVoiceOnline(undefined, Date.now(), sessionId),
       messages: messages.map((m) => ({
         id: m.id,
         role: m.role,

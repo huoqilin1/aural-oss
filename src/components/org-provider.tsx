@@ -1,5 +1,7 @@
 "use client";
 
+import { readBrowserPreference, writeBrowserPreference } from "@/lib/browser-storage";
+
 import {
   createContext,
   useCallback,
@@ -45,7 +47,7 @@ export function OrgProvider({ children }: { children: ReactNode }) {
 
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(() => {
     if (typeof window !== "undefined") {
-      return localStorage.getItem(STORAGE_KEY);
+      return readBrowserPreference(STORAGE_KEY);
     }
     return null;
   });
@@ -58,14 +60,14 @@ export function OrgProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (currentOrg && typeof window !== "undefined") {
-      localStorage.setItem(STORAGE_KEY, currentOrg.id);
+      writeBrowserPreference(STORAGE_KEY, currentOrg.id);
     }
   }, [currentOrg]);
 
   const setCurrentOrg = useCallback((orgId: string) => {
     setSelectedOrgId(orgId);
     if (typeof window !== "undefined") {
-      localStorage.setItem(STORAGE_KEY, orgId);
+      writeBrowserPreference(STORAGE_KEY, orgId);
     }
   }, []);
 

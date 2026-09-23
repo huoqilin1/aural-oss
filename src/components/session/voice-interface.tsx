@@ -1,6 +1,4 @@
 "use client";
-import {candidateFetch as fetch} from '@/lib/voice/candidate-fetch';
-import {saveInterviewEvidence, saveRecordingMetadata} from '@/lib/voice/evidence-save';
 
 import { CodeBlock } from "@/components/code-editor/code-block";
 import {
@@ -36,6 +34,8 @@ import {
 import { useInterviewRecording } from "@/hooks/use-interview-recording";
 import { useIsMobile } from "@/hooks/use-is-mobile";
 import { useVoice, type InterviewContext } from "@/hooks/use-voice";
+import { useRecruitmentMedia } from "@/hooks/use-recruitment-media";
+import { ENTRY_MEDIA_MESSAGES, type RecruitmentMediaAccess } from "@/lib/voice/recruitment-media-access";
 import {
     isInternalQuestionDescription,
     OPRUN_PLANNED_MAIN_QUESTION_COUNT,
@@ -72,7 +72,7 @@ import {
     X,
 } from "lucide-react";
 import { useTheme } from "next-themes";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { CSSProperties, ReactNode } from "react";
 
 interface Message {
@@ -446,6 +446,7 @@ interface VoiceInterfaceProps {
   candidateName?: string;
   /** Start an invited recruitment interview as soon as the page opens. */
   autoStart?: boolean;
+  entryMedia?: RecruitmentMediaAccess;
   /** Render in static preview mode — shows full layout without connecting */
   preview?: boolean;
 }
@@ -455,13 +456,7 @@ const MIN_PANEL_WIDTH = 260;
 const DEFAULT_RIGHT_WIDTH = 380;
 const COLLAPSED_RIGHT_DOCK_WIDTH = 56;
 
-export function VoiceInterface(props: VoiceInterfaceProps) {
-  // React may keep the route mounted when its session changes. All transcript,
-  // delivery, microphone and completion state must belong to one session.
-  return <VoiceInterfaceSession key={`${props.interviewId}:${props.sessionId}`} {...props} />;
-}
-
-function VoiceInterfaceSession({
+export function VoiceInterface({
   sessionId,
   interviewId,
   interviewTitle,
@@ -475,15 +470,14 @@ function VoiceInterfaceSession({
   videoMode = false,
   preview = false,
   autoStart = false,
+  entryMedia: providedEntryMedia,
 }: VoiceInterfaceProps) {
-  const mountedRef = useRef(false);
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
   const isMobile = useIsMobile();
+  const ownedEntryMedia = useRecruitmentMedia(sessionId, videoMode);
+  const entryMedia = providedEntryMedia ?? ownedEntryMedia;
+  const entryMediaState = useSyncExternalStore(entryMedia.subscribe, entryMedia.getSnapshot, entryMedia.getSnapshot);
   const isOprunRecruitmentInterview = /^数君招聘\s*·\s*/.test(interviewTitle);
 
   const [messages, setMessages] = useState<Message[]>(
@@ -498,6 +492,9 @@ function VoiceInterfaceSession({
   // 服务端终态错误(已结束/不完整)必须持续可见,不能像瞬时连接错误那样 5 秒后消失。
   const terminalRef = useRef(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [incompleteSaveFailed, setIncompleteSaveFailed] = useState(false);
+  const incompleteSaveStartedRef = useRef(false);
+  const incompleteSaveBusyRef = useRef(false);
   const [locallyCompleted, setLocallyCompleted] = useState(false);
   const [advancePending, setAdvancePending] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
@@ -606,7 +603,7 @@ function VoiceInterfaceSession({
         if (snapshotData) {
           const payload = { json: { sessionId, drawingId: active.id, label: active.label, snapshotData } };
           const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-          void fetch("/api/trpc/session.saveWhiteboard",{method:'POST',body:blob,keepalive:true}).catch(()=>{});
+          navigator.sendBeacon("/api/trpc/session.saveWhiteboard", blob);
         }
       }
 
@@ -617,7 +614,7 @@ function VoiceInterfaceSession({
         if (codeSnapshot) {
           const payload = { json: { sessionId, snippetId: activeSnippet.id, label: activeSnippet.label, snapshotData: codeSnapshot } };
           const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-          void fetch("/api/trpc/session.saveCode",{method:'POST',body:blob,keepalive:true}).catch(()=>{});
+          navigator.sendBeacon("/api/trpc/session.saveCode", blob);
         }
       }
     };
@@ -747,12 +744,13 @@ function VoiceInterfaceSession({
 
   const handleError = useCallback((err: string) => {
     setError(err);
+    if (autoStart) return; // Startup errors remain visible until actual recovery.
     // 服务端终态错误必须持续可见。回调触发早于终端状态的渲染提交,
     // 因此把判断放进延时回调里(此时 terminalRef 一定已同步)。
     setTimeout(() => {
       setError((prev) => (terminalRef.current ? prev : ""));
     }, 5000);
-  }, []);
+  }, [autoStart]);
 
   const voice = useVoice({
     interviewId,
@@ -761,12 +759,48 @@ function VoiceInterfaceSession({
     onTranscript: handleTranscript,
     onAIResponse: handleAIResponse,
     onError: handleError,
+    getEntryMedia: autoStart ? entryMedia.request : undefined,
     onTtsChunk: videoMode ? recording.addTtsChunk : undefined,
     onInterrupt: videoMode ? recording.cancelTts : undefined,
   });
   useEffect(() => {
     terminalRef.current = voice.isSessionTerminal;
   }, [voice.isSessionTerminal]);
+
+  const preserveIncomplete = voice.preserveIncomplete;
+  const stopRecording = recording.stop;
+  const saveInterruptedInterview = useCallback(async () => {
+    if (incompleteSaveBusyRef.current) return;
+    incompleteSaveBusyRef.current = true;
+    setIncompleteSaveFailed(false);
+    setIsSaving(true);
+    try {
+      // Independent work: an answer write failure must not leave the camera
+      // capturing, and a failed upload must not discard the retained answer.
+      const results = await Promise.allSettled([
+        preserveIncomplete().then((ok) => {
+          if (!ok) throw new Error("interrupted transcript save failed");
+        }),
+        videoMode ? stopRecording() : Promise.resolve(),
+      ]);
+      if (results.some((result) => result.status === "rejected")) {
+        setIncompleteSaveFailed(true);
+        setError("面试已暂停，部分记录尚未保存，请保持页面打开并重试保存。");
+      } else {
+        setError("本次面试尚未完成，已有记录已保存。请联系招聘负责人安排后续面试。");
+      }
+    } finally {
+      incompleteSaveBusyRef.current = false;
+      setIsSaving(false);
+    }
+  }, [preserveIncomplete, videoMode, stopRecording]);
+
+  useEffect(() => {
+    if (!voice.isSessionTerminal || incompleteSaveStartedRef.current) return;
+    entryMedia.dispose();
+    incompleteSaveStartedRef.current = true;
+    void saveInterruptedInterview();
+  }, [voice.isSessionTerminal, saveInterruptedInterview, entryMedia]);
   const latestAssistantRequiresAnswer =
     !!voice.aiTranscript.trim() && looksLikeInterviewQuestion(voice.aiTranscript);
   const canAdvanceCurrentQuestion =
@@ -775,6 +809,7 @@ function VoiceInterfaceSession({
   useEffect(() => {
     if (voice.isConnected) {
       setIsStartingInterview(false);
+      setError("");
     }
   }, [voice.isConnected]);
 
@@ -793,13 +828,16 @@ function VoiceInterfaceSession({
   }, [error]);
 
   const autoStartInFlightRef = useRef(false);
+  const autoStartMountedRef = useRef(true);
   const autoStartAttemptsRef = useRef(0);
   const autoStartRetryTimerRef = useRef<number | null>(null);
   const [autoStartRetryNonce, setAutoStartRetryNonce] = useState(0);
-  useEffect(() => () => {
-    if (autoStartRetryTimerRef.current !== null) {
-      window.clearTimeout(autoStartRetryTimerRef.current);
-    }
+  useEffect(() => {
+    autoStartMountedRef.current = true;
+    return () => {
+      autoStartMountedRef.current = false;
+      if (autoStartRetryTimerRef.current !== null) window.clearTimeout(autoStartRetryTimerRef.current);
+    };
   }, []);
   useEffect(() => {
     // 招聘铁律:须知页的「开始面试」是唯一站内点击。进入本组件后自动
@@ -819,6 +857,7 @@ function VoiceInterfaceSession({
     setIsStartingInterview(true);
     void voice.connect().then((connected) => {
       autoStartInFlightRef.current = false;
+      if (!autoStartMountedRef.current) return;
       if (connected) return;
       if (autoStartAttemptsRef.current >= 3) {
         setIsStartingInterview(false);
@@ -831,13 +870,50 @@ function VoiceInterfaceSession({
     });
   }, [autoStart, preview, voice.isConnected, voice.connect, voice.isSessionTerminal, autoStartRetryNonce]);
 
+  useEffect(() => {
+    if (!autoStart || preview || voice.isConnected || voice.isSessionTerminal) return;
+    // After the bounded immediate retries, wait for an actual browser/network
+    // recovery signal rather than leaving the single-start flow stranded.
+    let disposed = false;
+    const resumeOnRecovery = async () => {
+      const recoveredMedia = await entryMedia.recover();
+      if (disposed || !autoStartMountedRef.current) return;
+      if (autoStartInFlightRef.current || (!recoveredMedia && autoStartAttemptsRef.current < 3)) return;
+      autoStartAttemptsRef.current = 0;
+      setAutoStartRetryNonce((value) => value + 1);
+    };
+    window.addEventListener("online", resumeOnRecovery);
+    window.addEventListener("focus", resumeOnRecovery);
+    navigator.mediaDevices?.addEventListener("devicechange", resumeOnRecovery);
+    const resumeOnVisibility = () => {
+      if (document.visibilityState === "visible") void resumeOnRecovery();
+    };
+    document.addEventListener("visibilitychange", resumeOnVisibility);
+    const permissions: PermissionStatus[] = [];
+    for (const name of ["microphone", "camera"]) {
+      void navigator.permissions?.query({ name: name as PermissionName }).then(permission => {
+        if (disposed) return;
+        permissions.push(permission);
+        permission.addEventListener("change", resumeOnRecovery);
+      }).catch(() => {});
+    }
+    return () => {
+      disposed = true;
+      permissions.forEach(permission => permission.removeEventListener("change", resumeOnRecovery));
+      window.removeEventListener("online", resumeOnRecovery);
+      window.removeEventListener("focus", resumeOnRecovery);
+      document.removeEventListener("visibilitychange", resumeOnVisibility);
+      navigator.mediaDevices?.removeEventListener("devicechange", resumeOnRecovery);
+    };
+  }, [autoStart, preview, voice.isConnected, voice.isSessionTerminal, entryMedia]);
+
   // ── Start recording when voice connects (video mode) ───────────
   const recordingStartedRef = useRef(false);
   useEffect(() => {
     if (!videoMode || !voice.isConnected || recordingStartedRef.current) return;
     recordingStartedRef.current = true;
     const micStream = voice.mediaStreamRef.current;
-    recording.start(micStream ?? undefined);
+    recording.start(micStream ?? undefined, autoStart ? entryMedia.cameraStream() : undefined);
   }, [videoMode, voice.isConnected]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Attach mic stream to recording when it becomes available
@@ -900,19 +976,21 @@ function VoiceInterfaceSession({
   const persistDrawing = useCallback(
     async (drawing: { id: string; label: string }, snapshotData: string, imageDataUrl?: string) => {
       try {
-        await saveInterviewEvidence("/api/trpc/session.saveWhiteboard", {
+        await fetch("/api/trpc/session.saveWhiteboard", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            json: {
               sessionId,
               drawingId: drawing.id,
               label: drawing.label,
               snapshotData,
               imageDataUrl: imageDataUrl ?? undefined,
+            },
+          }),
         });
-        return true;
       } catch (err) {
         console.error("[voice] Failed to save whiteboard:", err);
-        setSaveStatus('idle');
-        setError('白板内容尚未保存，请保留页面并重试。');
-        return false;
       }
     },
     [sessionId],
@@ -931,7 +1009,7 @@ function VoiceInterfaceSession({
     );
 
     // Generate images sequentially (shared wb instance) but persist in parallel
-    const persistOps: Promise<boolean>[] = [];
+    const persistOps: Promise<void>[] = [];
     for (const drawing of updatedDrawings) {
       if (!drawing.snapshotData) continue;
       const img =
@@ -940,7 +1018,7 @@ function VoiceInterfaceSession({
           : await wb.exportImageFromData(drawing.snapshotData);
       persistOps.push(persistDrawing(drawing, drawing.snapshotData, img ?? undefined));
     }
-    if ((await Promise.all(persistOps)).some(saved => !saved)) throw new Error('白板内容尚未保存，请重试');
+    await Promise.all(persistOps);
   }, [drawings, activeDrawingIdx, persistDrawing]);
 
   // Debounced auto-save callback from WhiteboardCanvas
@@ -958,7 +1036,7 @@ function VoiceInterfaceSession({
         prev.map((d, i) => (i === activeDrawingIdx ? { ...d, snapshotData } : d)),
       );
 
-      if (!await persistDrawing(drawing, snapshotData)) { lastAutoSave.current = null; return; }
+      await persistDrawing(drawing, snapshotData);
       setSaveStatus("saved");
 
       // Send whiteboard image as PNG to relay for agent context
@@ -1098,7 +1176,7 @@ function VoiceInterfaceSession({
       setDrawings((prev) =>
         prev.map((d, i) => (i === activeDrawingIdx ? { ...d, snapshotData } : d)),
       );
-      if (!await persistDrawing(drawing, snapshotData, imageDataUrl ?? undefined)) return;
+      await persistDrawing(drawing, snapshotData, imageDataUrl ?? undefined);
     }
     setSaveStatus("saved");
   }, [drawings, activeDrawingIdx, persistDrawing]);
@@ -1107,13 +1185,15 @@ function VoiceInterfaceSession({
   const persistCodeSnippet = useCallback(
     async (snippet: { id: string; label: string }, snapshotData: string) => {
       try {
-        await saveInterviewEvidence("/api/trpc/session.saveCode", {sessionId, snippetId: snippet.id, label: snippet.label, snapshotData});
-        return true;
+        await fetch("/api/trpc/session.saveCode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            json: { sessionId, snippetId: snippet.id, label: snippet.label, snapshotData },
+          }),
+        });
       } catch (err) {
         console.error("[voice] Failed to save code:", err);
-        setCodeSaveStatus('idle');
-        setError('代码内容尚未保存，请保留页面并重试。');
-        return false;
       }
     },
     [sessionId],
@@ -1126,12 +1206,11 @@ function VoiceInterfaceSession({
     const updatedSnippets = codeSnippets.map((s, i) =>
       i === activeSnippetIdx && currentSnapshot ? { ...s, snapshotData: currentSnapshot } : s,
     );
-    const saved = await Promise.all(
+    await Promise.all(
       updatedSnippets
         .filter((s) => s.snapshotData)
         .map((snippet) => persistCodeSnippet(snippet, snippet.snapshotData!))
     );
-    if (saved.some(value => !value)) throw new Error('代码内容尚未保存，请重试');
   }, [codeSnippets, activeSnippetIdx, persistCodeSnippet]);
 
   const lastCodeAutoSave = useRef<string | null>(null);
@@ -1144,7 +1223,7 @@ function VoiceInterfaceSession({
       setCodeSnippets((prev) =>
         prev.map((s, i) => (i === activeSnippetIdx ? { ...s, snapshotData } : s)),
       );
-      if (!await persistCodeSnippet(snippet, snapshotData)) { lastCodeAutoSave.current = null; return; }
+      await persistCodeSnippet(snippet, snapshotData);
       setCodeSaveStatus("saved");
 
       // Send code content to relay for agent context
@@ -1248,7 +1327,7 @@ function VoiceInterfaceSession({
       setCodeSnippets((prev) =>
         prev.map((s, i) => (i === activeSnippetIdx ? { ...s, snapshotData } : s)),
       );
-      if (!await persistCodeSnippet(snippet, snapshotData)) return;
+      await persistCodeSnippet(snippet, snapshotData);
     }
     setCodeSaveStatus("saved");
   }, [codeSnippets, activeSnippetIdx, persistCodeSnippet]);
@@ -1263,7 +1342,7 @@ function VoiceInterfaceSession({
         setDrawings((prev) =>
           prev.map((d, i) => (i === activeDrawingIdx ? { ...d, snapshotData: snapshot } : d)),
         );
-        if (!await persistDrawing(drawing, snapshot)) return false;
+        await persistDrawing(drawing, snapshot);
       }
     }
     const ce = codeEditorRef.current;
@@ -1274,14 +1353,13 @@ function VoiceInterfaceSession({
         setCodeSnippets((prev) =>
           prev.map((s, i) => (i === activeSnippetIdx ? { ...s, snapshotData: snapshot } : s)),
         );
-        if (!await persistCodeSnippet(snippet, snapshot)) return false;
+        await persistCodeSnippet(snippet, snapshot);
       }
     }
-    return true;
   }, [drawings, activeDrawingIdx, persistDrawing, codeSnippets, activeSnippetIdx, persistCodeSnippet]);
 
   const handlePreviousQuestion = useCallback(async () => {
-    if (!await saveCurrentContent()) return;
+    await saveCurrentContent();
     voice.previousQuestion();
   }, [saveCurrentContent, voice]);
 
@@ -1297,7 +1375,7 @@ function VoiceInterfaceSession({
     setAdvancePending(true);
     let awaitingRelay = false;
     try {
-      if (!await saveCurrentContent()) return;
+      await saveCurrentContent();
       if (voice.totalQuestions === 0) {
         // 即兴深挖(招聘):没预设题,「我答完了」= 告诉 AI 推进下一个问题
         voice.sendTextMessage("(我答完了,请继续下一个问题)");
@@ -1393,8 +1471,6 @@ function VoiceInterfaceSession({
 
   // ── Common save-and-end logic ───────────────────────────────────
   const endingRef = useRef(false);
-  const stoppedRecordingRef = useRef<ReturnType<typeof recording.stop> | null>(null);
-  const recordingMetadataSavedRef = useRef(false);
   const handleEndInterview = useCallback(async () => {
     if (endingRef.current) return;
     if (shouldBlockRecruitmentCompletion({
@@ -1412,39 +1488,43 @@ function VoiceInterfaceSession({
     endingRef.current = true;
     setIsSaving(true);
 
-    voice.stopListening();
-
     try {
-      await Promise.all([
+      await Promise.allSettled([
         withTimeout(saveAllDrawings(), 5000, "save drawings"),
         withTimeout(saveAllCodeSnippets(), 5000, "save code snippets"),
       ]);
 
-      // Retain the same stop result across a UI timeout or a metadata retry.
-      // Calling stop twice previously returned only screenshots on the retry.
-      if (videoMode && (recordingStartedRef.current || stoppedRecordingRef.current) && !recordingMetadataSavedRef.current) {
-        stoppedRecordingRef.current ??= recording.stop().catch(error => {
-          stoppedRecordingRef.current = null;
-          throw error;
-        });
-        const result = await withTimeout(stoppedRecordingRef.current, 8000, "stop recording");
-        await withTimeout(
-          saveRecordingMetadata({
-            sessionId,
-            audioRecordingUrl: result.audioUrl,
-            audioDuration: result.audioDuration,
-            screenshots: result.screenshots,
-          }),
-          8000,
-          "save recording",
-        );
-        recordingMetadataSavedRef.current = true;
-      }
-
-      const completed = await withTimeout(voice.disconnect(), 8000, "voice disconnect");
-      if (!mountedRef.current) return;
+      // Validate and durably save all eight answers before stopping media.
+      // A rejected completion must leave the current interview usable.
+      const completed = await voice.disconnect(async () => {
+        // Stop recording and save artifacts (video mode)
+        if (videoMode) {
+          // Upload is durable work, not an eight-second UI race. stop() is
+          // single-flight and retains the captured recording for failed retries.
+          const result = await recording.stop();
+          if (!result.audioUrl) throw new Error("面试录音尚未保存，请联系 HR 核实");
+          const saved = await withTimeout(
+            fetch("/api/trpc/session.saveRecording", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                json: {
+                  sessionId,
+                  audioRecordingUrl: result.audioUrl,
+                  audioDuration: result.audioDuration,
+                  screenshots: result.screenshots,
+                },
+              }),
+            }),
+            8000,
+            "save recording",
+          );
+          if (!saved.ok) throw new Error("面试录音关联尚未完成，请重试结束面试");
+        }
+      });
       if (!completed) throw new Error("面试记录尚未完整保存，请稍后重试结束面试");
       setLocallyCompleted(true);
+      entryMedia.dispose();
       onComplete?.();
     } catch (err) {
       console.error("[voice] Failed to end interview cleanly:", err);
@@ -1463,6 +1543,7 @@ function VoiceInterfaceSession({
     sessionId,
     voice,
     onComplete,
+    entryMedia,
   ]);
 
   useEffect(() => {
@@ -1598,7 +1679,7 @@ function VoiceInterfaceSession({
             ? `${aiName} 正在思考…`
             : voice.isTransitioning
               ? `${aiName} 正在准备下一题`
-              : voice.isListening
+              : voice.isListening && voice.isInputReady
                 ? "正在听取回答，慢慢来"
                 : "面试进行中";
 
@@ -1672,10 +1753,10 @@ function VoiceInterfaceSession({
           <CheckCircle2 className="mx-auto h-16 w-16 text-secondary-500" />
           <h2 className="mt-4 text-2xl font-bold">面试已顺利完成</h2>
           <p className="mt-2 text-muted-foreground">
-            感谢你的时间和用心的回答，你的每一题都已被完整记录。
+            感谢你的时间和用心的回答，本次面试记录已提交。
           </p>
           <p className="mt-1 text-sm text-muted-foreground">
-            HR 会尽快查看你的面试结果，通常在一个工作日内与你联系。辛苦了，好好休息。
+            HR 会查看你的面试结果，后续安排请留意招聘方通知。辛苦了。
           </p>
         </CardContent>
       </Card>
@@ -1878,9 +1959,9 @@ function VoiceInterfaceSession({
       {isSaving && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-background/80 backdrop-blur-sm">
           <Loader2 className="h-10 w-10 animate-spin text-primary" />
-          <p className="mt-4 text-lg font-medium">Saving interview data...</p>
+          <p className="mt-4 text-lg font-medium">正在保存面试记录…</p>
           <p className="mt-1 text-sm text-muted-foreground">
-            This will only take a moment.
+            请稍候，保存完成前请保持页面打开。
           </p>
         </div>
       )}
@@ -1914,6 +1995,15 @@ function VoiceInterfaceSession({
         </div>
 
         <div className="space-y-3 px-3 py-3 md:px-6 md:py-4">
+          {autoStart && !preview && !voice.isConnected && !voice.isSessionTerminal && (
+            <div role={error || ["denied", "unavailable", "failed"].includes(entryMediaState) ? "alert" : "status"}
+              data-testid="entry-status" aria-live="polite"
+              className="rounded-xl border border-primary/40 bg-card px-4 py-3 text-sm leading-6 text-foreground">
+              {ENTRY_MEDIA_MESSAGES[entryMediaState] || (error
+                ? "面试连接暂时中断，已有题目会保留，连接恢复后会自动继续。"
+                : "正在连接面试，连接成功后会自动开始。")}
+            </div>
+          )}
           <div className="grid gap-4 xl:grid-cols-[minmax(220px,0.58fr)_minmax(0,1.42fr)] xl:items-stretch">
             {displayedRemainingSeconds !== null && (
               <div className={`rounded-2xl border bg-card px-4 py-3 md:px-5 md:py-4 ${isTimeCritical ? "border-destructive/40" : isTimeWarning ? "border-amber-500/40" : "border-border"}`}>
@@ -1983,10 +2073,15 @@ function VoiceInterfaceSession({
       </div>
 
       {/* Error display */}
-      {error && (
-        <div className="mx-6 mt-2 flex items-center gap-2 rounded-md bg-destructive/10 px-4 py-2 text-sm text-destructive">
+      {error && !(autoStart && !voice.isConnected && !voice.isSessionTerminal) && (
+        <div role="alert" className="mx-6 mt-2 flex shrink-0 items-center gap-2 rounded-md bg-destructive/10 px-4 py-2 text-sm text-destructive">
           <AlertCircle className="h-4 w-4 shrink-0" />
           {error}
+          {incompleteSaveFailed && voice.isSessionTerminal && (
+            <Button variant="outline" size="sm" onClick={() => void saveInterruptedInterview()} disabled={isSaving}>
+              重试保存
+            </Button>
+          )}
         </div>
       )}
 
@@ -2484,7 +2579,7 @@ function VoiceInterfaceSession({
                 </Button>
               )}
 
-              {!voice.isConnected && !preview && isStartingInterview && (
+              {!voice.isConnected && !preview && !autoStart && isStartingInterview && (
                 <p className="text-sm text-muted-foreground">
                   正在进入面试,需要几秒钟。
                 </p>
@@ -2497,7 +2592,7 @@ function VoiceInterfaceSession({
               )}
               {voice.isConnected && !showVoiceListening && !showVoiceProcessing && !showVoiceSpeaking && (
                 <p className="text-sm text-muted-foreground">
-                  点麦克风开始说话
+                  {voice.isListening ? "请直接作答，我在听。" : "麦克风已静音，取消静音后可以继续作答"}
                 </p>
               )}
               {voice.isConnected && showVoiceListening && (

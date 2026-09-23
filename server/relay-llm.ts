@@ -7,14 +7,31 @@
  */
 
 import { GoogleGenAI } from "@google/genai";
-import { getHrTextPolicy } from './hr-model-control';
-import { ensureHrUsageReady, queueHrUsage } from './hr-model-usage-outbox';
-import {randomUUID} from 'node:crypto';
+import { randomUUID } from "node:crypto";
+import { runHrModelTask, type TaskIdentity } from "./hr-model-task";
+import { ensureHrUsageReady, queueHrUsage } from "./hr-model-usage-outbox";
+import { withGlmSlot } from "./glm-capacity";
+import { requestAbortScope } from "./request-abort";
+import { GlmPreOutputOverload, overloadDelay, waitForGlm } from "./glm-overload-retry";
+
+type RequestOptions = {
+  messages?: Array<{ role: string; content: unknown }>;
+  validate?: (text: string) => void;
+  deep?: boolean;
+  jsonReport?: boolean;
+  jsonQuestions?: boolean;
+  realtime?: boolean;
+  readiness?: boolean;
+  signal?: AbortSignal;
+};
 import { createLogger } from "../src/lib/logger";
 import {
   type RelayLlmProviderId,
   type RelayLlmRoute,
   relayLlmRouteOrder,
+  recruitGlmOnlyEnabled,
+  recruitTestModelRoutingEnabled,
+  RELAY_LLM_PROVIDER_SPECS,
 } from "../src/lib/relay-llm-route";
 
 const log = createLogger("relay-llm");
@@ -30,29 +47,36 @@ function deepseekRelayModel(): string {
   return process.env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash";
 }
 function zhipuRelayModel(): string {
+  if (recruitGlmOnlyEnabled()) return "glm-5.3";
   return process.env.ZHIPU_MODEL?.trim() || process.env.GLM_MODEL?.trim() || "glm-5.3";
 }
 function kimiRelayModel(): string {
   const configured = process.env.KIMI_MODEL?.trim();
   return !configured || configured === "kimi-latest" ? "kimi-k3" : configured;
 }
-const ZHIPU_DEFAULT_BASE_URL = "https://open.bigmodel.cn/api/paas/v4";
+import { zhipuBaseUrl } from "../src/lib/relay-llm-route";
 const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
 const KIMI_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1";
 
 export interface RelayLlmCallMeta {
   stage?: string;
+  interview?: string;
   session?: string;
   question?: number;
 }
 
 interface RelayLlmUsage {
-  promptTokens: number;
-  completionTokens: number;
+  promptTokens?: number;
+  completionTokens?: number;
+  cachedInputTokens?: number;
+}
+
+function knownTokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }
 
 interface RelayLlmEndpoint {
-  provider?: string;
+  provider?: RelayLlmProviderId;
   model: string;
   temperature: number;
   apiKey: string;
@@ -156,10 +180,18 @@ function providerEndpoint(
   provider: RelayLlmProviderId,
   temperature: number,
 ): RelayLlmEndpoint | null {
+  if (provider === "doubao") {
+    return {
+      model: process.env.DOUBAO_TEXT_MODEL?.trim() || process.env.DOUBAO_LLM_MODEL?.trim() || "unconfigured",
+      temperature,
+      apiKey: process.env.DOUBAO_TEXT_API_KEY?.trim() || process.env.DOUBAO_LLM_API_KEY?.trim() || "",
+      baseUrl: process.env.DOUBAO_TEXT_BASE_URL?.trim() || process.env.DOUBAO_LLM_BASE_URL?.trim() || "https://ark.cn-beijing.volces.com/api/v3",
+      useGemini: false,
+    };
+  }
   if (provider === "deepseek") {
     const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
     return apiKey ? {
-      provider,
       model: deepseekRelayModel(),
       temperature,
       apiKey,
@@ -170,17 +202,15 @@ function providerEndpoint(
   if (provider === "zhipu") {
     const apiKey = process.env.ZHIPU_API_KEY?.trim() || process.env.GLM_API_KEY?.trim();
     return apiKey ? {
-      provider,
       model: zhipuRelayModel(),
       temperature,
       apiKey,
-      baseUrl: process.env.ZHIPU_BASE_URL?.trim() || ZHIPU_DEFAULT_BASE_URL,
+      baseUrl: zhipuBaseUrl(),
       useGemini: false,
     } : null;
   }
   const apiKey = process.env.KIMI_API_KEY?.trim();
   return apiKey ? {
-    provider,
     model: kimiRelayModel(),
     temperature,
     apiKey,
@@ -193,10 +223,15 @@ function buildProviderChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
   const temperature = parseTemperature();
   const order: RelayLlmProviderId[] = route
     ? relayLlmRouteOrder(route)
-    : ["deepseek", "zhipu", "kimi"];
+    : ["zhipu", "kimi", "deepseek", "doubao"];
   return order.flatMap((provider) => {
     const endpoint = providerEndpoint(provider, temperature);
-    return endpoint ? [endpoint] : [];
+    if (endpoint) return [{ ...endpoint, provider }];
+    if (route && [0, 3].includes(route.fallbacks.length)) return [{ provider,
+      model: RELAY_LLM_PROVIDER_SPECS[provider].relayModel,
+      temperature, apiKey: "", baseUrl: "", useGemini: false,
+    }];
+    return [];
   });
 }
 
@@ -219,6 +254,8 @@ function buildEndpointChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
 }
 
 function getEndpointChain(route?: RelayLlmRoute): RelayLlmEndpoint[] {
+  // Apply the explicit restriction to saved routes and legacy env fallbacks.
+  if (recruitGlmOnlyEnabled()) return buildProviderChain({ primary: "zhipu", fallbacks: [] });
   if (route) return buildEndpointChain(route);
   if (!cachedChain) cachedChain = buildEndpointChain();
   return cachedChain;
@@ -313,8 +350,8 @@ async function callGemini(
     const meta = chunk.usageMetadata;
     if (meta) {
       usage = {
-        promptTokens: meta.promptTokenCount ?? 0,
-        completionTokens: meta.candidatesTokenCount ?? 0,
+        promptTokens: knownTokenCount(meta.promptTokenCount),
+        completionTokens: knownTokenCount(meta.candidatesTokenCount),
       };
     }
   }
@@ -325,11 +362,13 @@ async function callOpenAICompatible(
   endpoint: RelayLlmEndpoint,
   prompt: string,
   maxTokens?: number,
+  options?: RequestOptions,
+  capacitySignal?: AbortSignal,
 ): Promise<{ text: string; usage?: RelayLlmUsage }> {
   // 2026-08-20 王总指令：Token 无上限——不传 max_tokens，让模型自然收尾。
   const reqBody: Record<string, unknown> = {
     model: endpoint.model,
-    messages: [{ role: "user", content: prompt }],
+    messages: options?.messages ?? [{ role: "user", content: prompt }],
     ...(maxTokens ? { max_tokens: maxTokens } : {}),
   };
   // Kimi K3 rejects the legacy `temperature` field. The official Kimi
@@ -343,28 +382,83 @@ async function callOpenAICompatible(
   if (process.env.RELAY_LLM_DISABLE_THINKING?.trim() === "1") {
     reqBody.thinking = { type: "disabled" };
   }
-  const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${endpoint.apiKey}`,
-    },
-    body: JSON.stringify(reqBody),
-  });
-
-  if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`LLM API ${res.status}: ${errBody.slice(0, 200)}`);
+  if (recruitTestModelRoutingEnabled()) {
+    if (!options?.deep && endpoint.provider === "doubao") reqBody.thinking = { type: "disabled" };
+    if (options?.deep && endpoint.provider === "deepseek") reqBody.thinking = { type: "enabled" };
   }
+  // Report assembly must return structured final content within its transport
+  // deadline. HR's three separately configured reasoning stages are unaffected.
+  // Live conversational acknowledgement uses the fast route. Keep reasoning
+  // for HR's separately configured analysis stages.
+  if (options?.realtime && !options?.deep && endpoint.provider === "zhipu") {
+    reqBody.thinking = { type: "disabled" };
+  }
+  if (options?.jsonReport && endpoint.provider === "zhipu") {
+    reqBody.response_format = { type: "json_object" };
+    reqBody.thinking = { type: "disabled" };
+  }
+  // Questions are parsed and anchor-validated as JSON too. Constrain the
+  // transport format. Anchored wording is latency-sensitive; the HR resume
+  // parser, resume scoring and four-dimension evaluation retain their own
+  // enabled reasoning configuration and every question still passes validation.
+  if (options?.jsonQuestions && endpoint.provider === "zhipu") {
+    reqBody.response_format = { type: "json_object" };
+    reqBody.thinking = { type: "disabled" };
+  }
+  const abortScope = requestAbortScope([...(capacitySignal ? [capacitySignal] : []), ...(options?.signal ? [options.signal] : []), AbortSignal.timeout((() => {
+      const configured = Number(options?.deep
+        ? process.env.FALLBACK_DEEP_ATTEMPT_TIMEOUT_MS
+        : process.env.FALLBACK_ATTEMPT_TIMEOUT_MS);
+      // These routes retain provider-default reasoning. A 30-second deadline
+      // cut off all four providers during a real Q8 turn before any final text
+      // arrived. Keep reasoning and the one-attempt rule; use the same bounded
+      // transport allowance as deep generation unless fast mode is explicit.
+      const reasoningEnabled = process.env.RELAY_LLM_DISABLE_THINKING?.trim() !== "1";
+      return Number.isSafeInteger(configured) && configured > 0
+        ? configured
+        : (options?.deep || reasoningEnabled ? 180_000 : 30_000);
+    })())]);
+  try {
+    const res = await fetch(`${endpoint.baseUrl}/chat/completions`, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${endpoint.apiKey}` },
+      body: JSON.stringify(reqBody),
+      signal: abortScope.signal,
+    });
 
-  const data = await res.json();
-  const usage = data.usage
-    ? {
-        promptTokens: Number(data.usage.prompt_tokens ?? 0) || 0,
-        completionTokens: Number(data.usage.completion_tokens ?? 0) || 0,
+    if (!res.ok) {
+      // Preserve only bounded numeric diagnostics, never provider message text.
+      let providerCode = "";
+      let noOutputOrUsage = false;
+      try {
+        const failure = await res.json();
+        noOutputOrUsage = Boolean(failure?.error) && (!failure?.choices || (Array.isArray(failure.choices) && failure.choices.length === 0)) && !failure?.usage && !failure?.content && !failure?.reasoning_content;
+        const code = String(failure?.error?.code ?? "");
+        if (/^[0-9]{3,6}$/.test(code)) providerCode = code;
+      } catch { /* A non-JSON error still retains the HTTP status. */ }
+      const retry = res.headers.get("retry-after") ?? "";
+      const retrySeconds = /^[0-9]{1,5}$/.test(retry) ? Number(retry) : null;
+      if (recruitGlmOnlyEnabled() && endpoint.provider === "zhipu"
+          && endpoint.baseUrl === "https://open.bigmodel.cn/api/coding/paas/v4"
+          && res.status === 429 && providerCode === "1305" && noOutputOrUsage) {
+        throw new GlmPreOutputOverload(retry === "" ? 0 : retrySeconds ?? 91);
       }
-    : undefined;
-  return { text: data.choices?.[0]?.message?.content?.trim() || "", usage };
+      throw new Error(`LLM API ${res.status}`
+        + (providerCode ? ` code=${providerCode}` : "")
+        + (retrySeconds !== null && retrySeconds <= 86400 ? ` retry_after=${retrySeconds}` : ""));
+    }
+
+    const data = await res.json();
+    const usage = data.usage
+      ? {
+          promptTokens: knownTokenCount(data.usage.prompt_tokens),
+          completionTokens: knownTokenCount(data.usage.completion_tokens),
+          cachedInputTokens: knownTokenCount(data.usage.prompt_cache_hit_tokens ?? data.usage.prompt_tokens_details?.cached_tokens),
+        }
+      : undefined;
+    return { text: data.choices?.[0]?.message?.content?.trim() || "", usage };
+  } finally { abortScope.dispose(); }
 }
 
 function endpointKey(endpoint: RelayLlmEndpoint): string {
@@ -382,13 +476,39 @@ async function callEndpoint(
   endpoint: RelayLlmEndpoint,
   prompt: string,
   maxTokens?: number,
+  options?: RequestOptions,
 ): Promise<{ text: string; usage?: RelayLlmUsage }> {
-  if (!endpoint.apiKey) {
+  if (!endpoint.apiKey || endpoint.model === "unconfigured") {
     throw new Error(`No API key for relay model ${endpoint.model}`);
   }
   return endpoint.useGemini
     ? callGemini(endpoint, prompt, maxTokens)
-    : callOpenAICompatible(endpoint, prompt, maxTokens);
+    : endpoint.provider === "zhipu"
+      // Progressive questions are dependencies of the live conversation. Share
+      // its FIFO lane so newer replies cannot indefinitely overtake queued Q3.
+      ? withGlmSlot(signal => callOpenAICompatible(endpoint, prompt, maxTokens, options, signal),
+        options?.realtime ? 1 : options?.jsonQuestions || options?.readiness ? 0 : -1)
+      : callOpenAICompatible(endpoint, prompt, maxTokens, options);
+}
+
+export class AllFourModelsFailed extends Error {
+  readonly code = "all_models_failed";
+  constructor(readonly attempts: Array<{ provider: string; model: string; state: string; error: string }>) {
+    super("all_models_failed");
+  }
+}
+
+export function safeRelayFailure(error: unknown): string {
+  if (!(error instanceof Error)) return "provider_error";
+  if (/^json_syntax_position_(?:unknown|[0-9]{1,9})_characters_[0-9]{1,9}$/.test(error.message)) return error.message;
+  if (/^GLM_capacity_(?:wait_timeout|lease_lost|configuration_missing|configuration_invalid|control_unavailable|control_invalid)$/.test(error.message)) return error.message;
+  const http = /^LLM API ([1-5][0-9]{2})(?: code=([0-9]{3,6}))?(?: retry_after=([0-9]{1,5}))?$/.exec(error.message);
+  if (http) return `http_${http[1]}` + (http[2] ? `_code_${http[2]}` : "")
+    + (http[3] ? `_retry_after_${http[3]}` : "");
+  if (/^question_(?:anchor_source_missing|resume_anchor_missing|job_anchor_missing|role_mismatch)_(?:core_experience|project_ownership|core_skill_evidence|result_authenticity|job_work_sample|problem_solving|ai_learning_boundary|collaboration_motivation_stability)$/.test(error.message)) return error.message;
+  if (/^missing_or_invalid_scored_question_(?:core_experience|project_ownership|core_skill_evidence|result_authenticity|job_work_sample|problem_solving|ai_learning_boundary|collaboration_motivation_stability)_(?:count_[0-9]{1,3}|text_type|empty|too_long|candidate_text(?:_number_label|_instruction|_not_question)?)$/.test(error.message)) return error.message;
+  if (/^(?:invalid_question_response(?:_(?:explicit_dimension|envelope_type|unknown_dimension_key|item_type))?|missing_or_invalid_scored_question|question_anchor_invalid|duplicate_scored_question|empty_response|invalid_summary_response|report_storage_failed)$/.test(error.message)) return error.message;
+  return error.name;
 }
 
 export async function callRelayLLM(
@@ -397,17 +517,41 @@ export async function callRelayLLM(
   meta?: RelayLlmCallMeta,
   route?: RelayLlmRoute,
 ): Promise<string> {
-  const policy = await getHrTextPolicy();
-  if(policy)await ensureHrUsageReady();
-  const chain = policy ? relayLlmRouteOrder(policy.route).flatMap(provider => {
-    const endpoint=providerEndpoint(provider,parseTemperature());
-    return endpoint ? [{...endpoint,model:policy.models[provider]}] : [];
-  }) : getEndpointChain(route);
+  if ((recruitTestModelRoutingEnabled() || recruitGlmOnlyEnabled() || (route && [0, 3].includes(route.fallbacks.length))) && (meta?.interview || meta?.session)) {
+    // HR persists the interview before candidate access opens. The session is
+    // created later in Aural and its callback can still be waiting for HR sync.
+    const identity = meta.interview ? { interview_id: meta.interview } : { session_id: meta.session };
+    return runHrModelTask({ ...identity, stage: meta.stage ?? "voice_turn" },
+      saved => callRelayRequest(prompt, maxTokens, meta, saved));
+  }
+  return callRelayRequest(prompt, maxTokens, meta, route);
+}
+
+export async function generateGovernedText(identity: TaskIdentity, messages: Array<{role: string; content: unknown}>, validate: (text: string) => void, signal?: AbortSignal) {
+  return runHrModelTask(identity, route => callRelayRequest("", undefined, { stage: identity.stage }, route,
+    { messages, validate, signal, deep: true,
+      jsonReport: ["interview.voice_report", "interview.summary_report"].includes(identity.stage),
+      jsonQuestions: identity.stage === "interview.generate_questions" }));
+}
+
+async function callRelayRequest(prompt: string, maxTokens?: number, meta?: RelayLlmCallMeta, route?: RelayLlmRoute, options?: RequestOptions): Promise<string> {
+  if (meta?.stage === "interview-turn") options = { ...options, realtime: true };
+  if (meta?.stage === "readiness_probe") options = { ...options, readiness: true };
+  options = { ...options, deep: options?.deep || meta?.stage === "interview.generate_questions" };
+  if (recruitTestModelRoutingEnabled()) {
+    route = options.deep
+      ? { primary: "deepseek", fallbacks: ["doubao", "kimi", "zhipu"] }
+      : { primary: "doubao", fallbacks: ["deepseek", "kimi", "zhipu"] };
+  }
+  const chain = getEndpointChain(route).map(endpoint => options?.deep && endpoint.provider === "deepseek"
+    ? { ...endpoint, model: "deepseek-v4-pro" } : endpoint);
   logConfig(chain);
+  const metered = Boolean(process.env.HR_MODEL_CONTROL_URL?.trim());
+  if (metered) await ensureHrUsageReady();
+  const callId = randomUUID();
 
   const configured = chain.filter((e) => e.apiKey);
-  if (configured.length === 0) {
-    if(policy)throw new Error('HR selected models have no configured credentials');
+  if (configured.length === 0 && !recruitGlmOnlyEnabled() && (!route || ![0, 3].includes(route.fallbacks.length))) {
     return "";
   }
 
@@ -417,53 +561,69 @@ export async function callRelayLLM(
   );
   // If every provider is cooling down, retry the chain so recovery is not
   // permanently blocked. Otherwise skip known-bad providers immediately.
-  const candidates = available.length > 0 ? available : configured;
+  const candidates = route ? chain : (available.length > 0 ? available : configured);
 
   const startMs = Date.now();
-  const callId=randomUUID();
   let lastError: unknown;
+  const attempts: Array<{ provider: string; model: string; state: string; error: string }> = [];
 
   for (let i = 0; i < candidates.length; i++) {
     const endpoint = candidates[i]!;
-    const startedAt=new Date().toISOString();
-    let providerSucceeded=false;
-    try {
-      const { text, usage } = await callEndpoint(endpoint, prompt, maxTokens);
-      providerSucceeded=true;
-      if(policy)await queueHrUsage({call_id:callId,provider:endpoint.provider ?? 'unknown',model:endpoint.model,
-        scene:`aural.${meta?.stage ?? 'unclassified'}`,started_at:startedAt,status:text.trim()?'success':'empty',
-        usage:usage?{prompt_tokens:usage.promptTokens,completion_tokens:usage.completionTokens}:null});
-      endpointCooldowns.delete(endpointKey(endpoint));
-      const latencyMs = Date.now() - startMs;
-      // Token 分类账：每笔调用一行，stage 区分环节（turn/summarize/generate…），
-      // 供"每场消耗多少、花在哪"的看板汇总。
-      log.info(
-        `relay-llm usage: stage=${meta?.stage ?? "unlabeled"} session=${meta?.session ?? "-"} ` +
-        `q=${meta?.question ?? "-"} model=${endpoint.model} ` +
-        `tokens_in=${usage?.promptTokens ?? "?"} tokens_out=${usage?.completionTokens ?? "?"} ` +
-        `latency_ms=${latencyMs}${i > 0 ? ` recovered_from=${candidates[0]!.model}` : ""}`,
-      );
-      return text;
-    } catch (err) {
-      if(providerSucceeded)throw new Error('Model response received but usage could not be persisted');
-      if(policy)await queueHrUsage({call_id:callId,provider:endpoint.provider ?? 'unknown',model:endpoint.model,
-        scene:`aural.${meta?.stage ?? 'unclassified'}`,started_at:startedAt,status:'failed',usage:null});
-      lastError = err;
-      endpointCooldowns.set(
-        endpointKey(endpoint),
-        Date.now() + failureCooldownMs(err),
-      );
-      const next = candidates[i + 1];
-      if (next) {
-        log.warn(
-          `Relay LLM failed for ${endpoint.model}, falling back to ${next.model}`,
-          err,
+    let waitedMs = 0;
+    for (let retryIndex = 0; retryIndex < 3; retryIndex++) {
+      options?.signal?.throwIfAborted();
+      let retryDelay: number | null = null;
+      const startedAt = new Date().toISOString();
+      let recordedUsage: RelayLlmUsage | undefined;
+      let outcome: "success" | "failed" | "empty" = "failed";
+      try {
+        const { text, usage } = await callEndpoint(endpoint, prompt, maxTokens, options);
+        recordedUsage = usage;
+        if (!text.trim()) { outcome = "empty"; throw new Error("empty_response"); }
+        options?.validate?.(text);
+        outcome = "success";
+        endpointCooldowns.delete(endpointKey(endpoint));
+        const latencyMs = Date.now() - startMs;
+        // Token 分类账：每笔调用一行，stage 区分环节（turn/summarize/generate…），
+        // 供"每场消耗多少、花在哪"的看板汇总。
+        log.info(
+          `relay-llm usage: stage=${meta?.stage ?? "unlabeled"} session=${meta?.session ?? "-"} ` +
+          `q=${meta?.question ?? "-"} model=${endpoint.model} ` +
+          `tokens_in=${usage?.promptTokens ?? "?"} tokens_out=${usage?.completionTokens ?? "?"} ` +
+          `latency_ms=${latencyMs}${i > 0 ? ` recovered_from=${candidates[0]!.model}` : ""}`,
         );
+        return text;
+      } catch (err) {
+        lastError = err;
+        retryDelay = recruitGlmOnlyEnabled() && endpoint.provider === "zhipu" && !recordedUsage
+          ? overloadDelay(err, retryIndex, waitedMs) : null;
+        attempts.push({ provider: endpoint.provider ?? "legacy", model: endpoint.model,
+          state: "failed", error: safeRelayFailure(err) });
+        endpointCooldowns.set(
+          endpointKey(endpoint),
+          Date.now() + failureCooldownMs(err),
+        );
+        const next = candidates[i + 1];
+        if (next) {
+          log.warn(
+            `Relay LLM failed for ${endpoint.model}, falling back to ${next.model}`,
+            safeRelayFailure(err),
+          );
+        }
+      } finally {
+        if (metered) await queueHrUsage({ call_id: callId, provider: endpoint.provider ?? "legacy", model: endpoint.model,
+          scene: meta?.stage ?? "unclassified", started_at: startedAt, status: outcome,
+          usage: recordedUsage ? { prompt_tokens: recordedUsage.promptTokens, completion_tokens: recordedUsage.completionTokens,
+            prompt_cache_hit_tokens: recordedUsage.cachedInputTokens } : null });
       }
+      if (retryDelay === null) break;
+      waitedMs += retryDelay;
+      await waitForGlm(retryDelay, options?.signal);
     }
   }
 
-  log.error("Relay LLM failed on all configured models", lastError);
+  log.error("Relay LLM failed on all configured models", safeRelayFailure(lastError));
+  if (recruitGlmOnlyEnabled() || (route && [0, 3].includes(route.fallbacks.length))) throw new AllFourModelsFailed(attempts);
   throw lastError ?? new Error("Relay LLM failed");
 }
 
@@ -472,8 +632,7 @@ export async function assertRelayLlmReady(options?: {
   route?: RelayLlmRoute;
 }): Promise<void> {
   const now = Date.now();
-  const policy=await getHrTextPolicy();
-  const routeKey = policy ? JSON.stringify(policy) : options?.route
+  const routeKey = options?.route
     ? relayLlmRouteOrder(options.route).join(",")
     : "default";
   if (

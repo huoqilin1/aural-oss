@@ -1,6 +1,6 @@
 "use client";
-import {candidateFetch as fetch,invitationHeaders} from '@/lib/voice/candidate-fetch';
 
+import { MicrophonePcmFramer } from "@/lib/voice/capture-pcm";
 import { createLogger } from "@/lib/logger";
 import {
   cleanPeriodArtifacts,
@@ -19,10 +19,7 @@ import {
   PLAYBACK_SAMPLE_RATE,
   shouldFlushPlaybackQueue,
 } from "@/lib/voice/playback-jitter-buffer";
-import { requeueFailedProgressMessages, waitForProgressSaves, SingleFlightSave } from "@/lib/voice/progress-save";
-import { answerRevisionMessage } from "@/lib/voice/answer-revision";
-import {prepareDelivery, removeAcknowledged} from '@/lib/voice/message-delivery';
-import {readDeliveryOutbox, writeDeliveryOutbox} from '@/lib/voice/delivery-outbox';
+import { requeueFailedProgressMessages } from "@/lib/voice/progress-save";
 import { LiveQuestionIdLookup } from "@/lib/voice/dynamic-question-sync";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -61,6 +58,7 @@ interface UseVoiceOptions {
   onTranscript?: (text: string, isFinal: boolean) => void;
   onAIResponse?: (text: string) => void;
   onError?: (error: string) => void;
+  getEntryMedia?: () => Promise<MediaStream>;
   onQuestionChange?: (index: number, total: number) => void;
   onTtsChunk?: (pcmData: ArrayBuffer) => void;
   onInterrupt?: () => void;
@@ -93,9 +91,6 @@ interface TrackedMessage {
   content: string;
   questionId?: string;
   source?: "voice" | "chat";
-  /** Browser-observed turn time, retained across deferred saves and retries. */
-  timestamp?: string;
-  messageId?: string;
 }
 
 /**
@@ -118,6 +113,7 @@ export function useVoice({
   onTranscript,
   onAIResponse,
   onError,
+  getEntryMedia,
   onQuestionChange,
   onTtsChunk,
   onInterrupt,
@@ -148,6 +144,9 @@ export function useVoice({
   const lastQuestionSetFingerprintRef = useRef("");
   const audioContextRef = useRef<AudioContext | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
+  const lifecycleRef = useRef(0);
+  const listeningAttemptRef = useRef(0);
+  const startingListeningRef = useRef(false);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const processorRef = useRef<any>(null);
   const playTimeRef = useRef(0);
@@ -160,34 +159,7 @@ export function useVoice({
   );
   const isListeningRef = useRef(false);
   const trackedMessagesRef = useRef<TrackedMessage[]>([]);
-  const lastAnswerRevisionRef = useRef(new Map<string, string>());
   const progressSaveChainRef = useRef<Promise<void>>(Promise.resolve());
-  const completionSaveRef = useRef(new SingleFlightSave<boolean>());
-  const unacknowledgedBatchesRef = useRef(new Map<string, TrackedMessage>());
-  const restoredOutboxSessionRef = useRef<string | null>(null);
-  const outboxWarningShownRef = useRef(false);
-  const persistPendingMessages = useCallback(() => {
-    try {
-      writeDeliveryOutbox(window.sessionStorage, sessionId, [
-        ...Array.from(unacknowledgedBatchesRef.current.values()), ...trackedMessagesRef.current,
-      ]);
-    } catch {
-      if (!outboxWarningShownRef.current) {
-        outboxWarningShownRef.current=true;
-        onError?.('浏览器暂时无法保留未同步记录，请保持页面打开，等待保存成功。');
-      }
-    }
-  }, [sessionId, onError]);
-  useEffect(() => {
-    if (restoredOutboxSessionRef.current === sessionId) return;
-    restoredOutboxSessionRef.current=sessionId;
-    try {
-      const retained=readDeliveryOutbox(window.sessionStorage,sessionId) as TrackedMessage[];
-      trackedMessagesRef.current=requeueFailedProgressMessages(retained,trackedMessagesRef.current);
-    } catch {
-      onError?.('上次未同步记录无法读取，请保留页面并联系面试支持。');
-    }
-  }, [sessionId, onError]);
   const micHoldUntilRef = useRef(0);
   const bargeInFramesRef = useRef(0);
 
@@ -196,7 +168,7 @@ export function useVoice({
 
   const onInterruptRef = useRef(onInterrupt);
   useEffect(() => { onInterruptRef.current = onInterrupt; }, [onInterrupt]);
-  const lastFinalUserTranscriptRef = useRef<{ text: string; at: number; questionIndex: number } | null>(null);
+  const lastFinalUserTranscriptRef = useRef<{ text: string; at: number } | null>(null);
 
   // Buffers for accumulating streaming chunks
   const asrBufferRef = useRef<string>("");
@@ -234,7 +206,9 @@ export function useVoice({
 
   // Cleanup on unmount
   useEffect(() => {
+    const lifecycle = ++lifecycleRef.current;
     return () => {
+      lifecycleRef.current = lifecycle + 1;
       cleanup();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -322,8 +296,17 @@ export function useVoice({
     firstQueuedAudioAtRef.current = null;
   }, [clearPlaybackFlushTimer]);
 
+  const pendingPlaybackReceiptRef = useRef<{ receiptId: string; questionIndex: number } | null>(null);
+  const acknowledgePlayedAudio = useCallback(() => {
+    const receipt = pendingPlaybackReceiptRef.current;
+    if (!receipt || audioSourcesRef.current.length || queuedAudioSamplesRef.current) return;
+    pendingPlaybackReceiptRef.current = null;
+    relayConnectorRef.current?.sendJson({ type: "playback_complete", ...receipt });
+  }, []);
+
   /** Stop all currently playing audio sources and notify recording mixer */
   const interruptPlayback = useCallback(() => {
+    pendingPlaybackReceiptRef.current = null;
     clearQueuedAudio();
     for (const source of audioSourcesRef.current) {
       try {
@@ -421,9 +404,10 @@ export function useVoice({
         queuedAudioSamplesRef.current === 0
       ) {
         setState((s) => ({ ...s, isSpeaking: false }));
+        acknowledgePlayedAudio();
       }
     };
-  }, [clearPlaybackFlushTimer, scheduleQueuedAudioFlush]);
+  }, [clearPlaybackFlushTimer, scheduleQueuedAudioFlush, acknowledgePlayedAudio]);
 
   /** Queue incoming int16 PCM audio chunk and flush through a small jitter buffer. */
   const playAudio = useCallback(
@@ -505,13 +489,24 @@ export function useVoice({
   /** Connect to the voice relay server */
   const connect = useCallback(async (): Promise<boolean> => {
     if (sessionTerminalRef.current) return false;
+    const lifecycle = lifecycleRef.current;
     try {
-      // Request microphone permission
-      await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Reuse the permission stream; never discard a live microphone probe.
+      if (!mediaStreamRef.current?.getAudioTracks().some(track => track.readyState === "live")) {
+        const stream = getEntryMedia ? await getEntryMedia() : await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (lifecycle !== lifecycleRef.current || sessionTerminalRef.current) {
+          if (!getEntryMedia) stream.getTracks().forEach(track => track.stop());
+          return false;
+        }
+        mediaStreamRef.current = getEntryMedia
+          ? new MediaStream(stream.getAudioTracks().map(track => track.clone())) : stream;
+      }
 
-      // Create AudioContext for playback
+      // Use the native output rate; TTS buffers retain their 24 kHz rate.
+      // Capture has a separate processing-only context below, so speaker
+      // idle/restart clock changes cannot interrupt microphone input.
       if (!audioContextRef.current) {
-        audioContextRef.current = new AudioContext({ sampleRate: 24000 });
+        audioContextRef.current = new AudioContext();
         if (audioContextRef.current.state === "suspended") {
           // resume() can remain pending when an auto-start effect runs after
           // transient browser user activation has expired. Relay connection
@@ -520,7 +515,8 @@ export function useVoice({
         }
       }
 
-      // A reconnect must retain messages whose save has not been acknowledged.
+      // Reset tracked messages
+      trackedMessagesRef.current = [];
 
       relayConnectorRef.current?.close();
 
@@ -544,7 +540,7 @@ export function useVoice({
           type: "init",
           context: {
             ...interviewContext,
-            inviteToken: invitationHeaders()['x-interview-invite'],
+            clientPlaybackReceipt: true,
             startQuestionIndex: currentQuestionIndexRef.current,
           },
         }),
@@ -585,13 +581,14 @@ export function useVoice({
       await connector.connect();
       return true;
     } catch (error) {
+      if (lifecycle !== lifecycleRef.current) return false;
       const msg =
         error instanceof Error ? error.message : "Voice connection failed";
       onError?.(msg);
       return false;
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onError, playAudio, interviewContext]);
+  }, [onError, playAudio, interviewContext, getEntryMedia]);
 
   /** Extract text from a Volcengine event payload, trying common field names */
   const extractText = useCallback(
@@ -614,7 +611,6 @@ export function useVoice({
       const pendingAsrText = asrBufferRef.current.trim();
       if (pendingAsrText) {
         trackedMessagesRef.current.push({
-          timestamp: new Date().toISOString(),
           role: "user",
           content: pendingAsrText,
           questionId: questionIdAt(pendingQuestionIndex),
@@ -622,20 +618,19 @@ export function useVoice({
         asrBufferRef.current = "";
       }
 
-      const messages = prepareDelivery(trackedMessagesRef.current);
-      trackedMessagesRef.current = []; // clear so next question starts fresh
-      for (const message of messages) unacknowledgedBatchesRef.current.set(message.messageId!,message);
-      persistPendingMessages();
-
-      if (messages.length === 0 && typeof currentQuestionIndex !== "number") return;
-
       const operation = progressSaveChainRef.current.then(async () => {
+        // Take the batch only after earlier writes settle, including any
+        // messages requeued by their failures. An empty newer write cannot
+        // acknowledge an older answer that is still unsaved.
+        const messages = [...trackedMessagesRef.current];
+        trackedMessagesRef.current = [];
         try {
           const response = await fetch("/api/voice/save", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ sessionId, messages, currentQuestionIndex }),
             keepalive: true,
+            signal: AbortSignal.timeout(8_000),
           });
           if (!response.ok) {
             throw new Error(`Progress save failed with HTTP ${response.status}`);
@@ -643,21 +638,20 @@ export function useVoice({
           log.info(
             `Progress saved: ${messages.length} msgs, Q${currentQuestionIndex + 1}`
           );
+          return true;
         } catch (err) {
           trackedMessagesRef.current = requeueFailedProgressMessages(
             messages,
             trackedMessagesRef.current,
           );
           log.error("Failed to save progress; messages requeued:", err);
-        } finally {
-          for (const message of messages) unacknowledgedBatchesRef.current.delete(message.messageId!);
-          persistPendingMessages();
+          return false;
         }
       });
-      progressSaveChainRef.current = operation;
-      await operation;
+      progressSaveChainRef.current = operation.then(() => undefined);
+      return await operation;
     },
-    [questionIdAt, sessionId, persistPendingMessages]
+    [questionIdAt, sessionId]
   );
 
   /** Handle JSON messages from relay */
@@ -704,24 +698,14 @@ export function useVoice({
           if (text.trim()) {
             const merged = mergeClientAsrInterim(asrBufferRef.current, text);
             asrBufferRef.current = merged;
-            startAsrProcessingTimer(merged);
+            // Pending recognition is still listening, not model reasoning.
+            if (!interviewContext.title.includes("数君招聘")) startAsrProcessingTimer(merged);
             if (!stateRef.current.isProcessing) {
               const cleaned = cleanPeriodArtifacts(merged);
               const display = cleaned.replace(/\s+$/, "").replace(/[.!?。！？]+$/, "");
               setState((s) => ({ ...s, userTranscript: display }));
               onTranscript?.(display, false);
             }
-          }
-          break;
-        }
-
-        case "asr_revision": {
-          const revision = answerRevisionMessage(msg, questionIdAt);
-          if (!revision || lastAnswerRevisionRef.current.get(revision.questionId) === revision.content) break;
-          lastAnswerRevisionRef.current.set(revision.questionId, revision.content);
-          trackedMessagesRef.current.push({...revision, timestamp: revision.timestamp ?? new Date().toISOString()});
-          if (Number(msg.questionIndex) === currentQuestionIndexRef.current) {
-            asrBufferRef.current = "";
           }
           break;
         }
@@ -755,7 +739,6 @@ export function useVoice({
             const lastFinal = lastFinalUserTranscriptRef.current;
             const isDuplicateFinal =
               !!lastFinal &&
-              lastFinal.questionIndex === eventQuestionIndex &&
               lastFinal.text === normalized &&
               Date.now() - lastFinal.at < 15_000;
 
@@ -763,22 +746,20 @@ export function useVoice({
               duplicateSkipped = true;
               log.debug(`Skipping duplicate USER final: "${normalized.slice(0, 60)}..."`);
             } else {
-              lastFinalUserTranscriptRef.current = { text: normalized, at: Date.now(), questionIndex: eventQuestionIndex };
+              lastFinalUserTranscriptRef.current = { text: normalized, at: Date.now() };
               onTranscript?.(finalText, true);
               const tracked = trackedMessagesRef.current;
               const lastTracked = tracked[tracked.length - 1];
               const lastQId = questionIdAt(eventQuestionIndex);
-              if (lastTracked?.role === "user" && lastTracked.questionId === lastQId && !lastTracked.messageId) {
+              if (lastTracked?.role === "user" && lastTracked.questionId === lastQId) {
                 // 王总 2026-09-03：同一题内相邻 USER 段(中间没有 AI 行)合并成一条完整发言再落库，
                 // 实录不碎、防作弊不把停顿切段误判成重复背稿。
                 lastTracked.content = `${lastTracked.content} ${finalText}`.trim();
-                lastTracked.timestamp = new Date().toISOString();
                 log.debug(
                   `Tracked USER (merged): "${lastTracked.content.slice(0, 80)}..."`
                 );
               } else {
                 tracked.push({
-                  timestamp: new Date().toISOString(),
                   role: "user",
                   content: finalText,
                   questionId: lastQId,
@@ -828,6 +809,7 @@ export function useVoice({
         }
 
         case "tts_text": {
+          if (msg.questionIndex !== undefined && Number(msg.questionIndex) !== currentQuestionIndexRef.current) break;
           const text = extractText(msg.data);
           if (text) {
             clearAsrProcessingTimer();
@@ -846,11 +828,20 @@ export function useVoice({
           break;
         }
 
+        case "playback_receipt_request":
+          if (typeof msg.receiptId === "string" && Number(msg.questionIndex) === currentQuestionIndexRef.current) {
+            pendingPlaybackReceiptRef.current = { receiptId: msg.receiptId, questionIndex: Number(msg.questionIndex) };
+            flushQueuedAudio(true);
+            acknowledgePlayedAudio();
+          }
+          break;
+
         case "tts_sentence_end":
           break;
 
         case "chat_ended":
         case "tts_ended": {
+          if (msg.questionIndex !== undefined && Number(msg.questionIndex) !== currentQuestionIndexRef.current) break;
           clearAsrProcessingTimer();
           const fullResponse = chatBufferRef.current.trim();
           chatBufferRef.current = "";
@@ -876,7 +867,6 @@ export function useVoice({
               lastOnAIResponseRef.current = fullResponse;
               onAIResponse?.(fullResponse);
               trackedMessagesRef.current.push({
-                timestamp: new Date().toISOString(),
                 role: "assistant",
                 content: fullResponse,
                 questionId: questionIdAt(eventQuestionIndex),
@@ -897,7 +887,6 @@ export function useVoice({
             lastOnAIResponseRef.current = text;
             onAIResponse?.(text);
             trackedMessagesRef.current.push({
-              timestamp: new Date().toISOString(),
               role: "assistant",
               content: text,
               questionId: questionIdAt(currentQuestionIndexRef.current),
@@ -934,15 +923,11 @@ export function useVoice({
           break;
 
         case "question_change": {
-          // For manual transitions, interrupt immediately so old audio
-          // doesn't bleed into the new question. For auto-transitions
-          // the wrap-up acknowledgement ("好的，谢谢分享") may still be
-          // playing — let it finish naturally; the new question's audio
-          // will be queued after it via sequential scheduling.
-          if (!msg.auto) {
-            clearAsrProcessingTimer();
-            interruptPlayback();
-          }
+          questionIdLookupRef.current?.updateFromRelay(msg.questionIds);
+          // A new question owns a new audio/transcript cycle. The relay has
+          // finished the bridge before this event; no old playback may bleed in.
+          clearAsrProcessingTimer();
+          interruptPlayback();
           // Discard transition greeting text before saving progress
           chatBufferRef.current = "";
           lastOnAIResponseRef.current = "";
@@ -962,6 +947,7 @@ export function useVoice({
             totalQuestions: total,
             isInputReady: false,
             aiTranscript: "",
+            userTranscript: "",
             lastAssistantUtteranceEndedAt: 0,
           }));
           onQuestionChange?.(idx, total);
@@ -970,6 +956,7 @@ export function useVoice({
         }
 
         case "question_count_update": {
+          questionIdLookupRef.current?.updateFromRelay(msg.questionIds);
           const total = Number(msg.totalQuestions || 0);
           if (total > 0) {
             setState((s) => ({ ...s, totalQuestions: Math.max(s.totalQuestions, total) }));
@@ -1011,7 +998,21 @@ export function useVoice({
           }));
           break;
 
+        case "answer_commit_required": {
+          const index = Number(msg.questionIndex);
+          const connector = relayConnectorRef.current;
+          if (!Number.isInteger(index) || index !== currentQuestionIndexRef.current) {
+            connector?.sendJson({ type: "answer_commit_ack", requestId: msg.requestId, questionIndex: index, ok: false });
+            break;
+          }
+          void saveProgress(index, index).then((ok) => {
+            connector?.sendJson({ type: "answer_commit_ack", requestId: msg.requestId, questionIndex: index, ok });
+          });
+          break;
+        }
+
         case "transition_rejected": {
+          clearAsrProcessingTimer();
           const message = typeof msg.message === "string"
             ? msg.message
             : "当前还不能进入下一题，请先完成本题。";
@@ -1020,12 +1021,26 @@ export function useVoice({
             isTransitioning: false,
             transitionDirection: null,
             transitionRejectionCount: s.transitionRejectionCount + 1,
+            isProcessing: false,
+            isInputReady: msg.reason === "answer_required" || msg.reason === "answer_save_failed"
+              ? !s.isSpeaking : s.isInputReady,
           }));
           onError?.(message);
           break;
         }
 
         case "interview_complete":
+          if (interviewContext.title.includes("数君招聘")
+            && (currentQuestionIndexRef.current < 7 || !questionIdAt(7))) {
+            log.warn("Rejected premature recruitment completion; preserving media and answers");
+            interruptPlayback();
+            setState((s) => ({ ...s, isInterviewComplete: false, isProcessing: false, isTransitioning: false, transitionDirection: null }));
+            // Persist the current answer before reconnecting to a relay that
+            // has already entered its terminal state. Keep camera/mic alive.
+            void saveProgress(currentQuestionIndexRef.current, currentQuestionIndexRef.current)
+              .then(() => relayConnectorRef.current?.failover("premature recruitment completion"));
+            break;
+          }
           log.info("Interview complete, wrapping up");
           setState((s) => ({ ...s, isInterviewComplete: true }));
           break;
@@ -1076,30 +1091,37 @@ export function useVoice({
           }
           break;
       }
-      if (['asr_revision','asr_ended','chat_ended','tts_ended','session_reconnecting'].includes(msg.type)) {
-        persistPendingMessages();
-      }
     },
     [
       clearAsrProcessingTimer,
       extractText,
+      flushQueuedAudio,
+      acknowledgePlayedAudio,
       interruptPlayback,
       onAIResponse,
       onError,
       onQuestionChange,
       onTranscript,
       saveProgress,
-      persistPendingMessages,
+      interviewContext.title,
+      questionIdAt,
       startAsrProcessingTimer,
     ]
   );
 
   /** Start capturing microphone audio and sending to relay */
   const startListening = useCallback(async () => {
-    if (isListeningRef.current) return;
+    if (isListeningRef.current || startingListeningRef.current) return;
+    startingListeningRef.current = true;
+    const attempt = ++listeningAttemptRef.current;
+    const lifecycle = lifecycleRef.current;
+    let setupStream: MediaStream | null = null;
+    let setupContext: AudioContext | null = null;
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      let stream = mediaStreamRef.current;
+      if (!stream?.getAudioTracks().some(track => track.readyState === "live")) {
+        const granted = getEntryMedia ? await getEntryMedia() : await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 16000,
           channelCount: 1,
@@ -1108,84 +1130,119 @@ export function useVoice({
           autoGainControl: true,
         },
       });
+        stream = getEntryMedia ? new MediaStream(granted.getAudioTracks().map(track => track.clone())) : granted;
+      }
+      setupStream = stream;
+      if (lifecycle !== lifecycleRef.current || attempt !== listeningAttemptRef.current) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
       mediaStreamRef.current = stream;
 
-      const ctx = new AudioContext({ sampleRate: 16000 });
+      const ctx = new AudioContext();
+      setupContext = ctx;
+      if (ctx.state === "suspended") void ctx.resume().catch(() => {});
       const source = ctx.createMediaStreamSource(stream);
-      const processor = ctx.createScriptProcessor(4096, 1, 1);
+      await ctx.audioWorklet.addModule("/audio/microphone-capture.worklet.js");
+      if (lifecycle !== lifecycleRef.current || attempt !== listeningAttemptRef.current) {
+        stream.getTracks().forEach(track => track.stop());
+        void ctx.close().catch(() => {});
+        return;
+      }
+      const processor = new AudioWorkletNode(ctx, "oprun-microphone-capture", {
+        channelCount: 1,
+        channelCountMode: "explicit",
+      });
+      const capture = new MicrophonePcmFramer(ctx.sampleRate);
 
+      // A processing-only sink keeps the microphone graph off the speaker
+      // device clock (which may stop/restart when TTS becomes silent).
+      const sink = ctx.createMediaStreamDestination();
       source.connect(processor);
-      processor.connect(ctx.destination);
+      processor.connect(sink);
 
-      processor.onaudioprocess = (event) => {
+      processor.port.onmessage = (event: MessageEvent<Float32Array>) => {
         if (!isListeningRef.current) return;
         const connector = relayConnectorRef.current;
         if (!connector?.isReady) return;
 
-        const inputData = event.inputBuffer.getChannelData(0);
+        for (const inputData of capture.push(event.data)) {
 
-        // Compute RMS audio level (float32 range 0..1)
-        let sumSq = 0;
-        for (let i = 0; i < inputData.length; i++) sumSq += inputData[i] * inputData[i];
-        const rms = Math.sqrt(sumSq / inputData.length);
-        if (rms >= ASR_PROCESSING_AUDIO_ACTIVITY_RMS_THRESHOLD) {
-          lastMicActivityAtRef.current = performance.now();
-        }
-        const level = Math.min(1, rms * 5);
-        setState((s) => ({ ...s, audioLevel: level }));
+          // Compute RMS audio level (float32 range 0..1)
+          let sumSq = 0;
+          for (let i = 0; i < inputData.length; i++) sumSq += inputData[i] * inputData[i];
+          const rms = Math.sqrt(sumSq / inputData.length);
+          if (rms >= ASR_PROCESSING_AUDIO_ACTIVITY_RMS_THRESHOLD) {
+            lastMicActivityAtRef.current = performance.now();
+          }
+          const level = Math.min(1, rms * 5);
+          setState((s) => ({ ...s, audioLevel: level }));
 
-        if (performance.now() < micHoldUntilRef.current) {
-          if (rms < BARGE_IN_RMS_THRESHOLD) {
+          if (performance.now() < micHoldUntilRef.current) {
+            if (rms < BARGE_IN_RMS_THRESHOLD) {
+              bargeInFramesRef.current = 0;
+              continue;
+            }
+
+            bargeInFramesRef.current += 1;
+            if (bargeInFramesRef.current < BARGE_IN_FRAME_COUNT) {
+              continue;
+            }
+
+            // Sustained near-field speech should still be able to interrupt TTS.
+            micHoldUntilRef.current = 0;
+          } else {
             bargeInFramesRef.current = 0;
-            return;
           }
 
-          bargeInFramesRef.current += 1;
-          if (bargeInFramesRef.current < BARGE_IN_FRAME_COUNT) {
-            return;
+          // Convert float32 to int16 PCM
+          const pcm = new Int16Array(inputData.length);
+          for (let i = 0; i < inputData.length; i++) {
+            pcm[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
           }
 
-          // Sustained near-field speech should still be able to interrupt TTS.
-          micHoldUntilRef.current = 0;
-        } else {
-          bargeInFramesRef.current = 0;
-        }
+          // Send as hex-encoded string
+          const bytes = new Uint8Array(pcm.buffer);
+          let hex = "";
+          for (let i = 0; i < bytes.length; i++) {
+            hex += bytes[i].toString(16).padStart(2, "0");
+          }
 
-        // Convert float32 to int16 PCM
-        const pcm = new Int16Array(inputData.length);
-        for (let i = 0; i < inputData.length; i++) {
-          pcm[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32768));
+          connector.sendJson({ type: "audio", data: hex });
         }
-
-        // Send as hex-encoded string
-        const bytes = new Uint8Array(pcm.buffer);
-        let hex = "";
-        for (let i = 0; i < bytes.length; i++) {
-          hex += bytes[i].toString(16).padStart(2, "0");
-        }
-
-        connector.sendJson({ type: "audio", data: hex });
       };
 
-      processorRef.current = { processor, source, ctx };
+      processorRef.current = { processor, source, ctx, sink };
       isListeningRef.current = true;
       setState((s) => ({ ...s, isListening: true, userTranscript: "" }));
     } catch (error) {
+      setupStream?.getTracks().forEach(track => track.stop());
+      if (mediaStreamRef.current === setupStream) mediaStreamRef.current = null;
+      if (setupContext) void setupContext.close().catch(() => {});
+      if (lifecycle !== lifecycleRef.current || attempt !== listeningAttemptRef.current) return;
       const msg =
         error instanceof Error ? error.message : "Microphone access failed";
       onError?.(msg);
+    } finally {
+      if (attempt === listeningAttemptRef.current) startingListeningRef.current = false;
     }
-  }, [onError]);
+  }, [onError, getEntryMedia]);
 
   /** Stop capturing microphone */
   const stopListening = useCallback(() => {
+    ++listeningAttemptRef.current;
+    startingListeningRef.current = false;
     isListeningRef.current = false;
 
     if (processorRef.current) {
-      const { processor, source, ctx } = processorRef.current;
+      const { processor, source, ctx, sink } = processorRef.current;
+      processor.port.onmessage = null;
+      processor.port.postMessage({ type: "stop" });
+      processor.port.close();
       processor.disconnect();
       source.disconnect();
-      ctx.close();
+      sink.stream.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+      void ctx.close().catch(() => {});
       processorRef.current = null;
     }
 
@@ -1230,16 +1287,14 @@ export function useVoice({
       });
       if (!delivered) return false;
       trackedMessagesRef.current.push({
-        timestamp: new Date().toISOString(),
         role: "user",
         content: trimmed,
         questionId: questionIdAt(currentQuestionIndexRef.current),
         source: "chat",
       });
-      persistPendingMessages();
       return true;
     },
-    [questionIdAt, persistPendingMessages],
+    [questionIdAt],
   );
 
   /** Send code editor content to the relay for agent context */
@@ -1255,17 +1310,16 @@ export function useVoice({
   }, []);
 
   /** Save remaining tracked messages and complete the session */
-  const saveAndComplete = useCallback(async () => {
+  const saveAndComplete = useCallback(async (validateOnly = false) => {
     // A question transition saves in the background. Wait for all queued
     // progress saves so completion cannot race ahead of durable answers.
     // Failed batches are requeued by saveProgress and included below.
-    await waitForProgressSaves(() => progressSaveChainRef.current);
+    const operation = progressSaveChainRef.current.then(async () => {
 
     // Flush any pending buffers before saving
     const pendingAsrText = asrBufferRef.current.trim();
     if (pendingAsrText) {
       trackedMessagesRef.current.push({
-        timestamp: new Date().toISOString(),
         role: "user",
         content: pendingAsrText,
         questionId: questionIdAt(currentQuestionIndexRef.current),
@@ -1275,7 +1329,6 @@ export function useVoice({
     const pendingChatText = chatBufferRef.current.trim();
     if (pendingChatText) {
       trackedMessagesRef.current.push({
-        timestamp: new Date().toISOString(),
         role: "assistant",
         content: pendingChatText,
         questionId: questionIdAt(currentQuestionIndexRef.current),
@@ -1283,38 +1336,46 @@ export function useVoice({
       chatBufferRef.current = "";
     }
 
-    const messages = prepareDelivery(trackedMessagesRef.current);
-    persistPendingMessages();
+    const messages = [...trackedMessagesRef.current];
     if (messages.length === 0 && !sessionId) return;
+    trackedMessagesRef.current = [];
 
     log.info(
       `Saving ${messages.length} remaining messages and completing session`
     );
 
-    const response = await fetch("/api/voice/save", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sessionId,
-        messages,
-        complete: true,
-      }),
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => abortController.abort(), 8_000);
+    try {
+      const response = await fetch("/api/voice/save", {
+        method: "POST",
+        signal: abortController.signal,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, messages, complete: !validateOnly, validateOnly }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error || `Voice completion failed with HTTP ${response.status}`);
+      }
+    } catch (error) {
+      trackedMessagesRef.current = requeueFailedProgressMessages(messages, trackedMessagesRef.current);
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
     });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({})) as { error?: string };
-      throw new Error(body.error || `Voice completion failed with HTTP ${response.status}`);
-    }
-    trackedMessagesRef.current = removeAcknowledged(trackedMessagesRef.current, messages);
-    persistPendingMessages();
-    if (trackedMessagesRef.current.length > 0) {
-      throw new Error('仍有新到达的回答待保存，请再次完成保存');
-    }
-  }, [questionIdAt, sessionId, persistPendingMessages]);
+    // Progress ACKs and completion preflight share the same queue. A failed
+    // completion remains visible to its caller without poisoning later retries.
+    progressSaveChainRef.current = operation.then(() => undefined, () => undefined);
+    return await operation;
+  }, [questionIdAt, sessionId]);
 
   /** Disconnect, save messages, and clean up everything */
-  const disconnect = useCallback(() => completionSaveRef.current.run(async () => {
+  const disconnect = useCallback(async (beforeCleanup?: () => Promise<void>) => {
     setState((s) => ({ ...s, isSaving: true }));
     try {
+      await saveAndComplete(true);
+      await beforeCleanup?.();
       await saveAndComplete();
       cleanup();
       return true;
@@ -1322,15 +1383,26 @@ export function useVoice({
       const message = error instanceof Error ? error.message : "面试记录保存失败，请重试";
       log.error("Failed to save voice data:", error);
       onError?.(message);
-      setState((s) => ({ ...s, isSaving: false }));
+      setState((s) => ({ ...s, isSaving: false, isInterviewComplete: false, isProcessing: false, isTransitioning: false, transitionDirection: null }));
+      // The relay may already have finished its farewell. Recover it without
+      // closing media or discarding the failed save batch.
+      void saveProgress(currentQuestionIndexRef.current, currentQuestionIndexRef.current)
+        .then(() => relayConnectorRef.current?.failover("completion save rejected"));
       return false;
     }
-  }), [saveAndComplete, cleanup, onError]);
+  }, [saveAndComplete, saveProgress, cleanup, onError]);
+
+  // Non-completing save for terminal/interrupted sessions. Never run report
+  // generation or turn ABANDONED into COMPLETED just to retain the transcript.
+  const preserveIncomplete = useCallback(() =>
+    saveProgress(currentQuestionIndexRef.current, currentQuestionIndexRef.current),
+  [saveProgress]);
 
   return {
     ...state,
     connect,
     disconnect,
+    preserveIncomplete,
     startListening,
     stopListening,
     nextQuestion,

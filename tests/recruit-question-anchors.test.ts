@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+import ts from "typescript";
 
 import {
   ensureExplicitRecruitAnchorLead,
@@ -8,7 +11,165 @@ import {
   recruitQuestionFitsRoleType,
   safeRecruitAnchorLines,
   selectRecruitAnchor,
+  completeRecruitAnchor,
+  recruitQuestionAnchorFailure,
+  renderRecruitQuestionAnchorReferences,
 } from "../src/lib/recruit-question-anchors";
+
+test("HR fact-index instructions never become quoted resume evidence", () => {
+  const header = "简历原文事实索引（自述，未经外部核实）；共2条，选入2条，未纳入0条。材料缺失不等于没有经历；项目不可合并；不得把团队成果、计划或否定改写为本人已完成。";
+  const facts = ["负责合同台账与材料核验，无签署权限", "资料退回率由20%降到8%，按月度提交合同统计"];
+  const indexed = `${header}\n[fact-abcdef|project-123abc] ${facts[0]}\n[fact-123abc|unassigned] ${facts[1]}`;
+  assert.deepEqual(safeRecruitAnchorLines(indexed), facts);
+  const chosen = selectRecruitAnchor(indexed, ["成果", "提升", "降低", "增长", "指标", "完成", "%"]);
+  assert.equal(chosen, facts[1]);
+  assert.deepEqual(safeRecruitAnchorLines(header), [], "missing source rows must fail closed");
+  assert.deepEqual(safeRecruitAnchorLines(facts.join("\n")), facts, "legacy raw resumes remain supported");
+});
+
+test("job anchors prefer responsibilities over unrelated numeric experience requirements", () => {
+  const job="拓展地方政府客户、推进合同落地\n3-5年商务/BD经验";
+  assert.equal(selectRecruitAnchor(job,["工具","技术"],false),"拓展地方政府客户、推进合同落地");
+  assert.equal(selectRecruitAnchor(job,["商务"],false),"3-5年商务/BD经验");
+  assert.equal(selectRecruitAnchor(job,["工具","技术"]),"3-5年商务/BD经验");
+});
+
+test("question failures distinguish missing anchors and wrong role without disclosing source data", () => {
+  const anchors={resume:"负责客户服务和合同核对",job:"推进政府客户合作与合同落地"};
+  assert.equal(recruitQuestionAnchorFailure("请介绍你的经历",undefined,false),"question_anchor_source_missing");
+  assert.equal(recruitQuestionAnchorFailure("岗位需要推进政府客户合作",anchors,false),"question_resume_anchor_missing");
+  assert.equal(recruitQuestionAnchorFailure("简历写到客户服务和合同核对，请介绍",anchors,false),"question_job_anchor_missing");
+  const valid=`简历写到“${anchors.resume}”，岗位要求“${anchors.job}”，请推演如何核对合作条款。`;
+  assert.equal(recruitQuestionAnchorFailure(valid,anchors,false),null);
+  assert.equal(recruitQuestionAnchorFailure(valid+"请写SQL查询",anchors,false),"question_role_mismatch");
+  assert.equal(recruitQuestionAnchorFailure(valid+"请写SQL查询",anchors,true),null);
+});
+
+test("explicit anchor references preserve source exactly and never repair missing references", () => {
+  const pair = { resume: "使用工具核对结果，处理40%差异$&", job: "3年以上招聘经验" };
+  const draft = "你的简历写到“{{resume}}”，岗位要求“{{job}}”，请说明迁移依据？";
+  const rendered = renderRecruitQuestionAnchorReferences(draft, pair);
+  assert.ok(rendered.includes(pair.resume)); assert.ok(rendered.includes(pair.job));
+  assert.equal(recruitQuestionAnchorFailure(rendered, pair, false), null);
+  assert.equal(renderRecruitQuestionAnchorReferences("请介绍经历？", pair), "请介绍经历？");
+  assert.throws(() => renderRecruitQuestionAnchorReferences("{{resume}}，请介绍经历？", pair), /question_anchor_invalid/);
+  assert.throws(() => renderRecruitQuestionAnchorReferences(draft + "{{invented}}", pair), /question_anchor_invalid/);
+  assert.throws(() => renderRecruitQuestionAnchorReferences(draft, undefined), /question_anchor_invalid/);
+});
+
+test("exact legacy source spans receive quotes without adding or changing facts", () => {
+  const pair = { resume: "负责订单核对并记录差异", job: "核对合同与交付结果" };
+  const draft = `你的简历写到${pair.resume}，岗位要求${pair.job}，请说明如何核验？`;
+  const expected = `你的简历写到“${pair.resume}”，岗位要求“${pair.job}”，请说明如何核验？`;
+  assert.equal(renderRecruitQuestionAnchorReferences(draft, pair), expected);
+  assert.equal(renderRecruitQuestionAnchorReferences(expected, pair), expected);
+  assert.equal(renderRecruitQuestionAnchorReferences(`岗位要求${pair.job}，简历写到${pair.resume}，如何核验？`, pair),
+    `岗位要求“${pair.job}”，简历写到“${pair.resume}”，如何核验？`);
+  const missing = `简历写到${pair.resume}，如何核验？`;
+  assert.equal(renderRecruitQuestionAnchorReferences(missing, pair), missing);
+  assert.equal(renderRecruitQuestionAnchorReferences("共同事实", {resume:"共同事实",job:"共同事实"}), "共同事实");
+});
+
+test("bare anchor markers are quoted only after JSON parsing without changing source facts", () => {
+  const pair = { resume: '复核"订单"并记录40%差异$&', job: "核对合同与交付结果" };
+  const parsed = JSON.parse(JSON.stringify({ text: "你的简历写到{{resume}}，岗位要求{{job}}，请说明如何核对？" }));
+  assert.equal(renderRecruitQuestionAnchorReferences(parsed.text, pair), `你的简历写到“${pair.resume}”，岗位要求“${pair.job}”，请说明如何核对？`);
+  for (const [left, right] of [["“", "”"], ['"', '"'], ["「", "」"], ["『", "』"]]) {
+    const draft = `简历${left}{{resume}}${right}，岗位${left}{{job}}${right}，请说明？`;
+    assert.equal(renderRecruitQuestionAnchorReferences(draft, pair), `简历${left}${pair.resume}${right}，岗位${left}${pair.job}${right}，请说明？`);
+  }
+});
+
+test("actual generation prompt selects work evidence and actual provider validator rejects broken questions", () => {
+  const source=readFileSync("src/app/api/v1/interviews/[id]/generate-questions/route.ts","utf8");
+  const tree=ts.createSourceFile("route.ts",source,ts.ScriptTarget.Latest,true);
+  let validator="";
+  function visit(node:ts.Node){
+    if(ts.isCallExpression(node)&&node.expression.getText(tree)==="generateGovernedText") validator=node.arguments[2].getText(tree);
+    ts.forEachChild(node,visit);
+  }
+  visit(tree);assert.ok(validator);
+  const context=vm.createContext({
+    log:{warn:()=>{}},
+    selectRecruitAnchor,recruitAnchorTerms,recruitQuestionAnchorFailure,ensureExplicitRecruitAnchorLead,renderRecruitQuestionAnchorReferences,
+    jobTitle:"政企商务",jobDescription:"拓展地方政府客户并推动合同落地\n3-5年商务/BD经验",
+    resumeText:"使用销售台账复核每笔退款记录",durationMinutes:22,resumeQuestions:4,jobQuestions:4,
+    expertExamples:[],preserveOpening:true,preserveDimensions:["core_experience","project_ownership"],
+    contractVersion:"v12",roleType:"nontechnical_core",evidenceV11:true,isTechnicalRole:false,
+  });
+  const code=source.slice(source.indexOf("const LEGACY_RECRUIT_DIMENSIONS"),source.indexOf("async function interviewAccessError"))
+    +source.slice(source.indexOf("function buildRecruitPrompt"),source.indexOf("export async function POST"))
+    +source.slice(source.indexOf("  const anchorKeywords:"),source.indexOf("  const { data: initialRows"))
+    +`\nconst selectedDimensions=recruitDimensions(contractVersion);const batchDimensions=selectedDimensions.filter(d=>!preserveDimensions.includes(d));const persistedTexts=new Set();globalThis.check=${validator};globalThis.input=messages;globalThis.pairs=Object.fromEntries(anchors);`;
+  vm.runInContext(ts.transpileModule(code,{compilerOptions:{target:ts.ScriptTarget.ES2022}}).outputText,context);
+  const input=context.input as Array<{role:string;content:string}>;
+  const wrapped = "【岗位职责】\n负责真实客户交付\n\n【本轮出题规则】\n总计输出八题，内部编排不得作为岗位事实";
+  context.wrapped = wrapped;
+  assert.equal(vm.runInContext('recruitJobFacts(wrapped)',context),"负责真实客户交付");
+  assert.equal(vm.runInContext('recruitJobFacts("普通岗位要求保持原样")',context),"普通岗位要求保持原样");
+  const wrappedPrompt=vm.runInContext('buildRecruitPrompt({jobTitle,jobDescription:wrapped,resumeText,durationMinutes,resumeQuestions,jobQuestions,preserveOpening,preserveDimensions,requestedDimensions:["core_skill_evidence"],questionSpecVersion:contractVersion,roleType})',context);
+  assert.ok(wrappedPrompt[1].content.includes("负责真实客户交付"));
+  assert.ok(!wrappedPrompt[1].content.includes("内部编排不得作为岗位事实"));
+  // Exercise the actual prompt for each incremental pair. The JSON example
+  // must include both requested dimensions, not only the first one.
+  for(const requested of [["core_skill_evidence","result_authenticity"],["job_work_sample","problem_solving"],["ai_learning_boundary","collaboration_motivation_stability"]]){
+    context.requested=requested;
+    const prompt=vm.runInContext('buildRecruitPrompt({jobTitle,jobDescription,resumeText,durationMinutes,resumeQuestions,jobQuestions,preserveOpening,preserveDimensions,requestedDimensions:requested,questionSpecVersion:contractVersion,roleType})',context);
+    const example=JSON.parse(prompt[0].content.slice(prompt[0].content.indexOf('{\n  "questions"')));
+    assert.deepEqual(example.questions.map((item:{slot:number})=>item.slot),requested.map((_,index)=>index+1));
+    requested.forEach((dimension,index)=>assert.ok(prompt[0].content.includes(`${index+1}=${dimension}`)));
+    const defined=[...prompt[0].content.matchAll(/^\s*\d+\) ([a-z_]+):/gm)].map(match=>match[1]);
+    assert.deepEqual(defined,requested);
+    assert.ok(!prompt[0].content.includes("完整顺序和 dimension 必须严格如下"));
+    assert.ok(prompt[1].content.includes(`槽位绑定为 ${requested.map((dimension,index)=>`${index+1}=${dimension}`).join(", ")}`));
+    assert.ok(!prompt[1].content.includes("请生成这场 AI 一面的题目"));
+  }
+  assert.equal(input.at(-2)?.role,"system");
+  assert.ok(input.at(-2)?.content.includes("保留引文中的数字、年限、范围、单位和术语"));
+  const pairs=JSON.parse(input.at(-1)!.content) as Record<string,{resume:string;job:string}>;
+  assert.equal(Object.keys(pairs).length,6);
+  assert.equal(pairs.core_skill_evidence.job,"拓展地方政府客户并推动合同落地");
+  const questions=Object.entries(pairs).map(([dimension,pair])=>({dimension,text:`你在简历中写到“${pair.resume}”，岗位要求“${pair.job}”，请说明具体做法？`}));
+  // Distinct dimension wording is required independently from correct anchors.
+  questions.forEach((q,i)=>{q.text+=`请选择第${i+1}种情境分析。`;});
+  context.check(JSON.stringify({questions}));
+  const numbered=structuredClone(questions);numbered[0].text="Q3: "+numbered[0].text;
+  context.check(JSON.stringify({questions:numbered}));
+  context.numbered=JSON.stringify({questions:numbered});
+  assert.equal(vm.runInContext('parseRecruitQuestions(numbered).questions[0].text',context),questions[0].text);
+  assert.equal(vm.runInContext('candidateQuestionTextFailure("面对材料口径冲突，你会如何处理，依据是什么。")',context),null);
+  assert.equal(vm.runInContext('candidateQuestionTextFailure("这批材料已全部整理完毕。")',context),"candidate_text_not_question");
+  const internal=structuredClone(questions);internal[0].text+="请按本轮出题规则作答。";
+  assert.throws(()=>context.check(JSON.stringify({questions:internal})),/candidate_text_instruction/);
+  const embedded=structuredClone(questions);embedded[0].text+=" 第3题 请继续。";
+  assert.throws(()=>context.check(JSON.stringify({questions:embedded})),/candidate_text_number_label/);
+  const keyed=Object.fromEntries(questions.map(({dimension,text})=>[dimension,{text}]));
+  context.check(JSON.stringify({questions:keyed}));
+  const missingKey=structuredClone(keyed);delete missingKey.core_skill_evidence;
+  assert.throws(()=>context.check(JSON.stringify({questions:missingKey})),/missing_or_invalid_scored_question_core_skill_evidence_count_0/);
+  assert.throws(()=>context.check(JSON.stringify({questions:{...keyed,unexpected:{text:"请说明"}}})),/invalid_question_response/);
+  assert.throws(()=>context.check(JSON.stringify({questions:questions.slice(1)})),/missing_or_invalid_scored_question_core_skill_evidence_count_0/);
+  assert.throws(()=>context.check(JSON.stringify({questions:[questions[0],...questions]})),/missing_or_invalid_scored_question_core_skill_evidence_count_2/);
+  const bad=structuredClone(questions);
+  bad[0].text="你的简历写到";
+  Object.assign(bad[0], { "resume}}": ["正文被拆到错误字段", "不能把该字段当成有效问句"] });
+  assert.throws(()=>context.check(JSON.stringify({questions:bad})),/missing_or_invalid_scored_question_core_skill_evidence_candidate_text/);
+  bad[0].text="请说明".repeat(150);
+  assert.throws(()=>context.check(JSON.stringify({questions:bad})),/missing_or_invalid_scored_question_core_skill_evidence_too_long/);
+  bad[0].text=`你在简历中写到“${pairs.core_skill_evidence.resume}”，请说明具体做法？`;
+  assert.throws(()=>context.check(JSON.stringify({questions:bad})),/question_job_anchor_missing_core_skill_evidence/);
+  bad[0].text=questions[0].text+"请写SQL查询";
+  assert.throws(()=>context.check(JSON.stringify({questions:bad})),/question_role_mismatch_core_skill_evidence/);
+});
+
+test("resume anchor never truncates the 72nd character into a broken claim", () => {
+  const line = "参与过跨部门协作，" + "定期复核招聘数据并记录修改依据".repeat(6);
+  assert.equal(completeRecruitAnchor(line), "参与过跨部门协作");
+  assert.equal(completeRecruitAnchor("参与招聘流程(简历筛选，邀约"), "");
+  assert.equal(completeRecruitAnchor("参与招聘数据核对，每周汇总数据(简历量、"), "参与招聘数据核对");
+  const complete = "负责" + "招聘资料核对和审查".repeat(9);
+  assert.equal(completeRecruitAnchor(complete), complete);
+});
 
 test("generated evidence questions receive the exact explicit resume and job lead", () => {
   const lead = "你在简历中写到“负责政府客户项目”，而岗位要求中强调“推进项目交付”。";
@@ -79,4 +240,12 @@ test("generated questions must reference both selected resume and job anchors", 
   assert.equal(questionReferencesRecruitAnchor(grounded, jobAnchor), true);
   assert.equal(questionReferencesRecruitAnchor(generic, resumeAnchor), false);
   assert.equal(questionReferencesRecruitAnchor(generic, jobAnchor), false);
+});
+
+test("complete short-term job requirements are valid anchors without a four-character Chinese run", () => {
+  const anchor="沟通、抗压、协作";
+  assert.equal(questionReferencesRecruitAnchor('岗位要求“沟通、抗压、协作”，请说明相关经历。',anchor),true);
+  assert.equal(questionReferencesRecruitAnchor('岗位要求沟通/抗压/协作，请说明相关经历。',anchor),true);
+  assert.equal(questionReferencesRecruitAnchor('请说明你的沟通经历。',anchor),false);
+  assert.equal(questionReferencesRecruitAnchor('请说明相关工作。','工作'),false);
 });

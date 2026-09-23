@@ -1,5 +1,7 @@
 import type { Tables } from "@/lib/supabase/types";
 import type { LLMMessage } from "../types";
+import { recruitmentQualityInstructions } from "@/lib/voice/recruitment-quality";
+import { recruitmentDecisionInstructions } from "@/lib/voice/recruitment-decision";
 
 interface InterviewContext {
   interview: Tables<"interviews"> & { questions: Tables<"questions">[] };
@@ -9,6 +11,14 @@ interface InterviewContext {
 
 export function buildInterviewerPrompt(ctx: InterviewContext): LLMMessage[] {
   const { interview, conversationHistory, currentQuestionIndex } = ctx;
+  if (interview.title.includes("数君招聘")) {
+    return [{ role: "system", content: `${recruitmentQualityInstructions(interview.language === "zh")}
+面试目标：${interview.objective || ""}
+当前主问题：${interview.questions[currentQuestionIndex]?.text || "八题之后的非计分交流"}
+只围绕当前核心目标。一轮一个问题，禁止自行增加主问题。Q1不追问；Q2-Q7合计最多2次且每题最多1次；Q8最多1次最终核验；服务器额度优先。
+反问、澄清、更正不前进。八道主问题没有完整回答不能结束。
+${recruitmentDecisionInstructions(interview.language === "zh")}` }, ...conversationHistory];
+  }
 
   const formattedQuestions = interview.questions
     .map((q, i) => {

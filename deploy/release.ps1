@@ -10,6 +10,7 @@ param(
   [string]$TargetHost = "root@172.28.145.158",
   [string]$PublicBaseUrl = "https://agitest.yifx.vip",
   [switch]$Apply,
+  [switch]$RecoverStoppedWeb,
   [switch]$ForceRebuild,
   [switch]$PreflightOnly
 )

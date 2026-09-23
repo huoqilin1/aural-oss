@@ -144,3 +144,26 @@ test("follow-up prompt gives final refinement when no turns remain", () => {
   assert.match(system, /FINAL follow-up turn/);
   assert.match(system, /shouldContinue/);
 });
+
+
+import { buildSummaryPrompt } from "../src/lib/ai/prompts/summary";
+test("report examples are valid JSON for optional criteria, questions and research", () => {
+  for (const research of [false, true]) {
+    const messages = buildSummaryPrompt("数君招聘 · Synthetic", [{role:"user",content:"Synthetic evidence"}], null,
+      [{name:"Evidence",description:"Cite evidence"}], [{text:"Synthetic Q1",order:0,type:research?"RESEARCH":"OPEN_ENDED"}], "zh");
+    const prompt=String(messages[0].content);
+    const example=prompt.slice(prompt.lastIndexOf("\n{\n")+1);
+    const parsed=JSON.parse(example);
+    assert.equal(typeof parsed.summary,"string");
+    assert.equal(typeof parsed.criteriaEvaluations[0].score,"number");
+    assert.equal(parsed.questionEvaluations.length,1);
+    assert.equal(Boolean(parsed.researchFindings),research);
+  }
+});
+test("text-only report includes a user turn for strict chat APIs", () => {
+    const messages = buildSummaryPrompt("Synthetic report", [{role:"user",content:"Synthetic project evidence"}], null, null, null, "zh");
+    assert.equal(messages[0].role, "system");
+    assert.ok(String(messages[0].content).includes("Synthetic project evidence"));
+    assert.equal(messages.at(-1)?.role, "user");
+    assert.match(String(messages.at(-1)?.content), /JSON/);
+});

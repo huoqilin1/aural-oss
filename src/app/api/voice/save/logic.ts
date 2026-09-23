@@ -5,10 +5,9 @@ export type VoiceSavePayload = {
     content: string;
     questionId?: string;
     source?: string;
-    timestamp?: string;
-    messageId?: string;
   }>;
   complete?: boolean;
+  validateOnly?: boolean;
   currentQuestionIndex?: number;
 };
 
@@ -19,18 +18,12 @@ type StorageResult<T> = {
   error: { code?: string | null } | null;
 };
 
-export class VoiceStorageError extends Error {
-  constructor(operation: string, public readonly code: string) {
-    super(`${operation} failed (${code})`);
-  }
-}
-
 export function requireVoiceStorageResult<T>(
   operation: string,
   result: StorageResult<T>,
 ): T {
   if (result.error) {
-    throw new VoiceStorageError(operation, result.error.code || "unknown");
+    throw new Error(`${operation} failed (${result.error.code || "unknown"})`);
   }
   return result.data;
 }
@@ -100,7 +93,7 @@ export function computeMessageBasedDuration(
 
 export type CompletionSession = {
   status: string;
-  voiceRevision?: number;
+  audioRecordingUrl?: string | null;
   startedAt: string;
   lastActivityAt?: string | null;
   activitySegments: unknown;
@@ -168,48 +161,27 @@ export async function handleVoiceSave(
   payload: VoiceSavePayload,
   ops: VoiceSaveOps,
 ): Promise<{ status: number; body: { ok?: boolean; error?: string } }> {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    return {status: 400, body: {error: 'Invalid voice save payload'}};
-  }
-  const { sessionId, messages, complete, currentQuestionIndex } = payload;
+  const { sessionId, messages, complete, validateOnly, currentQuestionIndex } = payload;
 
   if (!sessionId) {
     return { status: 400, body: { error: "Missing sessionId" } };
   }
-  if (typeof sessionId !== 'string' ||
-      (complete !== undefined && typeof complete !== 'boolean') ||
-      (currentQuestionIndex !== undefined && (!Number.isInteger(currentQuestionIndex) || currentQuestionIndex < 0)) ||
-      (messages !== undefined && (!Array.isArray(messages) || messages.some(message =>
-        !message || !['user', 'assistant'].includes(message.role) ||
-        typeof message.content !== 'string' || !message.content.trim())))) {
-    return {status: 400, body: {error: 'Invalid voice save payload'}};
-  }
 
   try {
     if (messages && Array.isArray(messages) && messages.length > 0) {
-      if (messages.some(message => message.messageId !== undefined && (
-        typeof message.messageId !== 'string' ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(message.messageId)
-      ))) {
-        return {status: 400, body: {error: 'Invalid message identity'}};
-      }
-      if (messages.some(message => message.timestamp !== undefined && (
-        typeof message.timestamp !== 'string' ||
-        !/(?:Z|[+-]\d{2}:\d{2})$/.test(message.timestamp) ||
-        !Number.isFinite(Date.parse(message.timestamp))
-      ))) {
-        return {status: 400, body: {error: 'Invalid message timestamp; an explicit timezone is required'}};
-      }
       await ops.insertMessages(sessionId, messages);
     }
 
-    if (complete) {
+    if (complete || validateOnly) {
       const session = await ops.loadSessionForCompletion(sessionId);
       if (!session) {
-        return { status: 404, body: { error: "Interview session not found" } };
+        return { status: 404, body: { error: "未找到本次面试，无法确认保存结果。" } };
       }
 
       if (session) {
+        if (session.status === "ABANDONED") {
+          return { status:409, body:{error:"本次面试尚未完整完成，不能提交完成结果。"} };
+        }
         const isRecruitment = /^数君招聘\s*·\s*/.test(session.interview.title);
         // Recruitment completion is fail-closed even when another process has
         // already written COMPLETED.  The relay cannot authoritatively know
@@ -222,13 +194,11 @@ export async function handleVoiceSave(
                 String(question.description || ""),
               ),
             )
+            .slice(0, 8)
             .map((question) => question.id)
             .filter((questionId): questionId is string => Boolean(questionId));
-          if (requiredQuestionIds.length !== 8 || new Set(requiredQuestionIds).size !== 8) {
-            return {
-              status: 409,
-              body: { error: "八道正式题尚未完整准备，暂不能结束面试，请稍后重试" },
-            };
+          if (requiredQuestionIds.length !== 8) {
+            return { status:409, body:{error:"正式面试题目尚未完整同步，请稍后重试保存。"} };
           }
           if (requiredQuestionIds.length === 8) {
             const answered = new Set(await ops.loadAnsweredQuestionIds(sessionId));
@@ -244,6 +214,10 @@ export async function handleVoiceSave(
               };
             }
           }
+        }
+        if (validateOnly) return { status:200, body:{ok:true} };
+        if (isRecruitment && !session.audioRecordingUrl) {
+          return { status:409, body:{error:"面试录音尚未保存完成，请稍后重试保存。"} };
         }
         if (session.status === "COMPLETED") {
           return { status: 200, body: { ok: true } };
@@ -267,7 +241,6 @@ export async function handleVoiceSave(
 
         await ops.updateSession(sessionId, {
           status: "COMPLETED" as const,
-          ...(isRecruitment ? {completedVoiceRevision: session.voiceRevision ?? null} : {}),
           completedAt: now.toISOString(),
           totalDurationSeconds: duration,
         });
@@ -316,13 +289,6 @@ export async function handleVoiceSave(
     return { status: 200, body: { ok: true } };
   } catch (error) {
     ops.log.error("Voice save error:", error);
-    if (error instanceof VoiceStorageError && ['PVR01', 'PVR02', 'PVR03', 'PVR04'].includes(error.code)) {
-      return {status: 409, body: {error: error.code === 'PVR04'
-        ? '回答题目与当前面试不一致，尚未保存。请保留页面并联系招聘负责人核实。'
-        : error.code === 'PVR02'
-        ? '面试记录已结束，本次补充尚未纳入报告。请保留页面并联系招聘负责人核实。'
-        : '回答记录仍在更新或尚未完整保存，请稍后重试结束面试。'}};
-    }
     return { status: 500, body: { error: "Failed to save voice data" } };
   }
 }

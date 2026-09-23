@@ -1,5 +1,7 @@
 "use client";
 
+import { readBrowserPreference, writeBrowserPreference } from "@/lib/browser-storage";
+
 import {
   createContext,
   useCallback,
@@ -47,7 +49,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => {
     if (typeof window !== "undefined") {
-      return localStorage.getItem(STORAGE_KEY);
+      return readBrowserPreference(STORAGE_KEY);
     }
     return null;
   });
@@ -65,14 +67,14 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (currentProject && typeof window !== "undefined") {
-      localStorage.setItem(STORAGE_KEY, currentProject.id);
+      writeBrowserPreference(STORAGE_KEY, currentProject.id);
     }
   }, [currentProject]);
 
   const setCurrentProject = useCallback((projectId: string) => {
     setSelectedProjectId(projectId);
     if (typeof window !== "undefined") {
-      localStorage.setItem(STORAGE_KEY, projectId);
+      writeBrowserPreference(STORAGE_KEY, projectId);
     }
   }, []);
 

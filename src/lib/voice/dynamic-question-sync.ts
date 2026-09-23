@@ -22,9 +22,21 @@ export class LiveQuestionIdLookup {
   }
 
   update(questions: readonly QuestionIdLike[]): void {
-    this.ids = [...questions]
+    const incoming = [...questions]
       .sort((left, right) => left.order - right.order)
       .map((question) => question.id || undefined);
+    // A delayed HTTP poll/render must not erase IDs already delivered by the
+    // relay. Question identity is immutable for the lifetime of this session.
+    incoming.forEach((id, index) => {
+      if (id && !this.ids[index]) this.ids[index] = id;
+    });
+  }
+
+  updateFromRelay(value: unknown): void {
+    if (!Array.isArray(value)) return;
+    if (!value.every(row => row && typeof row.id === 'string' && row.id.length > 0
+      && Number.isInteger(row.order) && row.order >= 0)) return;
+    this.update(value);
   }
 
   idAt(index: number): string | undefined {

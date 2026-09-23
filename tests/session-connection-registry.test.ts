@@ -13,6 +13,24 @@ function connection() {
   };
 }
 
+test("online requires established audio and fresh browser liveness, reconnect is unique", () => {
+  const registry = new SessionConnectionRegistry<ReturnType<typeof connection>>();
+  const first = registry.claim("synthetic", connection());
+  registry.touch("synthetic", first.lease, 1000);
+  assert.deepEqual(registry.onlineSessionIds(1000), []);
+  registry.establish("synthetic", first.lease, 1000);
+  assert.deepEqual(registry.onlineSessionIds(2000), ["synthetic"]);
+  assert.deepEqual(registry.onlineSessionIds(47000), []);
+  registry.touch("synthetic", first.lease, 48000);
+  const second = registry.claim("synthetic", connection());
+  registry.establish("synthetic", first.lease, 48000);
+  assert.deepEqual(registry.onlineSessionIds(48000), []);
+  registry.establish("synthetic", second.lease, 48000);
+  assert.deepEqual(registry.onlineSessionIds(48000), ["synthetic"]);
+  registry.release("synthetic", second.lease);
+  assert.deepEqual(registry.onlineSessionIds(48000), []);
+});
+
 test("a refreshed browser supersedes the previous relay connection", () => {
   const registry = new SessionConnectionRegistry<ReturnType<typeof connection>>();
   const first = connection();

@@ -191,10 +191,12 @@ test("evidence v12 generator uses the scored self-intro and seven evidence dimen
 test("progressive generation preserves Q1 and optional fallback Q2 safely", () => {
   assert.match(generationRoute, /const preserveOpening = body\.preserveOpening === true/);
   assert.match(generationRoute, /const preserveDimensions = Array\.isArray/);
-  assert.match(generationRoute, /preserveDimensions\.includes\(item\.key\)/);
-  assert.match(generationRoute, /const GENERATION_BUDGET_MS = 150_000/);
-  assert.match(generationRoute, /withGenerationBudget\(/);
-  assert.match(generationRoute, /generated = \{ questions: \[\] \}/);
+  // Preservation across incremental writes is exercised by incremental-question-route.test.ts.
+  assert.match(generationRoute, /batchDimensions\.includes\(item\.key\)/);
+  assert.match(generationRoute, /generateGovernedText\(/);
+  assert.doesNotMatch(generationRoute, /withGenerationBudget\(/);
+  assert.doesNotMatch(generationRoute, /generated = \{ questions: \[\] \}/);
+  assert.match(generationRoute, /missing_or_invalid_scored_question/);
   assert.match(generationRoute, /missingPreservedDimensions/);
   assert.match(generationRoute, /finally \{\s*generationInFlight\.delete\(interviewId\)/);
 });
@@ -208,14 +210,16 @@ test("both voice relays refresh questions during an active candidate session", (
     assert.match(source, /async function refreshDynamicQuestions/);
     assert.match(source, /type: "question_count_update"/);
     assert.match(source, /type === "question_set_update"/);
-    assert.match(source, /isProgressiveOpeningOnly\(sortedQuestions\)/);
+    assert.match(source, source === relay
+      ? /shouldWaitForQuestionExpansion\(sortedQuestions, currentQuestionIndex\)/
+      : /isProgressiveOpeningOnly\(sortedQuestions\)/);
     assert.match(source, /2_000/);
     assert.match(source, /Dynamic questions refreshed from/);
   }
   assert.match(relay, /await refreshDynamicQuestions\(\)/);
   assert.match(relay, /const waitUntil = Date\.now\(\) \+ 10_000/);
   assert.match(relay, /shouldWaitForQuestionExpansion\(sortedQuestions, currentQuestionIndex\)/);
-  assert.match(relay, /while \(isProgressiveOpeningOnly\(sortedQuestions\)/);
+  assert.match(relay, /while \(shouldWaitForQuestionExpansion\(sortedQuestions, currentQuestionIndex\)/);
   assert.match(openAiRelay, /next_question_not_ready/);
   assert.match(openAiRelay, /This wait is not an additional interview question/);
   assert.match(openAiRelay, /pendingProgressiveTransition/);
@@ -295,8 +299,8 @@ test("greetings and audio clarifications never skip a scored question", () => {
     assert.match(source, /isRecruitmentConversationControl/);
     assert.match(source, /recruitment conversation control|不计入追问预算/);
   }
-  assert.match(relay, /!isRecruitmentConversationControl\(userText\)/);
-  assert.match(openAiRelay, /!isRecruitmentConversationControl\(text\)/);
+  assert.match(relay, /hasRecruitmentAnswer\(userText\)/);
+  assert.match(openAiRelay, /hasRecruitmentAnswer\(text\)/);
 });
 
 test("session export preserves durable question identity for HR reconciliation", () => {
@@ -387,7 +391,7 @@ test("candidate cannot manually complete recruitment before eight scored answers
   assert.match(completionAutoClose, /!hasAllowedQuestionCount/);
   assert.match(completionAutoClose, /input\.currentQuestionIndex < input\.plannedMainQuestionCount - 1/);
   assert.match(completionAutoClose, /!input\.answeredCurrentQuestion/);
-  assert.match(completionAutoClose, /input\.interviewComplete\) return false/);
+  assert.doesNotMatch(completionAutoClose, /\|\| input\.interviewComplete\) return false/);
   assert.match(voiceInterface, /八道计分题尚未完整完成，请继续完成当前面试/);
 });
 

@@ -3,6 +3,7 @@
 import { VoiceInterface } from "@/components/session/voice-interface";
 import { IntervieweeOnboarding } from "@/components/session/interviewee-onboarding";
 import { useRecruitmentOnboardingGate } from "@/hooks/use-recruitment-onboarding-gate";
+import { useRecruitmentMedia } from "@/hooks/use-recruitment-media";
 import { useEffect, useState } from "react";
 
 type FunctionalRelayEvent =
@@ -23,12 +24,21 @@ type FunctionalScenarioId =
   | "advance-followup-guard"
   | "advance-input-readiness"
   | "advance-late-asr"
-  | "advance-answer-revision"
-  | "advance-repeated-answer"
   | "recruitment-entry"
   | "recruitment-auto-retry"
   | "recruitment-incomplete"
-  | "recruitment-eight-question";
+  | "recruitment-eight-question"
+  | "recruitment-eight-question-premature"
+  | "recruitment-eight-question-save-retry"
+  | "recruitment-eight-question-progress-retry"
+  | "recruitment-eight-question-asr"
+  | "recruitment-eight-question-interrupted"
+  | "recruitment-eight-question-recording-late";
+
+const isLocalRecordingScenario = (id: string) => [
+  "recruitment-eight-question-recording-late", "recruitment-eight-question-asr",
+  "recruitment-eight-question-interrupted",
+].includes(id);
 
 declare global {
   interface Window {
@@ -43,27 +53,15 @@ declare global {
 }
 
 const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
-  "advance-repeated-answer": {
-    "/ws/voice": {events: [
-      {type:"ready",delay:20},
-      {type:"json",delay:100,message:{type:"asr_ended",text:"我没有做过。",questionIndex:0}},
-      {type:"json",delay:250,message:{type:"question_change",questionIndex:1,totalQuestions:2,auto:true}},
-      {type:"json",delay:450,message:{type:"asr_ended",text:"我没有做过。",questionIndex:1}},
-      {type:"json",delay:650,message:{type:"question_change",questionIndex:0,totalQuestions:2,auto:true}},
-    ]},
-    "/ws/openai-voice": {events:[{type:"close",delay:30}]},
+  "recruitment-eight-question-asr": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
   },
-  "advance-answer-revision": {
-    "/ws/voice": {events: [
-      {type: "ready", delay: 20},
-      {type: "json", delay: 100, message: {type: "asr_ended", text: "效率提高15%。", questionIndex: 0}},
-      {type: "json", delay: 150, message: {type: "asr_revision", text: "效率提高5%，不是15%。", questionIndex: 0, questionId: "functional-q1", messageId:"00000000-0000-4000-8000-000000000001", timestamp:"2026-09-05T01:02:00Z"}},
-      {type: "json", delay: 180, message: {type: "asr_revision", text: "效率提高5%，不是15%。", questionIndex: 0, questionId: "functional-q1"}},
-      {type: "json", delay: 200, message: {type: "asr_revision", text: "不应保存的错题修订", questionIndex: 0, questionId: "wrong-question"}},
-      {type: "json", delay: 300, message: {type: "question_change", questionIndex: 1, totalQuestions: 2, auto: true}},
-      {type: "json", delay: 350, message: {type: "input_ready"}},
-    ]},
-    "/ws/openai-voice": {events: [{type: "close", delay: 30}]},
+  "recruitment-eight-question-interrupted": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+  },
+  "recruitment-eight-question-recording-late": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+    "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
   },
   default: {
     "/ws/voice": {
@@ -359,6 +357,18 @@ const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
       events: [{ type: "close", delay: 30 }],
     },
   },
+  "recruitment-eight-question-premature": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+    "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
+  },
+  "recruitment-eight-question-save-retry": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+    "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
+  },
+  "recruitment-eight-question-progress-retry": {
+    "/ws/voice": { events: [{ type: "ready", delay: 20 }] },
+    "/ws/openai-voice": { events: [{ type: "ready", delay: 20 }] },
+  },
 };
 
 function installFunctionalRelayMocks(
@@ -374,6 +384,56 @@ function installFunctionalRelayMocks(
   window.__functionalRelayScenario = scenario;
   window.__functionalScenarioId = scenarioId;
   window.__functionalMediaFailureInjected = false;
+  if (isLocalRecordingScenario(scenarioId)) {
+    const realFetch = window.fetch.bind(window);
+    const answers = new Set<string>();
+    const state = { answeredQuestions: 0, uploads: 0, recordingLinked: false, clientRecordingSaved: false,
+      completeRequests:0, retainedOpenings:0, recordingBytes:0 };
+    const openings = new Set<string>();
+    const report = () => {
+      const node = document.querySelector('[data-testid="local-save-ledger"]');
+      if (node) node.textContent = JSON.stringify(state);
+    };
+    // This scenario runs the real components and MediaRecorder, with only
+    // local API persistence and relay dependencies replaced. Never production.
+    window.fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url, location.href);
+      if (url.origin !== location.origin) return realFetch(input, init);
+      if (url.pathname === "/api/voice/save") {
+        const body = JSON.parse(String(init?.body || "{}"));
+        for (const message of body.messages || []) {
+          if (message.role === "user" && message.questionId && message.content?.trim()) answers.add(message.questionId);
+          if (message.role === "user" && message.content?.includes("不能编造历史业绩")) openings.add(message.questionId);
+        }
+        state.answeredQuestions = answers.size;
+        state.retainedOpenings = openings.size;
+        if (body.complete) state.completeRequests++;
+        report();
+        const invalid = ((body.complete || body.validateOnly) && answers.size !== 8)
+          || (body.complete && !state.recordingLinked);
+        return Response.json({ success: !invalid }, { status: invalid ? 409 : 200 });
+      }
+      if (url.pathname === "/api/session/upload") {
+        const form = init?.body as FormData;
+        if (form.get("type") === "recording") {
+          state.uploads++; report();
+          state.recordingBytes = (form.get("file") as Blob)?.size || 0;
+          if (scenarioId.endsWith("interrupted") && state.uploads === 1) {
+            report();
+            return Response.json({error:"local recording failure"}, {status:503});
+          }
+          await new Promise((resolve) => setTimeout(resolve, 9000));
+          state.recordingLinked = true; report();
+        }
+        return Response.json({url:`${location.origin}/functional-recording.webm`,path:"local-only"});
+      }
+      if (url.pathname === "/api/trpc/session.saveRecording") {
+        state.clientRecordingSaved = state.recordingLinked; report();
+        return Response.json({result:{data:{json:{success:state.recordingLinked}}}}, {status:state.recordingLinked?200:409});
+      }
+      return realFetch(input, init);
+    };
+  }
   window.sessionStorage.setItem("__functionalRelayConnections", "[]");
   window.sessionStorage.setItem("__functionalRelaySentMessages", "[]");
   window.sessionStorage.setItem("__functionalMediaRequests", "[]");
@@ -404,7 +464,6 @@ function installFunctionalRelayMocks(
     if (
       scenarioId === "recruitment-auto-retry"
       && !!constraints.audio
-      && !constraints.video
       && !window.__functionalMediaFailureInjected
     ) {
       window.__functionalMediaFailureInjected = true;
@@ -414,28 +473,25 @@ function installFunctionalRelayMocks(
     if (constraints.audio) {
       const context = new AudioContext();
       functionalAudioContexts.push(context);
-      tracks.push(...context.createMediaStreamDestination().stream.getAudioTracks());
+      const destination = context.createMediaStreamDestination();
+      if (isLocalRecordingScenario(scenarioId)) {
+        const source = context.createOscillator();
+        const gain = context.createGain();
+        gain.gain.value = 0.001;
+        source.connect(gain).connect(destination);
+        source.start();
+        void context.resume();
+      }
+      tracks.push(...destination.stream.getAudioTracks());
     }
     if (constraints.video) {
       const canvas = document.createElement("canvas");
       canvas.width = 640;
       canvas.height = 480;
       functionalVideoCanvases.push(canvas);
-      const videoTracks = canvas.captureStream(4).getVideoTracks();
+      const videoTracks = canvas.captureStream(1).getVideoTracks();
+      canvas.getContext("2d")?.fillRect(0, 0, canvas.width, canvas.height);
       tracks.push(...videoTracks);
-      // A blank, never-painted canvas creates a track but may never deliver
-      // a frame. Produce synthetic frames so screenshot persistence is tested.
-      const paint = () => {
-        const drawing = canvas.getContext('2d');
-        if (!drawing) return;
-        drawing.fillStyle = '#234567';
-        drawing.fillRect(0,0,canvas.width,canvas.height);
-      };
-      paint();
-      const timer = setInterval(() => {
-        if (videoTracks.every(track => track.readyState === 'ended')) clearInterval(timer);
-        else paint();
-      },250);
     }
     return new MediaStream(tracks);
   };
@@ -458,6 +514,8 @@ function installFunctionalRelayMocks(
     onclose: ((event?: unknown) => void) | null = null;
     private scheduled = false;
     private currentQuestionIndex = 0;
+    private interviewEnded = false;
+    private pendingCommitRequest: string | null = null;
 
     constructor(url: string | URL) {
       this.url = String(url);
@@ -481,6 +539,40 @@ function installFunctionalRelayMocks(
       }, 0);
     }
 
+    scheduleSpokenAnswer(): void {
+      if (!scenarioId.endsWith("-asr") && !scenarioId.endsWith("-interrupted")) return;
+      const index = this.currentQuestionIndex;
+      const emit = (message: Record<string, unknown>) => {
+        if (this.readyState !== 3 && this.currentQuestionIndex === index) {
+          this.onmessage?.({data:JSON.stringify(message)});
+        }
+      };
+      const opening = `第${index + 1}项工作，我没有真实台账，不能编造历史业绩。`;
+      const middle = "应办理事项逐项核对，提交记录不等于办理完成，结果需要负责人复核";
+      const tail = "，未完成事项登记责任人和截止时间，我答完了。";
+      // Real useVoice event handling and MediaRecorder, controlled upstream
+      // ASR only. No text_input or next-question UI actions drive this scenario.
+      emit({type:"tts_text", questionIndex:index, data:{text:`请说明第${index + 1}项工作中的本人职责和验证方法？`}});
+      emit({type:"tts_ended", questionIndex:index});
+      emit({type:"input_ready"});
+      setTimeout(()=>emit({type:"asr",data:{results:[{text:opening + middle}]}}),400);
+      setTimeout(()=>emit({type:"asr",data:{results:[{text:middle + tail}]}}),700);
+      setTimeout(()=>emit({type:"asr_ended",questionIndex:index,text:middle + tail}),900);
+      setTimeout(()=>{
+        if (scenarioId.endsWith("interrupted") && index === 5) {
+          this.interviewEnded = true;
+          emit({type:"interview_incomplete",reason:"candidate_inactive",message:"本次面试尚未完成。"});
+        } else if (index === 7) {
+          emit({type:"tts_text",questionIndex:index,data:{text:"本次面试已结束，感谢你的时间，再见。"}});
+          emit({type:"tts_ended",questionIndex:index});
+          setTimeout(()=>emit({type:"interview_complete"}),100);
+        } else {
+          this.pendingCommitRequest = `asr-commit-${index}`;
+          emit({type:"answer_commit_required",questionIndex:index,requestId:this.pendingCommitRequest});
+        }
+      },1100);
+    }
+
     send(data: string): void {
       let parsed: Record<string, unknown> | null = null;
       try {
@@ -490,6 +582,26 @@ function installFunctionalRelayMocks(
       }
 
       if (parsed) {
+        if (parsed.type === "init" && new URLSearchParams(window.location.search).has("silenceReminder")) {
+          const emit = (message: Record<string, unknown>) => this.onmessage?.({data:JSON.stringify(message)});
+          setTimeout(() => emit({type:"input_ready"}), 300);
+          setTimeout(() => emit({type:"tts_text",questionIndex:0,data:{text:"你可以继续补充刚才的回答。"}}), 1500);
+          setTimeout(() => emit({type:"tts_ended",questionIndex:0}), 1700);
+          setTimeout(() => emit({type:"input_ready"}), 2800);
+        }
+        if (new URLSearchParams(window.location.search).has("playbackReceipt")) {
+          if (parsed.type === "init") {
+            setTimeout(() => {
+              const emit = (message: Record<string, unknown>) => this.onmessage?.({data:JSON.stringify(message)});
+              emit({type:"tts_text",questionIndex:0,data:{text:"这是本地播放确认测试。"}});
+              window.sessionStorage.setItem("__functionalPlaybackSentAt",String(Date.now()));
+              this.onmessage?.({data:new Int16Array(36_000).buffer}); // 1.5 seconds at 24 kHz.
+              emit({type:"playback_receipt_request",receiptId:"local-playback",questionIndex:0});
+            },500);
+          } else if (parsed.type === "playback_complete") {
+            window.sessionStorage.setItem("__functionalPlaybackAckAt",String(Date.now()));
+          }
+        }
         const sentMessages = [
           ...(window.__functionalRelaySentMessages ?? []),
           parsed,
@@ -503,7 +615,7 @@ function installFunctionalRelayMocks(
 
       if (
         parsed?.type === "text_input"
-        && window.__functionalScenarioId === "recruitment-eight-question"
+        && window.__functionalScenarioId?.startsWith("recruitment-eight-question")
       ) {
         const finalQuestion = this.currentQuestionIndex === 7;
         setTimeout(() => {
@@ -536,11 +648,38 @@ function installFunctionalRelayMocks(
             });
           }, 140);
         }
+        if (window.__functionalScenarioId === "recruitment-eight-question-premature"
+          && this.currentQuestionIndex === 1
+          && !window.sessionStorage.getItem("__functionalPrematureSent")) {
+          window.sessionStorage.setItem("__functionalPrematureSent", "1");
+          setTimeout(() => {
+            this.interviewEnded = true;
+            this.onmessage?.({ data: JSON.stringify({ type: "interview_complete" }) });
+          }, 140);
+        }
+      }
+
+      if (parsed?.type === "answer_commit_ack") {
+        if (parsed.requestId !== this.pendingCommitRequest || parsed.questionIndex !== this.currentQuestionIndex) return;
+        this.pendingCommitRequest = null;
+        if (parsed.ok !== true) {
+          this.onmessage?.({ data: JSON.stringify({ type:"transition_rejected", reason:"answer_save_failed",
+            message:"刚才的回答暂未保存成功，请稍后再点下一题，你也可以继续补充。" }) });
+          return;
+        }
+        parsed = { type: "next_question", committed: true };
       }
 
       if (parsed?.type === "next_question") {
+        if (this.interviewEnded) return;
         const recruitmentFlow =
-          window.__functionalScenarioId === "recruitment-eight-question";
+          window.__functionalScenarioId?.startsWith("recruitment-eight-question");
+        if (recruitmentFlow && parsed.committed !== true) {
+          this.pendingCommitRequest = `commit-${this.currentQuestionIndex}-${Date.now()}`;
+          this.onmessage?.({ data: JSON.stringify({ type:"answer_commit_required",
+            requestId:this.pendingCommitRequest, questionIndex:this.currentQuestionIndex }) });
+          return;
+        }
         const nextIndex = recruitmentFlow
           ? Math.min(this.currentQuestionIndex + 1, 7)
           : 1;
@@ -560,12 +699,20 @@ function installFunctionalRelayMocks(
             }),
           });
         }, 120);
+        if (window.__functionalScenarioId === "recruitment-eight-question-recording-late") {
+          setTimeout(() => {
+            this.onmessage?.({data:JSON.stringify({type:"tts_text",questionIndex:nextIndex-1,data:{text:"STALE_Q_PREVIOUS 不应显示的上一题追问"}})});
+            this.onmessage?.({data:JSON.stringify({type:"tts_ended",questionIndex:nextIndex-1})});
+          },150);
+        }
         setTimeout(() => {
           this.onmessage?.({ data: JSON.stringify({ type: "input_ready" }) });
+          this.scheduleSpokenAnswer();
         }, 180);
       }
 
       if (parsed?.type === "init" && !this.scheduled) {
+        this.currentQuestionIndex = Number((parsed.context as { startQuestionIndex?: number })?.startQuestionIndex || 0);
         this.scheduled = true;
         for (const event of this.events) {
           setTimeout(() => {
@@ -578,6 +725,15 @@ function installFunctionalRelayMocks(
                   sessionId: event.sessionId ?? "functional-session",
                 }),
               });
+              // A connected socket is not an ASR-ready input turn. These
+              // full-interview mocks have no opening TTS, so confirm input
+              // separately just as the real relay does after its greeting.
+              if (window.__functionalScenarioId?.startsWith("recruitment-eight-question")) {
+                setTimeout(() => {
+                  if (this.readyState !== 3) this.onmessage?.({ data: JSON.stringify({ type: "input_ready" }) });
+                }, 60);
+              }
+              setTimeout(()=>this.scheduleSpokenAnswer(),200);
               return;
             }
 
@@ -627,10 +783,11 @@ export function VoiceFunctionalHarness({
   scenario: string;
 }) {
   const [parentCompleted, setParentCompleted] = useState(false);
-  const [harnessSessionId,setHarnessSessionId] = useState('functional-session');
+  const [localStarted, setLocalStarted] = useState(false);
   const [mocksReady, setMocksReady] = useState(false);
   const isRecruitmentScenario = scenario.startsWith("recruitment-");
   const isAdvanceScenario = scenario.startsWith("advance-") || isRecruitmentScenario;
+  const entryMedia = useRecruitmentMedia("functional-session", isAdvanceScenario);
   const recruitmentOnboarding = useRecruitmentOnboardingGate({
     isRecruitmentInterview: scenario === "recruitment-entry",
     sessionId: "functional-session",
@@ -646,6 +803,7 @@ export function VoiceFunctionalHarness({
     "请说明一次协作分歧以及你如何处理。",
     "请说明求职动机、岗位预期和稳定性。",
   ].map((text, order) => ({
+    id: `functional-question-${order}`,
     text,
     type: "OPEN_ENDED",
     description: "Recruitment functional test prompt",
@@ -690,9 +848,9 @@ export function VoiceFunctionalHarness({
 
   return (
     <div className="relative min-h-screen bg-background">
-      {scenario === 'farewell-complete' && <button data-testid="switch-synthetic-session" onClick={() => {
-        setHarnessSessionId('functional-session-next'); setParentCompleted(false);
-      }}>切换合成面试</button>}
+      {isLocalRecordingScenario(scenario) && (
+        <pre data-testid="local-save-ledger" className="relative z-50 bg-white text-xs">local-only: ready</pre>
+      )}
       <div
         data-testid="parent-complete"
         className="sr-only"
@@ -706,7 +864,9 @@ export function VoiceFunctionalHarness({
       <div data-testid="harness-ready" className="sr-only">
         {mocksReady ? "true" : "false"}
       </div>
-      {mocksReady && scenario === "recruitment-entry" && !recruitmentOnboarding.ready ? (
+      {mocksReady && isLocalRecordingScenario(scenario) && !localStarted ? (
+        <button onClick={() => setLocalStarted(true)}>开始本地测试</button>
+      ) : mocksReady && scenario === "recruitment-entry" && !recruitmentOnboarding.ready ? (
         <div data-testid="onboarding-restoring">restoring</div>
       ) : mocksReady && scenario === "recruitment-entry" && !recruitmentOnboarding.done ? (
         <IntervieweeOnboarding
@@ -717,11 +877,12 @@ export function VoiceFunctionalHarness({
           voiceEnabled
           aiName="TestInterviewer"
           questionsReady
-          onComplete={recruitmentOnboarding.complete}
+          onComplete={() => { void entryMedia.request().catch(() => {}); recruitmentOnboarding.complete(); }}
         />
       ) : mocksReady && (
         <VoiceInterface
-          sessionId={harnessSessionId}
+          entryMedia={entryMedia}
+          sessionId="functional-session"
           interviewId="functional-interview"
           interviewTitle={isAdvanceScenario ? "数君招聘 · Functional Voice Interview" : "Functional Voice Interview"}
           aiName="TestInterviewer"
@@ -734,9 +895,7 @@ export function VoiceFunctionalHarness({
             aiTone: "Professional",
             language,
             followUpDepth: "Moderate",
-            questions: ['advance-answer-revision', 'advance-repeated-answer'].includes(scenario)
-              ? functionalQuestions.map((question, index) => ({...question, id: `functional-q${index + 1}`}))
-              : functionalQuestions,
+            questions: functionalQuestions,
           }}
           chatEnabled={isRecruitmentScenario}
           videoMode={isAdvanceScenario}

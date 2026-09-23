@@ -8,12 +8,17 @@
  */
 
 import { randomUUID } from "crypto";
+import { recruitmentInteractionReply, recruitmentQualityInstructions, recruitmentUtterance, rememberRecruitmentInteraction } from "../src/lib/voice/recruitment-quality";
+import { companyKnowledgeVersion, pinCompanyKnowledge } from "../src/lib/recruitment-company-knowledge";
+import { recruitmentRealtimeDecisionRequest, readRecruitmentRealtimeDecision, recruitmentRealtimeSpeechRequest } from "../src/lib/voice/recruitment-realtime-decision";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
+import { createAnswerCommitGate } from "./answer-commit-gate";
 import { createClient } from "@supabase/supabase-js";
 import {authorizeRelayContext} from './relay-session-access';
 import {socketOpenAttempt} from './socket-open-attempt';
 import { createLogger } from "../src/lib/logger";
+import { hasEightScoredAnswers, recruitmentSpeechIntent } from "../src/lib/voice/recruitment-turn-policy";
 import {
   isProgressiveOpeningOnly,
   mergeExpandedQuestionSet,
@@ -28,6 +33,7 @@ import {
 import {
     failClosedRecruitmentResumeBudget,
     isRecruitmentConversationControl,
+    hasRecruitmentAnswer,
     isUserSkipRequest,
     mergePersistedRecruitmentFollowUpBudget,
     readPersistedRecruitmentFollowUpBudget,
@@ -347,6 +353,7 @@ ${ctx.objective ? `- 目标: ${ctx.objective}` : ""}
 - 当前问题: 第${currentQ}个
 - 每题追问深度: 最多${maxFollowUps}次追问
 ${recruitmentVerificationRulesZh}
+${isOprunRecruitmentInterview ? recruitmentQualityInstructions(true) : ""}
 
 ## 问题列表
 ${questionList}
@@ -400,6 +407,7 @@ ${ctx.objective ? `- Objective: ${ctx.objective}` : ""}
 - Starting at: Question ${currentQ}
 - Follow-up depth: Up to ${maxFollowUps} follow-ups per question
 ${recruitmentVerificationRulesEn}
+${isOprunRecruitmentInterview ? recruitmentQualityInstructions(false) : ""}
 
 ## Questions
 ${questionList}
@@ -791,6 +799,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   let recruitmentParticipantMetadata: unknown = null;
   let recruitmentParticipantMetadataLoaded = false;
   let activeResponseQuestionIndex = currentQuestionIndex;
+  const recruitmentDecisions = new Map<string,{questionIndex:number;answer:string}>();
 
   async function persistRecruitmentFollowUpBudget(): Promise<boolean> {
     if (
@@ -975,7 +984,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       lastCommittedUserAnswerAt = Date.now();
       userCommittedWordsThisQuestion += text.trim().split(/\s+/).length;
       if (isOprunRecruitmentInterview) {
-        if (!isRecruitmentConversationControl(text) && !isUserSkipRequest(text)) {
+        if (hasRecruitmentAnswer(text)) {
           recruitmentAnswersByQuestion.set(
             currentQuestionIndex,
             (recruitmentAnswersByQuestion.get(currentQuestionIndex) || 0) + 1,
@@ -1022,6 +1031,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     if (browserWs.readyState === WebSocket.OPEN)
       browserWs.send(JSON.stringify(msg));
   }
+
+  const answerCommitGate = createAnswerCommitGate(send);
+  browserWs.on("close", () => answerCommitGate.close());
 
   function sendBinary(buf: Buffer) {
     if (browserWs.readyState === WebSocket.OPEN)
@@ -1184,6 +1196,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   function recruitmentMustAdvanceAfterAnswer(committedText: string): boolean {
     if (!isOprunRecruitmentInterview) return false;
     if (isRecruitmentConversationControl(committedText)) return false;
+    if (recruitmentSpeechIntent(committedText) === "answer_done") return true;
     const questionFollowUps = recruitmentFollowUpsByQuestion.get(currentQuestionIndex) || 0;
     if (currentQuestionIndex === 0) return true;
     if (currentQuestionIndex >= 1 && currentQuestionIndex <= 6) {
@@ -1199,6 +1212,21 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     reason: string,
     committedText: string,
   ): boolean {
+    const interaction = isOprunRecruitmentInterview ? recruitmentInteractionReply(committedText, ctx.title, new Date(),
+      recruitmentParticipantMetadataLoaded ? companyKnowledgeVersion(recruitmentParticipantMetadata) : "") : null;
+    if (interaction && oaiWs?.readyState === WebSocket.OPEN) {
+      recruitmentParticipantMetadata=rememberRecruitmentInteraction(recruitmentParticipantMetadata,
+        sortedQuestions[currentQuestionIndex]?.id||"",interaction);
+      void persistRecruitmentFollowUpBudget();
+      oaiWs.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: { type: "message", role: "system", content: [{ type: "input_text",
+          text: `[SYSTEM] Candidate question, not a scored follow-up. Say exactly the following approved response, without additional claims, questions or navigation calls: ${JSON.stringify(interaction.text)}`,
+        }] },
+      }));
+      requestAssistantResponse(`${reason}: candidate question`,recruitmentRealtimeSpeechRequest(interaction.text));
+      return false;
+    }
     if (isOprunRecruitmentInterview && isRecruitmentConversationControl(committedText)) {
       if (oaiWs && oaiWs.readyState === WebSocket.OPEN) {
         oaiWs.send(JSON.stringify({
@@ -1208,7 +1236,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
             role: "system",
             content: [{
               type: "input_text",
-              text: "[SYSTEM] This was only a greeting, audio check, or request to repeat—not an answer to the scored question. Reply briefly and naturally, then restate the current question. Do not advance and do not treat the restatement as a follow-up.",
+              text: "[SYSTEM] This is a candidate interaction or factual correction. Acknowledge it; correct a mistaken premise if needed. Only repeat wording when explicitly asked to repeat. Continue the unfinished topic; do not advance, provide a solution or add an evidence probe.",
             }],
           },
         }));
@@ -1218,6 +1246,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     }
     const metricEvidenceFollowUp = (
       isOprunRecruitmentInterview
+      && recruitmentSpeechIntent(committedText) !== "answer_done"
       && (recruitmentFollowUpsByQuestion.get(currentQuestionIndex) || 0) === 0
       && recruitmentInlineFollowUpsUsed < 2
     )
@@ -1235,11 +1264,16 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
           }],
         },
       }));
-      requestAssistantResponse(`${reason}: deterministic Q4 metric evidence check`);
+      requestAssistantResponse(`${reason}: deterministic Q4 metric evidence check`,recruitmentRealtimeSpeechRequest(metricEvidenceFollowUp));
       return false;
     }
     if (!recruitmentMustAdvanceAfterAnswer(committedText)) {
-      requestAssistantResponse(reason);
+      if(isOprunRecruitmentInterview && hasRecruitmentAnswer(committedText)) {
+        const id=randomUUID();
+        recruitmentDecisions.set(id,{questionIndex:currentQuestionIndex,answer:committedText});
+        requestAssistantResponse(reason,recruitmentRealtimeDecisionRequest(id,
+          sortedQuestions[currentQuestionIndex]?.text||"",committedText,isZh));
+      } else requestAssistantResponse(reason);
       return false;
     }
     log.info(
@@ -1254,6 +1288,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     text: string,
     hadFunctionCall: boolean,
   ) {
+    const latestUser = [...conversationHistory].reverse().find(entry => entry.role === "user");
+    if (latestUser && recruitmentUtterance(latestUser.text).kind !== "answer") return;
     if (
       !isOprunRecruitmentInterview
       || hadFunctionCall
@@ -1450,6 +1486,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     log.debug("VAD: user speech started");
     speechStopForwardGraceUntil = 0;
     queuedAssistantResponse = null;
+    recruitmentDecisions.clear();
     if (shouldSplitUserTurnOnSpeechStart()) {
       const splitText = bestAvailableTranscript();
       log.info(`Splitting pending user turn on new speech start: ${JSON.stringify(splitText)}`);
@@ -1547,12 +1584,23 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     }));
   }
 
+  function recruitmentCanComplete(): boolean {
+    return !isOprunRecruitmentInterview || hasEightScoredAnswers(
+      Array.from(recruitmentAnswersByQuestion).filter(([, count]) => count > 0).map(([index]) => index),
+    );
+  }
+
   function markInterviewComplete(reason: string) {
     if (!pendingInterviewComplete) return;
     pendingInterviewComplete = false;
     if (interviewCompleteTimer) {
       clearTimeout(interviewCompleteTimer);
       interviewCompleteTimer = null;
+    }
+    if (!recruitmentCanComplete()) {
+      interviewDone = false;
+      send({ type: "transition_rejected", reason: "scored_answers_pending", message: "我们还有问题没聊完，请继续回答当前题。" });
+      return;
     }
     send({ type: "interview_complete" });
     log.info(`Interview complete (${reason})`);
@@ -1787,7 +1835,13 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   // ── OpenAI event handler ──────────────────────────────────────────
 
   function attachOaiHandlers(ws: WebSocket) {
+    // Keep response.done behind an async tool/save acknowledgement. Browser
+    // ACKs use a separate socket handler and must not join this queue.
+    let messageWork = Promise.resolve();
     ws.on("message", (data: Buffer) => {
+      messageWork = messageWork.then(() => handleOaiMessage(data)).catch(log.error);
+    });
+    async function handleOaiMessage(data: Buffer) {
       if (ws !== oaiWs) return;
       lastOaiActivity = Date.now();
       try {
@@ -1881,6 +1935,12 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
               const userRequested = args.userRequested === true;
               log.info(`OpenAI called signal_question_change → Q${newIdx + 1}${userRequested ? " (user requested)" : ""}`);
 
+              if (isTransitioning) {
+                pendingFunctionCalls.push({ callId: msg.call_id, name: msg.name,
+                  args: "A transition is already pending. Do not change the question or repeat this tool call." });
+                break;
+              }
+
               if (
                 newIdx >= sortedQuestions.length
                 && ctx.interviewId
@@ -1933,6 +1993,27 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
                 break;
               }
 
+              if (newIdx >= sortedQuestions.length && !recruitmentCanComplete()) {
+                pendingFunctionCalls.push({
+                  callId: msg.call_id, name: msg.name,
+                  args: "Rejected: not all eight scored answers are present. Continue the current question. Do not say farewell.",
+                });
+                break;
+              }
+
+              if (isOprunRecruitmentInterview && newIdx > currentQuestionIndex) {
+                isTransitioning = true;
+                const saved = await answerCommitGate.request(currentQuestionIndex);
+                isTransitioning = false;
+                if (ws !== oaiWs) return;
+                if (!saved || interviewDone || browserWs.readyState !== WebSocket.OPEN) {
+                  send({ type: "transition_rejected", reason: "answer_save_failed",
+                    message: "刚才的回答暂未保存成功，请稍后再点下一题，你也可以继续补充。" });
+                  pendingFunctionCalls.push({ callId: msg.call_id, name: msg.name,
+                    args: "Answer storage not acknowledged. Stay on the current question; do not move on or say farewell." });
+                  break;
+                }
+              }
               clearPendingTransition();
 
               let result: string;
@@ -1992,6 +2073,27 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
 
           // ── Response complete ──
           case "response.done": {
+            if(msg.response?.metadata?.topic==="recruitment_evidence") {
+              const id=String(msg.response.metadata.decisionId||"");
+              const pending=recruitmentDecisions.get(id);
+              recruitmentDecisions.delete(id);
+              // A cancelled decision can finish after a newer response began.
+              // It must not clear that response's flag or drain its queue.
+              if(!pending) break;
+              responseInFlight=false;
+              const queued=takeQueuedAssistantResponse();
+              if(queued){
+                requestAssistantResponse(queued.reason,queued.response);
+                break;
+              }
+              const latest=[...conversationHistory].reverse().find(item=>item.role==="user");
+              if(pending.questionIndex!==currentQuestionIndex ||
+                (latest && latest.text!==pending.answer) || interviewDone || reconnecting) break;
+              const decision=readRecruitmentRealtimeDecision(msg.response,pending.answer,isZh);
+              if(decision.advance) await transitionToNextWhenReady("answer_complete");
+              else requestAssistantResponse("validated recruitment reply",recruitmentRealtimeSpeechRequest(decision.speech));
+              break;
+            }
             const respStatus = msg.response?.status || "unknown";
             const respOutputCount = msg.response?.output?.length ?? 0;
             const responseQuestionIndex = activeResponseQuestionIndex;
@@ -2016,6 +2118,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
             modelIsSpeaking = false;
             const inferredFarewell =
               !pendingInterviewComplete &&
+              recruitmentCanComplete() &&
               !isProgressiveOpeningOnly(sortedQuestions) &&
               currentQuestionIndex >= sortedQuestions.length - 1 &&
               !!capturedModelText &&
@@ -2119,10 +2222,11 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       } catch (err) {
         log.error("Error parsing OpenAI message:", err);
       }
-    });
+    }
 
     ws.on("close", () => {
       if (ws !== oaiWs) return;
+      answerCommitGate.close();
       const sessionDuration = ((Date.now() - oaiSessionStart) / 1000).toFixed(1);
       log.info(`OpenAI WS closed (session lasted ${sessionDuration}s)`);
       oaiWs = null;
@@ -2337,7 +2441,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       .eq("id", ctx.sessionId)
       .single();
     if (!sessionError) {
-      recruitmentParticipantMetadata = sessionData?.participantMetadata ?? null;
+      recruitmentParticipantMetadata = pinCompanyKnowledge(sessionData?.participantMetadata);
       recruitmentParticipantMetadataLoaded = true;
     } else {
       log.warn(`Recruitment follow-up metadata hydration failed: ${sessionError.message}`);
@@ -2381,6 +2485,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
     );
     if (
       !persistedBudget
+      || !(sessionData?.participantMetadata as Record<string,unknown>|null)?.recruitmentCompanyKnowledgeVersion
       || persistedBudget.inlineFollowUpsUsed < recruitmentInlineFollowUpsUsed
       || persistedBudget.finalFollowUpsUsed < recruitmentFinalFollowUpsUsed
     ) {
@@ -2432,7 +2537,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
 
   // ── Handle Browser → OpenAI ───────────────────────────────────────
 
-  function requestTransition(
+  async function requestTransition(
     targetIdx: number,
     directionLabel: string,
     reason: "button" | "user_request" | "answer_complete" = "button",
@@ -2453,7 +2558,21 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       rejectManualAdvance("answer_required", requestId);
       return false;
     }
+    if (isOprunRecruitmentInterview && targetIdx > currentQuestionIndex) {
+      isTransitioning = true;
+      const saved = await answerCommitGate.request(currentQuestionIndex);
+      isTransitioning = false;
+      if (!saved || interviewDone || browserWs.readyState !== WebSocket.OPEN) {
+        send({ type: "transition_rejected", reason: "answer_save_failed", requestId,
+          message: "刚才的回答暂未保存成功，请稍后再点下一题，你也可以继续补充。" });
+        return false;
+      }
+    }
     pendingProgressiveTransition = null;
+    if (targetIdx >= sortedQuestions.length && !isProgressiveOpeningOnly(sortedQuestions) && !recruitmentCanComplete()) {
+      rejectManualAdvance("answer_required", requestId);
+      return false;
+    }
     clearPendingTransition();
     clearQuestionPrompt();
     cancelOngoingResponse();
@@ -2599,7 +2718,8 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       return true;
     }
 
-    if (isFastNextRequest(userText) || isUserSkipRequest(userText)) {
+    if ((isFastNextRequest(userText) || isUserSkipRequest(userText, { isRecruitmentInterview: isOprunRecruitmentInterview }))
+      && (!isOprunRecruitmentInterview || !hasRecruitmentAnswer(userText))) {
       if (
         isOprunRecruitmentInterview
         && currentQuestionIndex < 8
@@ -2625,6 +2745,11 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   browserWs.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
+
+      if (msg.type === "answer_commit_ack") {
+        answerCommitGate.acknowledge(msg);
+        return;
+      }
 
       if (msg.type === "question_set_update") {
         if (
@@ -2756,6 +2881,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
           if (text) {
             lastUserInput = Date.now();
             queuedAssistantResponse = null;
+            recruitmentDecisions.clear();
             pushHistory("user", text);
           if (tryHandleExplicitUserNavigation(text)) {
             return;

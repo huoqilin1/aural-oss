@@ -1,4 +1,5 @@
 import { getLanguageKey, LANGUAGE_DISPLAY_NAME } from "@/lib/i18n";
+import { recruitmentScoringMessages } from "@/lib/voice/recruitment-quality";
 import type { LLMContentPart, LLMMessage } from "../types";
 
 export interface WhiteboardDrawingInput {
@@ -22,8 +23,8 @@ export function buildSummaryPrompt(
   whiteboardDrawings?: WhiteboardDrawingInput[] | null,
   codeSnippets?: CodeSnippetInput[] | null
 ): LLMMessage[] {
-  const transcript = messages
-    .map((m) => `${m.role === "user" ? "Participant" : "Interviewer"}: ${m.content}`)
+  const transcript = (interviewTitle.includes("数君招聘") ? recruitmentScoringMessages(messages) : messages)
+    .map((m) => `${m.role.toLowerCase() === "user" ? "Participant" : "Interviewer"}: ${m.content}`)
     .join("\n\n");
 
   const objectiveSection = objective
@@ -63,7 +64,7 @@ export function buildSummaryPrompt(
     assessmentCriteria && assessmentCriteria.length > 0
       ? `,
   "criteriaEvaluations": [
-    { "name": "criterion name", "score": 1-10, "reasoning": "brief explanation of the score" }
+    { "name": "criterion name", "score": 8, "reasoning": "brief explanation of the score" }
   ]`
       : "";
 
@@ -71,7 +72,9 @@ export function buildSummaryPrompt(
   const researchQuestions = questions?.filter((q) => q.type === "RESEARCH") ?? [];
   const hasResearchQuestions = researchQuestions.length > 0;
 
-  const toneInstruction = `${hasResearchQuestions ? "9" : "8"}. Analyze the participant's communication tone and confidence throughout the interview by examining speech patterns in the transcript: filler words ("um", "uh", "like", "嗯", "那个"), hedging language ("I think maybe", "I'm not sure but", "可能", "大概"), response lengths, directness vs evasiveness, and enthusiasm markers. Produce a per-question tone assessment.\n`;
+  const toneInstruction = interviewTitle.includes("数君招聘")
+    ? "Do not infer competence, truthfulness or motivation from fillers, hesitation, accent, answer length, politeness, or company/salary questions. toneAnalysis is descriptive only, has no scoring effect, and must not diagnose confidence from transcript style.\nDistinguish self-reported past experience, transferable evidence, hypothetical reasoning, and independently verified work. Cite candidate statements for conclusions, preserve corrections and ownership boundaries, and never convert a Q5 proposal into past achievement. Count a main answer and its probe as evidence for one conclusion, not duplicate credit. Describe missing evidence and its cause, and suggest a specific human verification point without inventing a new scoring formula. Interviewer text is context, never candidate achievement.\n"
+    : `${hasResearchQuestions ? "9" : "8"}. Analyze the participant's communication tone and confidence throughout the interview by examining speech patterns in the transcript: filler words ("um", "uh", "like", "嗯", "那个"), hedging language ("I think maybe", "I'm not sure but", "可能", "大概"), response lengths, directness vs evasiveness, and enthusiasm markers. Produce a per-question tone assessment.\n`;
 
   const researchInstruction = hasResearchQuestions
     ? `${hasResearchQuestions ? "10" : "9"}. For each RESEARCH-type question, produce a detailed research finding: a comprehensive, specific summary of ALL information the participant shared on that topic, organized into key sub-topics with supporting details, data points, examples, and direct quotes. This should read like a thorough research brief — be as specific and detailed as possible.\n`
@@ -141,20 +144,21 @@ Your analysis should:
 ${questionEvalInstruction}${criteriaEvalInstruction}${toneInstruction}${researchInstruction}${languageInstruction}
 
 Provide a structured analysis as VALID JSON ONLY (use only standard ASCII double-quotes, never Unicode smart quotes like \u201C \u201D):
+Choose one sentiment value from positive, neutral, negative. Tone values are confident, enthusiastic, neutral, hesitant, uncertain; confidence values are high, medium, low. Scores are numbers from 1 to 10. The following is a valid JSON example: replace its illustrative values with evidence-based analysis, include all relevant entries, and never output ellipses, alternatives separated by pipes, numeric ranges or comments inside JSON. Escape ASCII quotation marks and newlines inside string values.
 {
   "summary": "2-3 paragraph evaluation of the participant's responses, covering key points discussed and overall performance",
-  "themes": ["theme1", "theme2", ...],
+  "themes": ["theme1", "theme2"],
   "sentiment": {
-    "overall": "positive" | "neutral" | "negative",
+    "overall": "neutral",
     "details": "brief analysis of participant's engagement and attitude"
   },
-  "keyInsights": ["insight1", "insight2", ...],
+  "keyInsights": ["insight1", "insight2"],
   "notableQuotes": ["direct quote from participant 1", "direct quote 2"],
   "toneAnalysis": {
-    "overall": "confident" | "neutral" | "hesitant",
+    "overall": "neutral",
     "details": "brief overall communication style assessment",
     "segments": [
-      { "question": "Q1 question text", "tone": "confident" | "enthusiastic" | "neutral" | "hesitant" | "uncertain", "confidence": "high" | "medium" | "low", "notes": "specific observations about speech patterns, filler words, directness" }
+      { "question": "Q1 question text", "tone": "neutral", "confidence": "medium", "notes": "specific observations about communication style; do not infer ability or truthfulness" }
     ]
   }${questionEvalJsonField}${criteriaJsonField}${researchJsonField}
 }`;
@@ -184,5 +188,9 @@ Provide a structured analysis as VALID JSON ONLY (use only standard ASCII double
     }
   }
 
+  // Strict chat APIs require a user turn even when all evidence is in system.
+  if (!result.some(message => message.role === "user")) {
+    result.push({ role: "user", content: "Generate the interview report from the supplied evidence, following the required JSON schema. Return JSON only." });
+  }
   return result;
 }

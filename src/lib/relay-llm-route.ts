@@ -1,4 +1,4 @@
-export const RELAY_LLM_PROVIDER_IDS = ["deepseek", "zhipu", "kimi"] as const;
+export const RELAY_LLM_PROVIDER_IDS = ["zhipu", "kimi", "deepseek", "doubao"] as const;
 
 export type RelayLlmProviderId = (typeof RELAY_LLM_PROVIDER_IDS)[number];
 
@@ -17,6 +17,7 @@ export const RELAY_LLM_PROVIDER_SPECS: Record<
   RelayLlmProviderId,
   RelayLlmProviderSpec
 > = {
+  doubao: { id: "doubao", label: "豆包", relayModel: "DOUBAO_TEXT_MODEL" },
   deepseek: {
     id: "deepseek",
     label: "DeepSeek",
@@ -35,9 +36,25 @@ export const RELAY_LLM_PROVIDER_SPECS: Record<
 };
 
 export const DEFAULT_RELAY_LLM_ROUTE: RelayLlmRoute = {
-  primary: "deepseek",
-  fallbacks: ["zhipu", "kimi"],
+  primary: "zhipu",
+  fallbacks: ["kimi", "deepseek", "doubao"],
 };
+
+export function recruitGlmOnlyEnabled(): boolean {
+  return process.env.RECRUIT_GLM_ONLY?.trim() === "1";
+}
+
+export function recruitTestModelRoutingEnabled(): boolean {
+  return !recruitGlmOnlyEnabled() && process.env.RECRUIT_TEST_MODEL_ROUTING?.trim() === "1";
+}
+
+export function zhipuBaseUrl(): string {
+  const base = (process.env.ZHIPU_BASE_URL ?? "https://open.bigmodel.cn/api/paas/v4").trim().replace(/\/+$/, "");
+  if (recruitGlmOnlyEnabled() && base !== "https://open.bigmodel.cn/api/coding/paas/v4") {
+    throw new Error("GLM-only mode requires the explicit Coding endpoint; standard API fallback is disabled");
+  }
+  return base;
+}
 
 export function isRelayLlmProviderId(
   value: unknown,
@@ -50,9 +67,10 @@ export function parseRelayLlmRoute(value: unknown): RelayLlmRoute | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   if (!isRelayLlmProviderId(record.primary)) return null;
-  if (!Array.isArray(record.fallbacks) || record.fallbacks.length > 2) {
+  if (!Array.isArray(record.fallbacks) || ![0, 2, 3].includes(record.fallbacks.length)) {
     return null;
   }
+  if (record.fallbacks.length === 0 && record.primary !== "zhipu") return null;
   if (!record.fallbacks.every(isRelayLlmProviderId)) return null;
   const ordered = [record.primary, ...record.fallbacks];
   if (new Set(ordered).size !== ordered.length) return null;
@@ -71,6 +89,8 @@ export function relayLlmRouteOrder(
 export function relayLlmProviderConfigured(
   provider: RelayLlmProviderId,
 ): boolean {
+  if (provider === "doubao") return Boolean((process.env.DOUBAO_TEXT_API_KEY?.trim() || process.env.DOUBAO_LLM_API_KEY?.trim()) &&
+    (process.env.DOUBAO_TEXT_MODEL?.trim() || process.env.DOUBAO_LLM_MODEL?.trim()));
   if (provider === "deepseek") return Boolean(process.env.DEEPSEEK_API_KEY?.trim());
   if (provider === "zhipu") {
     return Boolean(
@@ -78,4 +98,9 @@ export function relayLlmProviderConfigured(
     );
   }
   return Boolean(process.env.KIMI_API_KEY?.trim());
+}
+
+export function relayLlmProviderModel(provider: RelayLlmProviderId): string {
+  if (provider === "doubao") return process.env.DOUBAO_TEXT_MODEL?.trim() || process.env.DOUBAO_LLM_MODEL?.trim() || "未配置";
+  return RELAY_LLM_PROVIDER_SPECS[provider].relayModel;
 }
