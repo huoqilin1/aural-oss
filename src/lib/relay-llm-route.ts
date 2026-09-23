@@ -50,12 +50,12 @@ export function parseRelayLlmRoute(value: unknown): RelayLlmRoute | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
   if (!isRelayLlmProviderId(record.primary)) return null;
-  if (!Array.isArray(record.fallbacks) || record.fallbacks.length !== 2) {
+  if (!Array.isArray(record.fallbacks) || record.fallbacks.length > 2) {
     return null;
   }
   if (!record.fallbacks.every(isRelayLlmProviderId)) return null;
   const ordered = [record.primary, ...record.fallbacks];
-  if (new Set(ordered).size !== RELAY_LLM_PROVIDER_IDS.length) return null;
+  if (new Set(ordered).size !== ordered.length) return null;
   return {
     primary: record.primary,
     fallbacks: [...record.fallbacks] as RelayLlmProviderId[],

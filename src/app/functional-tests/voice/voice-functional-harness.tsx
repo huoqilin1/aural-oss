@@ -23,6 +23,8 @@ type FunctionalScenarioId =
   | "advance-followup-guard"
   | "advance-input-readiness"
   | "advance-late-asr"
+  | "advance-answer-revision"
+  | "advance-repeated-answer"
   | "recruitment-entry"
   | "recruitment-auto-retry"
   | "recruitment-incomplete"
@@ -41,6 +43,28 @@ declare global {
 }
 
 const functionalScenarios: Record<FunctionalScenarioId, FunctionalScenario> = {
+  "advance-repeated-answer": {
+    "/ws/voice": {events: [
+      {type:"ready",delay:20},
+      {type:"json",delay:100,message:{type:"asr_ended",text:"我没有做过。",questionIndex:0}},
+      {type:"json",delay:250,message:{type:"question_change",questionIndex:1,totalQuestions:2,auto:true}},
+      {type:"json",delay:450,message:{type:"asr_ended",text:"我没有做过。",questionIndex:1}},
+      {type:"json",delay:650,message:{type:"question_change",questionIndex:0,totalQuestions:2,auto:true}},
+    ]},
+    "/ws/openai-voice": {events:[{type:"close",delay:30}]},
+  },
+  "advance-answer-revision": {
+    "/ws/voice": {events: [
+      {type: "ready", delay: 20},
+      {type: "json", delay: 100, message: {type: "asr_ended", text: "效率提高15%。", questionIndex: 0}},
+      {type: "json", delay: 150, message: {type: "asr_revision", text: "效率提高5%，不是15%。", questionIndex: 0, questionId: "functional-q1", messageId:"00000000-0000-4000-8000-000000000001", timestamp:"2026-09-05T01:02:00Z"}},
+      {type: "json", delay: 180, message: {type: "asr_revision", text: "效率提高5%，不是15%。", questionIndex: 0, questionId: "functional-q1"}},
+      {type: "json", delay: 200, message: {type: "asr_revision", text: "不应保存的错题修订", questionIndex: 0, questionId: "wrong-question"}},
+      {type: "json", delay: 300, message: {type: "question_change", questionIndex: 1, totalQuestions: 2, auto: true}},
+      {type: "json", delay: 350, message: {type: "input_ready"}},
+    ]},
+    "/ws/openai-voice": {events: [{type: "close", delay: 30}]},
+  },
   default: {
     "/ws/voice": {
       events: [{ type: "ready", delay: 30 }],
@@ -397,7 +421,21 @@ function installFunctionalRelayMocks(
       canvas.width = 640;
       canvas.height = 480;
       functionalVideoCanvases.push(canvas);
-      tracks.push(...canvas.captureStream(1).getVideoTracks());
+      const videoTracks = canvas.captureStream(4).getVideoTracks();
+      tracks.push(...videoTracks);
+      // A blank, never-painted canvas creates a track but may never deliver
+      // a frame. Produce synthetic frames so screenshot persistence is tested.
+      const paint = () => {
+        const drawing = canvas.getContext('2d');
+        if (!drawing) return;
+        drawing.fillStyle = '#234567';
+        drawing.fillRect(0,0,canvas.width,canvas.height);
+      };
+      paint();
+      const timer = setInterval(() => {
+        if (videoTracks.every(track => track.readyState === 'ended')) clearInterval(timer);
+        else paint();
+      },250);
     }
     return new MediaStream(tracks);
   };
@@ -589,6 +627,7 @@ export function VoiceFunctionalHarness({
   scenario: string;
 }) {
   const [parentCompleted, setParentCompleted] = useState(false);
+  const [harnessSessionId,setHarnessSessionId] = useState('functional-session');
   const [mocksReady, setMocksReady] = useState(false);
   const isRecruitmentScenario = scenario.startsWith("recruitment-");
   const isAdvanceScenario = scenario.startsWith("advance-") || isRecruitmentScenario;
@@ -651,6 +690,9 @@ export function VoiceFunctionalHarness({
 
   return (
     <div className="relative min-h-screen bg-background">
+      {scenario === 'farewell-complete' && <button data-testid="switch-synthetic-session" onClick={() => {
+        setHarnessSessionId('functional-session-next'); setParentCompleted(false);
+      }}>切换合成面试</button>}
       <div
         data-testid="parent-complete"
         className="sr-only"
@@ -679,7 +721,7 @@ export function VoiceFunctionalHarness({
         />
       ) : mocksReady && (
         <VoiceInterface
-          sessionId="functional-session"
+          sessionId={harnessSessionId}
           interviewId="functional-interview"
           interviewTitle={isAdvanceScenario ? "数君招聘 · Functional Voice Interview" : "Functional Voice Interview"}
           aiName="TestInterviewer"
@@ -692,7 +734,9 @@ export function VoiceFunctionalHarness({
             aiTone: "Professional",
             language,
             followUpDepth: "Moderate",
-            questions: functionalQuestions,
+            questions: ['advance-answer-revision', 'advance-repeated-answer'].includes(scenario)
+              ? functionalQuestions.map((question, index) => ({...question, id: `functional-q${index + 1}`}))
+              : functionalQuestions,
           }}
           chatEnabled={isRecruitmentScenario}
           videoMode={isAdvanceScenario}

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import {fetchRecordingDownload} from '@/lib/voice/recording-download';
 
 export async function GET(req: NextRequest) {
   const url = req.nextUrl.searchParams.get("url");
@@ -9,7 +10,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const upstream = await fetch(url);
+    const upstream = await fetchRecordingDownload(url,[process.env.SUPABASE_URL,process.env.NEXT_PUBLIC_SUPABASE_URL]);
     if (!upstream.ok) {
       return NextResponse.json({ error: "Failed to fetch file" }, { status: upstream.status });
     }

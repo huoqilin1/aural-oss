@@ -1,4 +1,5 @@
 "use client";
+import {candidateFetch as fetch,invitationHeaders} from '@/lib/voice/candidate-fetch';
 
 import { createLogger } from "@/lib/logger";
 import {
@@ -18,7 +19,10 @@ import {
   PLAYBACK_SAMPLE_RATE,
   shouldFlushPlaybackQueue,
 } from "@/lib/voice/playback-jitter-buffer";
-import { requeueFailedProgressMessages } from "@/lib/voice/progress-save";
+import { requeueFailedProgressMessages, waitForProgressSaves, SingleFlightSave } from "@/lib/voice/progress-save";
+import { answerRevisionMessage } from "@/lib/voice/answer-revision";
+import {prepareDelivery, removeAcknowledged} from '@/lib/voice/message-delivery';
+import {readDeliveryOutbox, writeDeliveryOutbox} from '@/lib/voice/delivery-outbox';
 import { LiveQuestionIdLookup } from "@/lib/voice/dynamic-question-sync";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -89,6 +93,9 @@ interface TrackedMessage {
   content: string;
   questionId?: string;
   source?: "voice" | "chat";
+  /** Browser-observed turn time, retained across deferred saves and retries. */
+  timestamp?: string;
+  messageId?: string;
 }
 
 /**
@@ -153,7 +160,34 @@ export function useVoice({
   );
   const isListeningRef = useRef(false);
   const trackedMessagesRef = useRef<TrackedMessage[]>([]);
+  const lastAnswerRevisionRef = useRef(new Map<string, string>());
   const progressSaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const completionSaveRef = useRef(new SingleFlightSave<boolean>());
+  const unacknowledgedBatchesRef = useRef(new Map<string, TrackedMessage>());
+  const restoredOutboxSessionRef = useRef<string | null>(null);
+  const outboxWarningShownRef = useRef(false);
+  const persistPendingMessages = useCallback(() => {
+    try {
+      writeDeliveryOutbox(window.sessionStorage, sessionId, [
+        ...Array.from(unacknowledgedBatchesRef.current.values()), ...trackedMessagesRef.current,
+      ]);
+    } catch {
+      if (!outboxWarningShownRef.current) {
+        outboxWarningShownRef.current=true;
+        onError?.('浏览器暂时无法保留未同步记录，请保持页面打开，等待保存成功。');
+      }
+    }
+  }, [sessionId, onError]);
+  useEffect(() => {
+    if (restoredOutboxSessionRef.current === sessionId) return;
+    restoredOutboxSessionRef.current=sessionId;
+    try {
+      const retained=readDeliveryOutbox(window.sessionStorage,sessionId) as TrackedMessage[];
+      trackedMessagesRef.current=requeueFailedProgressMessages(retained,trackedMessagesRef.current);
+    } catch {
+      onError?.('上次未同步记录无法读取，请保留页面并联系面试支持。');
+    }
+  }, [sessionId, onError]);
   const micHoldUntilRef = useRef(0);
   const bargeInFramesRef = useRef(0);
 
@@ -162,7 +196,7 @@ export function useVoice({
 
   const onInterruptRef = useRef(onInterrupt);
   useEffect(() => { onInterruptRef.current = onInterrupt; }, [onInterrupt]);
-  const lastFinalUserTranscriptRef = useRef<{ text: string; at: number } | null>(null);
+  const lastFinalUserTranscriptRef = useRef<{ text: string; at: number; questionIndex: number } | null>(null);
 
   // Buffers for accumulating streaming chunks
   const asrBufferRef = useRef<string>("");
@@ -486,8 +520,7 @@ export function useVoice({
         }
       }
 
-      // Reset tracked messages
-      trackedMessagesRef.current = [];
+      // A reconnect must retain messages whose save has not been acknowledged.
 
       relayConnectorRef.current?.close();
 
@@ -511,6 +544,7 @@ export function useVoice({
           type: "init",
           context: {
             ...interviewContext,
+            inviteToken: invitationHeaders()['x-interview-invite'],
             startQuestionIndex: currentQuestionIndexRef.current,
           },
         }),
@@ -580,6 +614,7 @@ export function useVoice({
       const pendingAsrText = asrBufferRef.current.trim();
       if (pendingAsrText) {
         trackedMessagesRef.current.push({
+          timestamp: new Date().toISOString(),
           role: "user",
           content: pendingAsrText,
           questionId: questionIdAt(pendingQuestionIndex),
@@ -587,8 +622,10 @@ export function useVoice({
         asrBufferRef.current = "";
       }
 
-      const messages = [...trackedMessagesRef.current];
+      const messages = prepareDelivery(trackedMessagesRef.current);
       trackedMessagesRef.current = []; // clear so next question starts fresh
+      for (const message of messages) unacknowledgedBatchesRef.current.set(message.messageId!,message);
+      persistPendingMessages();
 
       if (messages.length === 0 && typeof currentQuestionIndex !== "number") return;
 
@@ -612,12 +649,15 @@ export function useVoice({
             trackedMessagesRef.current,
           );
           log.error("Failed to save progress; messages requeued:", err);
+        } finally {
+          for (const message of messages) unacknowledgedBatchesRef.current.delete(message.messageId!);
+          persistPendingMessages();
         }
       });
       progressSaveChainRef.current = operation;
       await operation;
     },
-    [questionIdAt, sessionId]
+    [questionIdAt, sessionId, persistPendingMessages]
   );
 
   /** Handle JSON messages from relay */
@@ -675,6 +715,17 @@ export function useVoice({
           break;
         }
 
+        case "asr_revision": {
+          const revision = answerRevisionMessage(msg, questionIdAt);
+          if (!revision || lastAnswerRevisionRef.current.get(revision.questionId) === revision.content) break;
+          lastAnswerRevisionRef.current.set(revision.questionId, revision.content);
+          trackedMessagesRef.current.push({...revision, timestamp: revision.timestamp ?? new Date().toISOString()});
+          if (Number(msg.questionIndex) === currentQuestionIndexRef.current) {
+            asrBufferRef.current = "";
+          }
+          break;
+        }
+
         case "asr_ended": {
           clearAsrProcessingTimer();
           // 打字(chat)已由 sendTextMessage 本地落库;中转又会回传一条 asr_ended,这里跳过,避免同一句存两遍(否则防作弊会把重复误判成背稿)
@@ -704,6 +755,7 @@ export function useVoice({
             const lastFinal = lastFinalUserTranscriptRef.current;
             const isDuplicateFinal =
               !!lastFinal &&
+              lastFinal.questionIndex === eventQuestionIndex &&
               lastFinal.text === normalized &&
               Date.now() - lastFinal.at < 15_000;
 
@@ -711,20 +763,22 @@ export function useVoice({
               duplicateSkipped = true;
               log.debug(`Skipping duplicate USER final: "${normalized.slice(0, 60)}..."`);
             } else {
-              lastFinalUserTranscriptRef.current = { text: normalized, at: Date.now() };
+              lastFinalUserTranscriptRef.current = { text: normalized, at: Date.now(), questionIndex: eventQuestionIndex };
               onTranscript?.(finalText, true);
               const tracked = trackedMessagesRef.current;
               const lastTracked = tracked[tracked.length - 1];
               const lastQId = questionIdAt(eventQuestionIndex);
-              if (lastTracked?.role === "user" && lastTracked.questionId === lastQId) {
+              if (lastTracked?.role === "user" && lastTracked.questionId === lastQId && !lastTracked.messageId) {
                 // 王总 2026-09-03：同一题内相邻 USER 段(中间没有 AI 行)合并成一条完整发言再落库，
                 // 实录不碎、防作弊不把停顿切段误判成重复背稿。
                 lastTracked.content = `${lastTracked.content} ${finalText}`.trim();
+                lastTracked.timestamp = new Date().toISOString();
                 log.debug(
                   `Tracked USER (merged): "${lastTracked.content.slice(0, 80)}..."`
                 );
               } else {
                 tracked.push({
+                  timestamp: new Date().toISOString(),
                   role: "user",
                   content: finalText,
                   questionId: lastQId,
@@ -822,6 +876,7 @@ export function useVoice({
               lastOnAIResponseRef.current = fullResponse;
               onAIResponse?.(fullResponse);
               trackedMessagesRef.current.push({
+                timestamp: new Date().toISOString(),
                 role: "assistant",
                 content: fullResponse,
                 questionId: questionIdAt(eventQuestionIndex),
@@ -842,6 +897,7 @@ export function useVoice({
             lastOnAIResponseRef.current = text;
             onAIResponse?.(text);
             trackedMessagesRef.current.push({
+              timestamp: new Date().toISOString(),
               role: "assistant",
               content: text,
               questionId: questionIdAt(currentQuestionIndexRef.current),
@@ -1020,6 +1076,9 @@ export function useVoice({
           }
           break;
       }
+      if (['asr_revision','asr_ended','chat_ended','tts_ended','session_reconnecting'].includes(msg.type)) {
+        persistPendingMessages();
+      }
     },
     [
       clearAsrProcessingTimer,
@@ -1030,6 +1089,7 @@ export function useVoice({
       onQuestionChange,
       onTranscript,
       saveProgress,
+      persistPendingMessages,
       startAsrProcessingTimer,
     ]
   );
@@ -1170,14 +1230,16 @@ export function useVoice({
       });
       if (!delivered) return false;
       trackedMessagesRef.current.push({
+        timestamp: new Date().toISOString(),
         role: "user",
         content: trimmed,
         questionId: questionIdAt(currentQuestionIndexRef.current),
         source: "chat",
       });
+      persistPendingMessages();
       return true;
     },
-    [questionIdAt],
+    [questionIdAt, persistPendingMessages],
   );
 
   /** Send code editor content to the relay for agent context */
@@ -1197,12 +1259,13 @@ export function useVoice({
     // A question transition saves in the background. Wait for all queued
     // progress saves so completion cannot race ahead of durable answers.
     // Failed batches are requeued by saveProgress and included below.
-    await progressSaveChainRef.current;
+    await waitForProgressSaves(() => progressSaveChainRef.current);
 
     // Flush any pending buffers before saving
     const pendingAsrText = asrBufferRef.current.trim();
     if (pendingAsrText) {
       trackedMessagesRef.current.push({
+        timestamp: new Date().toISOString(),
         role: "user",
         content: pendingAsrText,
         questionId: questionIdAt(currentQuestionIndexRef.current),
@@ -1212,6 +1275,7 @@ export function useVoice({
     const pendingChatText = chatBufferRef.current.trim();
     if (pendingChatText) {
       trackedMessagesRef.current.push({
+        timestamp: new Date().toISOString(),
         role: "assistant",
         content: pendingChatText,
         questionId: questionIdAt(currentQuestionIndexRef.current),
@@ -1219,7 +1283,8 @@ export function useVoice({
       chatBufferRef.current = "";
     }
 
-    const messages = trackedMessagesRef.current;
+    const messages = prepareDelivery(trackedMessagesRef.current);
+    persistPendingMessages();
     if (messages.length === 0 && !sessionId) return;
 
     log.info(
@@ -1239,11 +1304,15 @@ export function useVoice({
       const body = await response.json().catch(() => ({})) as { error?: string };
       throw new Error(body.error || `Voice completion failed with HTTP ${response.status}`);
     }
-    trackedMessagesRef.current = [];
-  }, [questionIdAt, sessionId]);
+    trackedMessagesRef.current = removeAcknowledged(trackedMessagesRef.current, messages);
+    persistPendingMessages();
+    if (trackedMessagesRef.current.length > 0) {
+      throw new Error('仍有新到达的回答待保存，请再次完成保存');
+    }
+  }, [questionIdAt, sessionId, persistPendingMessages]);
 
   /** Disconnect, save messages, and clean up everything */
-  const disconnect = useCallback(async () => {
+  const disconnect = useCallback(() => completionSaveRef.current.run(async () => {
     setState((s) => ({ ...s, isSaving: true }));
     try {
       await saveAndComplete();
@@ -1256,7 +1325,7 @@ export function useVoice({
       setState((s) => ({ ...s, isSaving: false }));
       return false;
     }
-  }, [saveAndComplete, cleanup, onError]);
+  }), [saveAndComplete, cleanup, onError]);
 
   return {
     ...state,

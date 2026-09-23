@@ -7,6 +7,9 @@
  */
 
 import { GoogleGenAI } from "@google/genai";
+import { getHrTextPolicy } from './hr-model-control';
+import { ensureHrUsageReady, queueHrUsage } from './hr-model-usage-outbox';
+import {randomUUID} from 'node:crypto';
 import { createLogger } from "../src/lib/logger";
 import {
   type RelayLlmProviderId,
@@ -49,6 +52,7 @@ interface RelayLlmUsage {
 }
 
 interface RelayLlmEndpoint {
+  provider?: string;
   model: string;
   temperature: number;
   apiKey: string;
@@ -155,6 +159,7 @@ function providerEndpoint(
   if (provider === "deepseek") {
     const apiKey = process.env.DEEPSEEK_API_KEY?.trim();
     return apiKey ? {
+      provider,
       model: deepseekRelayModel(),
       temperature,
       apiKey,
@@ -165,6 +170,7 @@ function providerEndpoint(
   if (provider === "zhipu") {
     const apiKey = process.env.ZHIPU_API_KEY?.trim() || process.env.GLM_API_KEY?.trim();
     return apiKey ? {
+      provider,
       model: zhipuRelayModel(),
       temperature,
       apiKey,
@@ -174,6 +180,7 @@ function providerEndpoint(
   }
   const apiKey = process.env.KIMI_API_KEY?.trim();
   return apiKey ? {
+    provider,
     model: kimiRelayModel(),
     temperature,
     apiKey,
@@ -390,11 +397,17 @@ export async function callRelayLLM(
   meta?: RelayLlmCallMeta,
   route?: RelayLlmRoute,
 ): Promise<string> {
-  const chain = getEndpointChain(route);
+  const policy = await getHrTextPolicy();
+  if(policy)await ensureHrUsageReady();
+  const chain = policy ? relayLlmRouteOrder(policy.route).flatMap(provider => {
+    const endpoint=providerEndpoint(provider,parseTemperature());
+    return endpoint ? [{...endpoint,model:policy.models[provider]}] : [];
+  }) : getEndpointChain(route);
   logConfig(chain);
 
   const configured = chain.filter((e) => e.apiKey);
   if (configured.length === 0) {
+    if(policy)throw new Error('HR selected models have no configured credentials');
     return "";
   }
 
@@ -407,12 +420,19 @@ export async function callRelayLLM(
   const candidates = available.length > 0 ? available : configured;
 
   const startMs = Date.now();
+  const callId=randomUUID();
   let lastError: unknown;
 
   for (let i = 0; i < candidates.length; i++) {
     const endpoint = candidates[i]!;
+    const startedAt=new Date().toISOString();
+    let providerSucceeded=false;
     try {
       const { text, usage } = await callEndpoint(endpoint, prompt, maxTokens);
+      providerSucceeded=true;
+      if(policy)await queueHrUsage({call_id:callId,provider:endpoint.provider ?? 'unknown',model:endpoint.model,
+        scene:`aural.${meta?.stage ?? 'unclassified'}`,started_at:startedAt,status:text.trim()?'success':'empty',
+        usage:usage?{prompt_tokens:usage.promptTokens,completion_tokens:usage.completionTokens}:null});
       endpointCooldowns.delete(endpointKey(endpoint));
       const latencyMs = Date.now() - startMs;
       // Token 分类账：每笔调用一行，stage 区分环节（turn/summarize/generate…），
@@ -425,6 +445,9 @@ export async function callRelayLLM(
       );
       return text;
     } catch (err) {
+      if(providerSucceeded)throw new Error('Model response received but usage could not be persisted');
+      if(policy)await queueHrUsage({call_id:callId,provider:endpoint.provider ?? 'unknown',model:endpoint.model,
+        scene:`aural.${meta?.stage ?? 'unclassified'}`,started_at:startedAt,status:'failed',usage:null});
       lastError = err;
       endpointCooldowns.set(
         endpointKey(endpoint),
@@ -449,7 +472,8 @@ export async function assertRelayLlmReady(options?: {
   route?: RelayLlmRoute;
 }): Promise<void> {
   const now = Date.now();
-  const routeKey = options?.route
+  const policy=await getHrTextPolicy();
+  const routeKey = policy ? JSON.stringify(policy) : options?.route
     ? relayLlmRouteOrder(options.route).join(",")
     : "default";
   if (

@@ -267,6 +267,8 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
   private destroyed = false;
   private failoverPromise: Promise<RelayTarget> | null = null;
   private attemptSerial = 0;
+  private lifecycleSerial = 0;
+  private cancelPendingAttempt: (() => void) | null = null;
 
   constructor(options: RelayConnectorOptions<TJsonMessage>) {
     this.targets = options.targets;
@@ -299,10 +301,12 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
   }
 
   async connect(): Promise<RelayTarget> {
+    this.close();
     this.destroyed = false;
     return this.connectCandidates(
       this.targets.map((_, index) => index),
-      false
+      false,
+      this.lifecycleSerial
     );
   }
 
@@ -315,6 +319,8 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
     const from = this.currentTarget;
     const disconnectedIndex = this.currentIndex;
 
+    this.lifecycleSerial++;
+    this.cancelPendingAttempt?.();
     this.ready = false;
     const activeSocket = this.socket;
     this.socket = null;
@@ -326,15 +332,16 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
       }
     }
 
-    this.failoverPromise = this.reconnectThenFailover(
+    const recovery = this.reconnectThenFailover(
       disconnectedIndex,
       from,
       reason,
+      this.lifecycleSerial,
     ).finally(() => {
-      this.failoverPromise = null;
+      if (this.failoverPromise === recovery) this.failoverPromise = null;
     });
-
-    return this.failoverPromise;
+    this.failoverPromise = recovery;
+    return recovery;
   }
 
   /** Try reconnecting to the same target first; only failover to
@@ -343,19 +350,21 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
     disconnectedIndex: number,
     from: RelayTarget | null,
     reason: string,
+    lifecycle: number,
   ): Promise<RelayTarget> {
     // Attempt reconnection to the same target
     for (let attempt = 1; attempt <= this.reconnectAttempts; attempt++) {
-      if (this.destroyed) break;
+      if (this.destroyed || lifecycle !== this.lifecycleSerial) break;
 
       const delay = this.reconnectDelayMs * attempt;
       this.onReconnecting?.(attempt, this.reconnectAttempts, this.targets[disconnectedIndex]);
       await new Promise((r) => setTimeout(r, delay));
 
-      if (this.destroyed) break;
+      if (this.destroyed || lifecycle !== this.lifecycleSerial) break;
 
       try {
         const target = await this.connectCandidate(disconnectedIndex, false);
+        if (this.destroyed || lifecycle !== this.lifecycleSerial) throw new Error("Connector closed during reconnect");
         return target;
       } catch {
         // retry
@@ -363,7 +372,7 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
     }
 
     // All reconnect attempts exhausted — fall through to alternative targets
-    if (this.destroyed) throw new Error("Connector destroyed during reconnect");
+    if (this.destroyed || lifecycle !== this.lifecycleSerial) throw new Error("Connector destroyed during reconnect");
 
     if (this.targets.length < 2) {
       const err = new Error("Voice relay reconnect failed — no alternative targets");
@@ -378,6 +387,7 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
     return this.connectCandidates(
       candidateIndices,
       true,
+      lifecycle,
       from ?? undefined,
       reason
     );
@@ -392,8 +402,11 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
   }
 
   close(): void {
+    this.lifecycleSerial++;
+    this.failoverPromise = null;
     this.destroyed = true;
     this.ready = false;
+    this.cancelPendingAttempt?.();
     const activeSocket = this.socket;
     this.socket = null;
     if (!activeSocket) return;
@@ -407,14 +420,17 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
   private async connectCandidates(
     candidateIndices: number[],
     isFailover: boolean,
+    lifecycle: number,
     from?: RelayTarget,
     reason?: string
   ): Promise<RelayTarget> {
     let lastError: Error | null = null;
 
     for (const index of candidateIndices) {
+      if (this.destroyed || lifecycle !== this.lifecycleSerial) throw new Error("Connector closed during connection");
       try {
         const target = await this.connectCandidate(index, isFailover);
+        if (this.destroyed || lifecycle !== this.lifecycleSerial) throw new Error("Connector closed during connection");
         if (isFailover && from && from.url !== target.url) {
           this.onFailover?.({ from, to: target, reason: reason || "relay failover" });
         }
@@ -427,6 +443,7 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
 
     const finalError =
       lastError || new Error("All voice relay targets failed");
+    if (this.destroyed || lifecycle !== this.lifecycleSerial) throw finalError;
     this.onPermanentFailure?.(finalError);
     throw finalError;
   }
@@ -450,22 +467,33 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
       this.ready = false;
 
       let settled = false;
-      const timer = setTimeout(() => {
+      const fail = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (this.cancelPendingAttempt === cancel) this.cancelPendingAttempt = null;
+        if (this.socket === socket) {
+          this.socket = null;
+          this.ready = false;
+        }
         try {
           socket.close();
         } catch {
           // noop
         }
-        if (!settled) {
-          settled = true;
-          reject(new Error(`${relayDisplayName(target.kind)} timed out before ready`));
-        }
+        reject(error);
+      };
+      const cancel = () => fail(new Error("Connector closed during connection"));
+      this.cancelPendingAttempt = cancel;
+      const timer = setTimeout(() => {
+        fail(new Error(`${relayDisplayName(target.kind)} timed out before ready`));
       }, this.readyTimeoutMs);
 
       const clear = () => clearTimeout(timer);
 
       socket.onopen = () => {
         if (this.destroyed || attemptId !== this.attemptSerial) return;
+        if (socket !== this.socket) return;
         socket.send(JSON.stringify(this.buildInitMessage()));
       };
 
@@ -497,6 +525,7 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
           clear();
           if (!settled) {
             settled = true;
+            if (this.cancelPendingAttempt === cancel) this.cancelPendingAttempt = null;
             this.onConnected?.({
               target,
               isFailover,
@@ -506,6 +535,7 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
           }
         }
 
+        if (this.destroyed || socket !== this.socket || attemptId !== this.attemptSerial) return;
         this.onJsonMessage(message, {
           target,
           isFailover,
@@ -515,9 +545,8 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
 
       socket.onerror = () => {
         if (settled || this.destroyed || this.ready) return;
-        clear();
-        settled = true;
-        reject(new Error(`${relayDisplayName(target.kind)} websocket error`));
+        if (socket !== this.socket || attemptId !== this.attemptSerial) return;
+        fail(new Error(`${relayDisplayName(target.kind)} websocket error`));
       };
 
       socket.onclose = (event) => {
@@ -529,6 +558,8 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
         // Retrying from the stale document could reclaim ownership and create
         // a reconnect loop, so this specific server close is terminal here.
         if (isSessionSupersededClose(event)) {
+          this.destroyed = true;
+          fail(new Error("Interview session superseded by another connection"));
           if (socket === this.socket) {
             this.socket = null;
             this.ready = false;
@@ -538,10 +569,7 @@ export class RelayConnector<TJsonMessage extends Record<string, unknown>> {
         }
 
         if (!this.ready) {
-          if (!settled) {
-            settled = true;
-            reject(new Error(`${relayDisplayName(target.kind)} closed before ready`));
-          }
+          fail(new Error(`${relayDisplayName(target.kind)} closed before ready`));
           return;
         }
 

@@ -1,6 +1,8 @@
 import { createLogger } from "@/lib/logger";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
+import {storeMediaObject} from '@/lib/voice/media-object-storage';
+import {sessionAccessResponse} from '@/server/session-access-http';
 
 const log = createLogger("api/session/upload");
 
@@ -11,7 +13,7 @@ const log = createLogger("api/session/upload");
  *   - file: Blob/File
  *   - sessionId: string
  *   - type: "recording" | "screenshot"
- *   - filename: string (optional, used as the storage path suffix)
+ *   - filename: optional legacy field; object paths use a server-computed content hash
  */
 export async function POST(req: Request) {
   try {
@@ -19,9 +21,8 @@ export async function POST(req: Request) {
     const file = formData.get("file") as Blob | null;
     const sessionId = formData.get("sessionId") as string | null;
     const type = formData.get("type") as string | null;
-    const filename = formData.get("filename") as string | null;
 
-    if (!file || !sessionId || !type) {
+    if (!(file instanceof Blob) || !file.size || typeof sessionId !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(sessionId) || !type) {
       return NextResponse.json(
         { error: "Missing required fields: file, sessionId, type" },
         { status: 400 },
@@ -36,10 +37,14 @@ export async function POST(req: Request) {
     }
 
     const bucket = type === "recording" ? "recordings" : "screenshots";
+    const denied=await sessionAccessResponse(sessionId);
+    if(denied)return denied;
+    const {data: session, error: sessionError} = await supabaseAdmin.from('sessions').select('id').eq('id',sessionId).maybeSingle();
+    if (sessionError) return NextResponse.json({error:'Unable to verify recording session'},{status:500});
+    if (!session) return NextResponse.json({error:'Recording session not found'},{status:404});
     const defaultExt = type === "recording"
       ? (file.type?.includes("mp4") || file.type?.includes("m4a") ? "m4a" : "webm")
       : "jpg";
-    const storagePath = `${sessionId}/${filename || `${Date.now()}.${defaultExt}`}`;
 
     const buffer = Buffer.from(await file.arrayBuffer());
 
@@ -47,36 +52,12 @@ export async function POST(req: Request) {
       ? (file.type?.includes("mp4") ? "audio/mp4" : "audio/webm")
       : "image/jpeg";
 
-    const { error: uploadError } = await supabaseAdmin.storage
-      .from(bucket)
-      .upload(storagePath, buffer, {
-        contentType: file.type || defaultContentType,
-        upsert: false,
-      });
-
-    if (uploadError) {
-      log.error("Storage error:", bucket, uploadError);
-      return NextResponse.json(
-        { error: uploadError.message },
-        { status: 500 },
-      );
-    }
-
-    const { data: signedData, error: signedError } = await supabaseAdmin.storage
-      .from(bucket)
-      .createSignedUrl(storagePath, 60 * 60 * 24 * 365); // 1 year
-
-    if (signedError || !signedData?.signedUrl) {
-      log.error("Signed URL error:", bucket, signedError);
-      return NextResponse.json(
-        { error: "Failed to generate signed URL" },
-        { status: 500 },
-      );
-    }
+    const stored = await storeMediaObject(supabaseAdmin.storage.from(bucket),{
+      sessionId,bytes:buffer,contentType:file.type || defaultContentType,extension:defaultExt,
+    });
 
     return NextResponse.json({
-      url: signedData.signedUrl,
-      path: storagePath,
+      ...stored,
       bucket,
     });
   } catch (err) {

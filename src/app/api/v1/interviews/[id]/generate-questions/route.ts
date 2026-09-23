@@ -7,6 +7,7 @@ import {
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { generateWithFallback } from "@/lib/ai/fallback";
 import { RECRUIT_GENERATOR_FALLBACK_CHAIN } from "@/lib/ai/registry";
+import { getHrTextPolicy } from '../../../../../../../server/hr-model-control';
 import { createLogger } from "@/lib/logger";
 import {
   ensureExplicitRecruitAnchorLead,
@@ -348,9 +349,13 @@ export async function POST(
       questionSpecVersion: contractVersion,
       roleType,
     });
+    const policy = await getHrTextPolicy();
+    const modelChain = policy
+      ? [policy.route.primary,...policy.route.fallbacks].map(provider=>policy.models[provider])
+      : [RECRUIT_GENERATOR_MODEL, ...RECRUIT_GENERATOR_FALLBACK_CHAIN];
     const resp = await withGenerationBudget(
       generateWithFallback(
-        [RECRUIT_GENERATOR_MODEL, ...RECRUIT_GENERATOR_FALLBACK_CHAIN],
+        modelChain,
         {
           messages,
           temperature: 0.5,

@@ -45,3 +45,4 @@ test-results/
 # Release pipeline local outputs
 .artifacts/
 .tmp/
+.playwright-cli/

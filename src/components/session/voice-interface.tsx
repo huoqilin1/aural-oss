@@ -1,4 +1,6 @@
 "use client";
+import {candidateFetch as fetch} from '@/lib/voice/candidate-fetch';
+import {saveInterviewEvidence, saveRecordingMetadata} from '@/lib/voice/evidence-save';
 
 import { CodeBlock } from "@/components/code-editor/code-block";
 import {
@@ -453,7 +455,13 @@ const MIN_PANEL_WIDTH = 260;
 const DEFAULT_RIGHT_WIDTH = 380;
 const COLLAPSED_RIGHT_DOCK_WIDTH = 56;
 
-export function VoiceInterface({
+export function VoiceInterface(props: VoiceInterfaceProps) {
+  // React may keep the route mounted when its session changes. All transcript,
+  // delivery, microphone and completion state must belong to one session.
+  return <VoiceInterfaceSession key={`${props.interviewId}:${props.sessionId}`} {...props} />;
+}
+
+function VoiceInterfaceSession({
   sessionId,
   interviewId,
   interviewTitle,
@@ -468,6 +476,11 @@ export function VoiceInterface({
   preview = false,
   autoStart = false,
 }: VoiceInterfaceProps) {
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === "dark";
   const isMobile = useIsMobile();
@@ -593,7 +606,7 @@ export function VoiceInterface({
         if (snapshotData) {
           const payload = { json: { sessionId, drawingId: active.id, label: active.label, snapshotData } };
           const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-          navigator.sendBeacon("/api/trpc/session.saveWhiteboard", blob);
+          void fetch("/api/trpc/session.saveWhiteboard",{method:'POST',body:blob,keepalive:true}).catch(()=>{});
         }
       }
 
@@ -604,7 +617,7 @@ export function VoiceInterface({
         if (codeSnapshot) {
           const payload = { json: { sessionId, snippetId: activeSnippet.id, label: activeSnippet.label, snapshotData: codeSnapshot } };
           const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-          navigator.sendBeacon("/api/trpc/session.saveCode", blob);
+          void fetch("/api/trpc/session.saveCode",{method:'POST',body:blob,keepalive:true}).catch(()=>{});
         }
       }
     };
@@ -887,21 +900,19 @@ export function VoiceInterface({
   const persistDrawing = useCallback(
     async (drawing: { id: string; label: string }, snapshotData: string, imageDataUrl?: string) => {
       try {
-        await fetch("/api/trpc/session.saveWhiteboard", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            json: {
+        await saveInterviewEvidence("/api/trpc/session.saveWhiteboard", {
               sessionId,
               drawingId: drawing.id,
               label: drawing.label,
               snapshotData,
               imageDataUrl: imageDataUrl ?? undefined,
-            },
-          }),
         });
+        return true;
       } catch (err) {
         console.error("[voice] Failed to save whiteboard:", err);
+        setSaveStatus('idle');
+        setError('白板内容尚未保存，请保留页面并重试。');
+        return false;
       }
     },
     [sessionId],
@@ -920,7 +931,7 @@ export function VoiceInterface({
     );
 
     // Generate images sequentially (shared wb instance) but persist in parallel
-    const persistOps: Promise<void>[] = [];
+    const persistOps: Promise<boolean>[] = [];
     for (const drawing of updatedDrawings) {
       if (!drawing.snapshotData) continue;
       const img =
@@ -929,7 +940,7 @@ export function VoiceInterface({
           : await wb.exportImageFromData(drawing.snapshotData);
       persistOps.push(persistDrawing(drawing, drawing.snapshotData, img ?? undefined));
     }
-    await Promise.all(persistOps);
+    if ((await Promise.all(persistOps)).some(saved => !saved)) throw new Error('白板内容尚未保存，请重试');
   }, [drawings, activeDrawingIdx, persistDrawing]);
 
   // Debounced auto-save callback from WhiteboardCanvas
@@ -947,7 +958,7 @@ export function VoiceInterface({
         prev.map((d, i) => (i === activeDrawingIdx ? { ...d, snapshotData } : d)),
       );
 
-      await persistDrawing(drawing, snapshotData);
+      if (!await persistDrawing(drawing, snapshotData)) { lastAutoSave.current = null; return; }
       setSaveStatus("saved");
 
       // Send whiteboard image as PNG to relay for agent context
@@ -1087,7 +1098,7 @@ export function VoiceInterface({
       setDrawings((prev) =>
         prev.map((d, i) => (i === activeDrawingIdx ? { ...d, snapshotData } : d)),
       );
-      await persistDrawing(drawing, snapshotData, imageDataUrl ?? undefined);
+      if (!await persistDrawing(drawing, snapshotData, imageDataUrl ?? undefined)) return;
     }
     setSaveStatus("saved");
   }, [drawings, activeDrawingIdx, persistDrawing]);
@@ -1096,15 +1107,13 @@ export function VoiceInterface({
   const persistCodeSnippet = useCallback(
     async (snippet: { id: string; label: string }, snapshotData: string) => {
       try {
-        await fetch("/api/trpc/session.saveCode", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            json: { sessionId, snippetId: snippet.id, label: snippet.label, snapshotData },
-          }),
-        });
+        await saveInterviewEvidence("/api/trpc/session.saveCode", {sessionId, snippetId: snippet.id, label: snippet.label, snapshotData});
+        return true;
       } catch (err) {
         console.error("[voice] Failed to save code:", err);
+        setCodeSaveStatus('idle');
+        setError('代码内容尚未保存，请保留页面并重试。');
+        return false;
       }
     },
     [sessionId],
@@ -1117,11 +1126,12 @@ export function VoiceInterface({
     const updatedSnippets = codeSnippets.map((s, i) =>
       i === activeSnippetIdx && currentSnapshot ? { ...s, snapshotData: currentSnapshot } : s,
     );
-    await Promise.all(
+    const saved = await Promise.all(
       updatedSnippets
         .filter((s) => s.snapshotData)
         .map((snippet) => persistCodeSnippet(snippet, snippet.snapshotData!))
     );
+    if (saved.some(value => !value)) throw new Error('代码内容尚未保存，请重试');
   }, [codeSnippets, activeSnippetIdx, persistCodeSnippet]);
 
   const lastCodeAutoSave = useRef<string | null>(null);
@@ -1134,7 +1144,7 @@ export function VoiceInterface({
       setCodeSnippets((prev) =>
         prev.map((s, i) => (i === activeSnippetIdx ? { ...s, snapshotData } : s)),
       );
-      await persistCodeSnippet(snippet, snapshotData);
+      if (!await persistCodeSnippet(snippet, snapshotData)) { lastCodeAutoSave.current = null; return; }
       setCodeSaveStatus("saved");
 
       // Send code content to relay for agent context
@@ -1238,7 +1248,7 @@ export function VoiceInterface({
       setCodeSnippets((prev) =>
         prev.map((s, i) => (i === activeSnippetIdx ? { ...s, snapshotData } : s)),
       );
-      await persistCodeSnippet(snippet, snapshotData);
+      if (!await persistCodeSnippet(snippet, snapshotData)) return;
     }
     setCodeSaveStatus("saved");
   }, [codeSnippets, activeSnippetIdx, persistCodeSnippet]);
@@ -1253,7 +1263,7 @@ export function VoiceInterface({
         setDrawings((prev) =>
           prev.map((d, i) => (i === activeDrawingIdx ? { ...d, snapshotData: snapshot } : d)),
         );
-        await persistDrawing(drawing, snapshot);
+        if (!await persistDrawing(drawing, snapshot)) return false;
       }
     }
     const ce = codeEditorRef.current;
@@ -1264,13 +1274,14 @@ export function VoiceInterface({
         setCodeSnippets((prev) =>
           prev.map((s, i) => (i === activeSnippetIdx ? { ...s, snapshotData: snapshot } : s)),
         );
-        await persistCodeSnippet(snippet, snapshot);
+        if (!await persistCodeSnippet(snippet, snapshot)) return false;
       }
     }
+    return true;
   }, [drawings, activeDrawingIdx, persistDrawing, codeSnippets, activeSnippetIdx, persistCodeSnippet]);
 
   const handlePreviousQuestion = useCallback(async () => {
-    await saveCurrentContent();
+    if (!await saveCurrentContent()) return;
     voice.previousQuestion();
   }, [saveCurrentContent, voice]);
 
@@ -1286,7 +1297,7 @@ export function VoiceInterface({
     setAdvancePending(true);
     let awaitingRelay = false;
     try {
-      await saveCurrentContent();
+      if (!await saveCurrentContent()) return;
       if (voice.totalQuestions === 0) {
         // 即兴深挖(招聘):没预设题,「我答完了」= 告诉 AI 推进下一个问题
         voice.sendTextMessage("(我答完了,请继续下一个问题)");
@@ -1382,6 +1393,8 @@ export function VoiceInterface({
 
   // ── Common save-and-end logic ───────────────────────────────────
   const endingRef = useRef(false);
+  const stoppedRecordingRef = useRef<ReturnType<typeof recording.stop> | null>(null);
+  const recordingMetadataSavedRef = useRef(false);
   const handleEndInterview = useCallback(async () => {
     if (endingRef.current) return;
     if (shouldBlockRecruitmentCompletion({
@@ -1402,37 +1415,34 @@ export function VoiceInterface({
     voice.stopListening();
 
     try {
-      await Promise.allSettled([
+      await Promise.all([
         withTimeout(saveAllDrawings(), 5000, "save drawings"),
         withTimeout(saveAllCodeSnippets(), 5000, "save code snippets"),
       ]);
 
-      try {
-        // Stop recording and save artifacts (video mode)
-        if (videoMode && recording.isRecording) {
-          const result = await withTimeout(recording.stop(), 8000, "stop recording");
-          await withTimeout(
-            fetch("/api/trpc/session.saveRecording", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                json: {
-                  sessionId,
-                  audioRecordingUrl: result.audioUrl,
-                  audioDuration: result.audioDuration,
-                  screenshots: result.screenshots,
-                },
-              }),
-            }),
-            8000,
-            "save recording",
-          );
-        }
-      } catch (err) {
-        console.error("[voice] Failed to save recording:", err);
+      // Retain the same stop result across a UI timeout or a metadata retry.
+      // Calling stop twice previously returned only screenshots on the retry.
+      if (videoMode && (recordingStartedRef.current || stoppedRecordingRef.current) && !recordingMetadataSavedRef.current) {
+        stoppedRecordingRef.current ??= recording.stop().catch(error => {
+          stoppedRecordingRef.current = null;
+          throw error;
+        });
+        const result = await withTimeout(stoppedRecordingRef.current, 8000, "stop recording");
+        await withTimeout(
+          saveRecordingMetadata({
+            sessionId,
+            audioRecordingUrl: result.audioUrl,
+            audioDuration: result.audioDuration,
+            screenshots: result.screenshots,
+          }),
+          8000,
+          "save recording",
+        );
+        recordingMetadataSavedRef.current = true;
       }
 
       const completed = await withTimeout(voice.disconnect(), 8000, "voice disconnect");
+      if (!mountedRef.current) return;
       if (!completed) throw new Error("面试记录尚未完整保存，请稍后重试结束面试");
       setLocallyCompleted(true);
       onComplete?.();

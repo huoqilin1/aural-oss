@@ -280,7 +280,9 @@ test("OpRun recruitment relay caps follow-ups across the entire interview", () =
     assert.match(source, /failClosedRecruitmentResumeBudget/);
   }
   const voiceSaveRoute = readFileSync("src/app/api/voice/save/route.ts", "utf8");
-  assert.match(voiceSaveRoute, /orderedVoiceMessageTimestamp\(batchStartedAtMs, messageIndex\)/);
+  assert.match(voiceSaveRoute, /persistVoiceMessages\(sessionId, messages/);
+  const messageStorage = readFileSync("src/app/api/voice/save/message-storage.ts", "utf8");
+  assert.match(messageStorage, /orderedVoiceMessageTimestamp\(now, index\)/);
   assert.match(voiceHook, /sessionId\?: string/);
   assert.doesNotMatch(relay, /必须执行的最终动态核验/);
   assert.doesNotMatch(relay, /请再补充一个最能体现你能力的具体结果/);

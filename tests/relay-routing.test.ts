@@ -52,6 +52,109 @@ async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
+for (const action of ["close", "superseded", "error"] as const) {
+  test(`pending relay ${action} settles and rejects late messages`, async () => {
+    const sockets: FakeSocket[] = [];
+    const received: unknown[] = [];
+    let failures = 0;
+    const connector = new RelayConnector<Record<string, unknown>>({
+      targets: [{ kind: "voice", url: "ws://primary" }],
+      readyTimeoutMs: 50,
+      buildInitMessage: () => ({ type: "init" }),
+      createSocket: (url) => { const s = new FakeSocket(url); sockets.push(s); return s; },
+      onJsonMessage: (message) => received.push(message),
+      onBinaryMessage: (message) => received.push(message),
+      onPermanentFailure: () => { failures++; },
+    });
+    const pending = connector.connect();
+    let settled = false;
+    const rejected = assert.rejects(pending).then(() => { settled = true; });
+    if (action === "close") connector.close();
+    if (action === "superseded") sockets[0].emitClose(4001, "session_reconnected");
+    if (action === "error") sockets[0].emitError();
+    await flush();
+    const settledImmediately = settled;
+    sockets[0].emitOpen();
+    sockets[0].emitJson({ type: "ready" });
+    sockets[0].emitJson({ type: "answer_revision", text: "old answer" });
+    sockets[0].onmessage?.({ data: new ArrayBuffer(8) });
+    await rejected;
+    assert.equal(settledImmediately, true);
+    assert.equal(connector.isReady, false);
+    assert.equal(connector.sendJson({ type: "ping" }), false);
+    assert.deepEqual(received, []);
+    assert.equal(failures, action === "error" ? 1 : 0);
+    connector.close();
+  });
+}
+
+test("closing before ready never opens the backup relay", async () => {
+  const sockets: FakeSocket[] = [];
+  const connector = new RelayConnector<Record<string, unknown>>({
+    targets: [{ kind: "voice", url: "ws://primary" }, { kind: "openai", url: "ws://backup" }],
+    readyTimeoutMs: 30,
+    buildInitMessage: () => ({ type: "init" }),
+    createSocket: (url) => { const s = new FakeSocket(url); sockets.push(s); return s; },
+    onJsonMessage: () => {},
+  });
+  const rejected = assert.rejects(connector.connect());
+  connector.close();
+  await rejected;
+  assert.equal(sockets.length, 1);
+});
+
+test("immediate reuse cannot let the cancelled connect steal the new socket", async () => {
+  const sockets: FakeSocket[] = [];
+  const received: unknown[] = [];
+  const connector = new RelayConnector<Record<string, unknown>>({
+    targets: [{ kind: "voice", url: "ws://primary" }, { kind: "openai", url: "ws://backup" }],
+    readyTimeoutMs: 100,
+    buildInitMessage: () => ({ type: "init" }),
+    createSocket: (url) => { const s = new FakeSocket(url); sockets.push(s); return s; },
+    onJsonMessage: (message) => received.push(message),
+  });
+  const cancelled = assert.rejects(connector.connect());
+  connector.close();
+  const fresh = connector.connect();
+  sockets[1].emitOpen();
+  sockets[1].emitJson({ type: "ready" });
+  await cancelled;
+  await fresh;
+  await flush();
+  sockets[0].emitJson({ type: "answer_revision", text: "obsolete" });
+  assert.equal(sockets.length, 2);
+  assert.equal(connector.isReady, true);
+  assert.deepEqual(received, [{ type: "ready" }]);
+  connector.close();
+});
+
+test("a cancelled reconnect delay cannot create a socket in a restarted connector", async () => {
+  const sockets: FakeSocket[] = [];
+  const connector = new RelayConnector<Record<string, unknown>>({
+    targets: [{ kind: "voice", url: "ws://primary" }, { kind: "openai", url: "ws://backup" }],
+    reconnectAttempts: 1,
+    reconnectDelayMs: 20,
+    readyTimeoutMs: 100,
+    buildInitMessage: () => ({ type: "init" }),
+    createSocket: (url) => { const s = new FakeSocket(url); sockets.push(s); return s; },
+    onJsonMessage: () => {},
+  });
+  const initial = connector.connect();
+  sockets[0].emitOpen();
+  sockets[0].emitJson({ type: "ready" });
+  await initial;
+  const cancelled = assert.rejects(connector.failover("disconnect"));
+  connector.close();
+  const fresh = connector.connect();
+  sockets[1].emitOpen();
+  sockets[1].emitJson({ type: "ready" });
+  await fresh;
+  await cancelled;
+  assert.equal(sockets.length, 2);
+  assert.equal(connector.isReady, true);
+  connector.close();
+});
+
 async function waitFor(
   predicate: () => boolean,
   timeoutMs = 1_000

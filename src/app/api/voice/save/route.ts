@@ -1,3 +1,4 @@
+import { resolveHrModelChain } from "../../../../../server/hr-model-control";
 import { svgDataUrlToPng } from "@/lib/ai/convert-svg";
 import { extractJson } from "@/lib/ai/extract-json";
 import { buildSummaryPrompt } from "@/lib/ai/prompts/summary";
@@ -6,9 +7,11 @@ import { REPORT_MODEL, REPORT_FALLBACK_CHAIN } from "@/lib/ai/registry";
 import { createLogger } from "@/lib/logger";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
+import {randomUUID} from 'node:crypto';
+import {sessionAccessResponse} from '@/server/session-access-http';
+import {persistVoiceMessages, type StoredVoiceMessage} from './message-storage';
 import {
   handleVoiceSave,
-  orderedVoiceMessageTimestamp,
   requireVoiceStorageResult,
   type ActivitySegment,
   type CompletionSession,
@@ -20,23 +23,16 @@ import {
 const log = createLogger("api/voice/save");
 const voiceSaveOps: VoiceSaveOps = {
   async insertMessages(sessionId, messages) {
-    const batchStartedAtMs = Date.now();
-    const result = await supabaseAdmin.from("messages").insert(
-      messages.map((m, messageIndex) => ({
-        sessionId,
-        role: m.role === "user" ? ("USER" as const) : ("ASSISTANT" as const),
-        content: m.content,
-        contentType: "TEXT" as const,
-        questionId: m.questionId || null,
-        wordCount: m.content.split(/\s+/).length,
-        transcription: m.source === "chat" ? "chat" : null,
-        // PostgreSQL's default now() is identical for an entire INSERT. Give
-        // each turn a stable millisecond so reconnect hydration can reproduce
-        // USER -> ASSISTANT -> USER ordering exactly.
-        timestamp: orderedVoiceMessageTimestamp(batchStartedAtMs, messageIndex),
-      })),
-    );
-    requireVoiceStorageResult("insert voice messages", result);
+    await persistVoiceMessages(sessionId, messages, {
+      async insertIfAbsent(rows) {
+        const result = await supabaseAdmin.from('messages').upsert(rows, {onConflict: 'id', ignoreDuplicates: true});
+        requireVoiceStorageResult('insert voice messages', result);
+      },
+      async read(id, messageIds) {
+        const result = await supabaseAdmin.from('messages').select('*').eq('sessionId', id).in('id', messageIds);
+        return (requireVoiceStorageResult('acknowledge voice messages', result) ?? []) as StoredVoiceMessage[];
+      },
+    }, randomUUID);
   },
   async loadSessionForCompletion(sessionId) {
     const result = await supabaseAdmin
@@ -94,13 +90,14 @@ const voiceSaveOps: VoiceSaveOps = {
   async loadAnsweredQuestionIds(sessionId) {
     const result = await supabaseAdmin
       .from("messages")
-      .select("questionId")
+      .select("questionId, content")
       .eq("sessionId", sessionId)
       .eq("role", "USER")
       .not("questionId", "is", null);
 
     const data = requireVoiceStorageResult("load answered question ids", result);
     return (data ?? [])
+      .filter((row) => typeof row.content === 'string' && row.content.trim().length > 0)
       .map((row) => row.questionId as string | null)
       .filter((questionId): questionId is string => Boolean(questionId));
   },
@@ -122,8 +119,9 @@ const voiceSaveOps: VoiceSaveOps = {
     const result = await supabaseAdmin
       .from("sessions")
       .update(payload)
-      .eq("id", sessionId);
+      .eq("id", sessionId).select('id').maybeSingle();
     requireVoiceStorageResult("update voice session", result);
+    if (!result.data) throw new Error('Interview session disappeared before the save was acknowledged');
   },
   generateSummary,
   log,
@@ -142,6 +140,8 @@ export async function POST(req: Request) {
   } catch {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
+  const denied=await sessionAccessResponse(payload?.sessionId);
+  if(denied)return denied;
   const result = await handleVoiceSave(payload, voiceSaveOps);
   return NextResponse.json(result.body, { status: result.status });
 }
@@ -155,11 +155,24 @@ async function generateSummary(
   assessmentCriteria?: { name: string; description: string }[] | null,
 ): Promise<void> {
   try {
-    const { data: allMessages } = await supabaseAdmin
+    const isRecruitment = /^数君招聘\s*·\s*/.test(interviewTitle);
+    let reportRevision: number | null = null;
+    if (isRecruitment) {
+      const result = await supabaseAdmin.from('sessions')
+        .select('status, voiceRevision, completedVoiceRevision').eq('id',sessionId).single();
+      const session = requireVoiceStorageResult('load summary version',result);
+      if (!session || session.status !== 'COMPLETED' || session.completedVoiceRevision == null ||
+          session.voiceRevision !== session.completedVoiceRevision) {
+        throw new Error('Recruitment summary requires a confirmed transcript version');
+      }
+      reportRevision = session.completedVoiceRevision;
+    }
+    const messagesResult = await supabaseAdmin
       .from("messages")
       .select("*")
       .eq("sessionId", sessionId)
       .order("timestamp", { ascending: true });
+    const allMessages = requireVoiceStorageResult('load summary evidence', messagesResult);
 
     if (!allMessages || allMessages.length === 0) {
       log.info("No messages to summarize");
@@ -199,7 +212,7 @@ async function generateSummary(
       })
       .filter((s) => s.code.trim().length > 0);
 
-    const reportChain = [REPORT_MODEL, ...REPORT_FALLBACK_CHAIN];
+    const reportChain = await resolveHrModelChain([REPORT_MODEL, ...REPORT_FALLBACK_CHAIN]);
     const textMessages = allMessages
       .filter((m) => m.contentType === "TEXT")
       .map((m) => ({
@@ -265,8 +278,8 @@ async function generateSummary(
       parsed = extractJson(response.content);
     } catch (parseErr) {
       log.error(
-        "Raw AI response (first 1000 chars):",
-        response.content.slice(0, 1000),
+        "Invalid summary JSON; response character count:",
+        response.content.length,
       );
       throw parseErr;
     }
@@ -287,7 +300,7 @@ async function generateSummary(
       insightsData.toneAnalysis = parsed.toneAnalysis;
     }
 
-    await supabaseAdmin
+    let summaryUpdate = supabaseAdmin
       .from("sessions")
       .update({
         summary: String(parsed.summary ?? ""),
@@ -296,6 +309,13 @@ async function generateSummary(
         insights: insightsData,
       })
       .eq("id", sessionId);
+    if (isRecruitment) {
+      summaryUpdate = summaryUpdate.eq('status','COMPLETED')
+        .eq('voiceRevision',reportRevision).eq('completedVoiceRevision',reportRevision);
+    }
+    const saveSummaryResult = await summaryUpdate.select('id').maybeSingle();
+    requireVoiceStorageResult('save generated summary', saveSummaryResult);
+    if (!saveSummaryResult.data) throw new Error('Summary version no longer matches the stored transcript');
 
     const themeCount = Array.isArray(parsed.themes) ? parsed.themes.length : 0;
     const insightCount = Array.isArray(parsed.keyInsights)
@@ -310,5 +330,6 @@ async function generateSummary(
     );
   } catch (error) {
     log.error("Summary generation failed:", error);
+    throw error;
   }
 }

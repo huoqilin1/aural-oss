@@ -2,11 +2,14 @@ import {
   computeMessageBasedDuration,
   computeSegmentDuration,
   effectiveNowForSession,
+  requireVoiceStorageResult,
+  VoiceStorageError,
   type ActivitySegment,
 } from "@/app/api/voice/save/logic";
 import { createLogger } from "@/lib/logger";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
+import {sessionAccessResponse} from '@/server/session-access-http';
 
 const log = createLogger("api/session/complete");
 
@@ -18,11 +21,14 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
     }
 
-    const { data: session } = await supabaseAdmin
+    const denied=await sessionAccessResponse(sessionId);
+    if(denied)return denied;
+    const sessionResult = await supabaseAdmin
       .from("sessions")
-      .select("id, status, startedAt, lastActivityAt, interviewId, activitySegments")
+      .select("id, status, startedAt, lastActivityAt, interviewId, activitySegments, voiceRevision")
       .eq("id", sessionId)
       .single();
+    const session = requireVoiceStorageResult('load safety-net completion version', sessionResult);
 
     if (!session) {
       return NextResponse.json({ error: "Not found" }, { status: 404 });
@@ -44,11 +50,12 @@ export async function POST(req: Request) {
     if (closed.length > 0) {
       duration = computeSegmentDuration(closed, cappedNowMs);
     } else {
-      const { data: msgRows } = await supabaseAdmin
+      const messageResult = await supabaseAdmin
         .from("messages")
         .select("timestamp")
         .eq("sessionId", sessionId)
         .order("timestamp", { ascending: true });
+      const msgRows = requireVoiceStorageResult('load completion timestamps', messageResult);
       const msgTimesMs = (msgRows ?? []).map((r) => new Date(r.timestamp as string).getTime());
       duration = computeMessageBasedDuration(
         new Date(session.startedAt as string).getTime(),
@@ -57,20 +64,26 @@ export async function POST(req: Request) {
       );
     }
 
-    await supabaseAdmin
+    const completionResult = await supabaseAdmin
       .from("sessions")
       .update({
         status: "COMPLETED" as const,
+        completedVoiceRevision: session.voiceRevision,
         completedAt: now.toISOString(),
         activitySegments: closed,
         totalDurationSeconds: duration,
       })
-      .eq("id", sessionId);
+      .eq("id", sessionId).select('id').maybeSingle();
+    requireVoiceStorageResult('persist safety-net completion', completionResult);
+    if (!completionResult.data) return NextResponse.json({error:'Interview session no longer exists'}, {status:404});
 
     log.info(`Session ${sessionId} completed via safety-net (${duration}s)`);
 
     return NextResponse.json({ ok: true });
-  } catch {
+  } catch (error) {
+    if (error instanceof VoiceStorageError && ['PVR01','PVR02','PVR03'].includes(error.code)) {
+      return NextResponse.json({error:'回答尚未完整确认，请返回面试页面重试保存。'}, {status:409});
+    }
     return NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }

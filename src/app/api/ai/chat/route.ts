@@ -4,6 +4,7 @@ import type { LLMMessage } from "@/lib/ai/types";
 import { createLogger } from "@/lib/logger";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
+import {sessionAccessResponse} from '@/server/session-access-http';
 
 const log = createLogger("api/ai/chat");
 
@@ -15,6 +16,8 @@ export async function POST(req: Request) {
     await req.json();
 
   try {
+    const denied=await sessionAccessResponse(sessionId,interviewId);
+    if(denied)return denied;
     const { data: interview } = await supabaseAdmin
       .from("interviews")
       .select("*, questions(*)")

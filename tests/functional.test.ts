@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import {createHash} from 'node:crypto';
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { after, before, test } from "node:test";
@@ -18,6 +19,16 @@ type RelayConnection = {
 let browser: Browser;
 let serverProcess: ChildProcess;
 let baseUrl = "";
+
+async function syntheticMediaUpload(route: Route) {
+  const raw=route.request().postDataBuffer();
+  assert.ok(raw);
+  const form=await new Response(new Uint8Array(raw),{headers:{'Content-Type':route.request().headers()['content-type']}}).formData();
+  const blob=form.get('file') as Blob;
+  const hash=createHash('sha256').update(Buffer.from(await blob.arrayBuffer())).digest('hex');
+  const type=String(form.get('type'));
+  return {type,hash,url:`${baseUrl}/synthetic-${hash}`,path:`${form.get('sessionId')}/${hash}`,bucket:type==='recording'?'recordings':'screenshots'};
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -62,7 +73,7 @@ async function waitForHttp(url: string, timeoutMs = 60_000): Promise<void> {
 
 function startAppServer(port: number): ChildProcess {
   const nextCli = resolve(APP_CWD, "node_modules", "next", "dist", "bin", "next");
-  const child = spawn(process.execPath, [nextCli, "dev", "--port", String(port)], {
+  const child = spawn(process.execPath, [nextCli, "dev", "--hostname", "127.0.0.1", "--port", String(port)], {
     cwd: APP_CWD,
     env: {
       ...process.env,
@@ -634,16 +645,109 @@ test("a late ASR final from the previous question is not saved twice", async () 
   await context.close();
 });
 
-test("recruitment completes only after eight distinct scored answers", async () => {
+for (const loseFirstResponse of [false, true]) {
+  test(`same response to different questions is retained; lost first response=${loseFirstResponse}`, async () => {
+    const context = await browser.newContext({locale:'zh-CN'});
+    const page = await context.newPage();
+    const batches: Array<{messages:Array<{content:string; questionId:string; messageId:string}>}> = [];
+    await page.route('**/api/voice/save', async route => {
+      batches.push(JSON.parse(route.request().postData() || '{}'));
+      if (loseFirstResponse && batches.length === 1) await route.abort('connectionreset');
+      else await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});
+    });
+    await page.route('**/api/session/upload', async route => {
+      await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(await syntheticMediaUpload(route))});
+    });
+    await page.goto(`${baseUrl}/functional-tests/voice?language=zh-CN&scenario=advance-repeated-answer`);
+    await waitForCondition(async()=>batches.length >= 2,10000);
+    const messages=batches.flatMap(batch=>batch.messages).filter(message=>message.content==='我没有做过。');
+    assert.deepEqual(Array.from(new Set(messages.map(message=>message.questionId))).sort(),['functional-q1','functional-q2']);
+    if (loseFirstResponse) {
+      const first=batches[0].messages[0];
+      assert.ok(batches[1].messages.some(message=>message.messageId===first.messageId && message.content===first.content));
+    }
+    await context.close();
+  });
+}
+
+test('page refresh retains the original unacknowledged voice batch for retry', async () => {
+  const context=await browser.newContext({locale:'zh-CN'});
+  const page=await context.newPage();
+  const batches:Array<{messages:Array<{messageId:string;content:string}>}>=[];
+  let refreshed=false;
+  await page.route('**/api/voice/save',async route=>{
+    batches.push(JSON.parse(route.request().postData()||'{}'));
+    if (!refreshed) await route.abort('connectionreset');
+    else await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});
+  });
+  await page.route('**/api/session/upload',async route=>{
+    await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify(await syntheticMediaUpload(route))});
+  });
+  await page.goto(`${baseUrl}/functional-tests/voice?language=zh-CN&scenario=advance-repeated-answer`);
+  await waitForCondition(async()=>batches.length>=2,10000);
+  const originalId=batches[0].messages[0].messageId;
+  const before=batches.length;
+  const stored=await page.evaluate(()=>window.sessionStorage.getItem('aural:pending-voice:v1:functional-session'));
+  assert.ok(stored?.includes(originalId));
+  refreshed=true;
+  await page.reload();
+  await waitForCondition(async()=>batches.slice(before).some(batch=>batch.messages.some(message=>message.messageId===originalId)),10000);
+  await context.close();
+});
+
+test("answer revision reaches browser save once on the original question", async () => {
+  const context = await browser.newContext({locale: 'zh-CN'});
+  const page = await context.newPage();
+  const saved: Array<{messages?: Array<{content?: string; questionId?: string; timestamp?: string; messageId?: string}>}> = [];
+  await page.route('**/api/voice/save', async route => {
+    saved.push(JSON.parse(route.request().postData() || '{}'));
+    await route.fulfill({status: 200, contentType: 'application/json', body: '{"ok":true}'});
+  });
+  await page.goto(`${baseUrl}/functional-tests/voice?language=zh-CN&scenario=advance-answer-revision`);
+  await waitForCondition(async () => saved.length > 0, 10000);
+  const messages = saved.flatMap(batch => batch.messages || []);
+  const revisions = messages.filter(message => message.content?.includes('语音识别修订'));
+  assert.equal(revisions.length, 1);
+  assert.equal(revisions[0].questionId, 'functional-q1');
+  assert.ok(revisions[0].content?.includes('5%，不是15%'));
+  assert.ok(Number.isFinite(Date.parse(revisions[0].timestamp!)));
+  assert.equal(revisions[0].messageId,'00000000-0000-4000-8000-000000000001');
+  assert.equal(revisions[0].timestamp,'2026-09-05T01:02:00Z');
+  assert.equal(messages.some(message => message.content?.includes('不应保存')), false);
+  await context.close();
+});
+
+for (const mediaFailure of ['none','metadata','recording','screenshot']) {
+test(`recruitment completes only after eight distinct scored answers (media: ${mediaFailure})`, async () => {
+  const failRecordingMetadataOnce=mediaFailure==='metadata';
+  let allowUpload=mediaFailure==='none' || failRecordingMetadataOnce;
   const context = await browser.newContext({ locale: "zh-CN" });
   const page = await context.newPage();
   const saveBodies: unknown[] = [];
+  const recordingBodies: Array<Record<string, unknown>> = [];
+  const uploads: Array<{type:string;hash:string}> = [];
+
+  await page.route("**/api/session/upload", async route => {
+    const data=await syntheticMediaUpload(route);
+    uploads.push(data);
+    if (!allowUpload && data.type===mediaFailure) {
+      await route.fulfill({status:503,body:'synthetic upload failure'});return;
+    }
+    await route.fulfill({status: 200, contentType: "application/json",
+      body: JSON.stringify(data)});
+  });
 
   await page.route("**/api/trpc/session.saveRecording", async (route: Route) => {
+    const payload = JSON.parse(route.request().postData() || '{}').json;
+    recordingBodies.push(payload);
+    if (failRecordingMetadataOnce && recordingBodies.length === 1) {
+      await route.fulfill({status:503,body:'temporary storage failure'});
+      return;
+    }
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ result: { data: { json: { success: true } } } }),
+      body: JSON.stringify({ result: { data: { json: { success: true, sessionId:payload.sessionId } } } }),
     });
   });
   await page.route("**/api/voice/save", async (route: Route) => {
@@ -692,6 +796,15 @@ test("recruitment completes only after eight distinct scored answers", async () 
     }
   }
 
+  if (mediaFailure!=='none') {
+    await waitForText(page,failRecordingMetadataOnce ? '录音资料保存失败' : '录音或截图尚未上传完成',15000);
+    assert.equal(await page.getByTestId('parent-complete').textContent(),'false');
+    assert.equal(saveBodies.some(body => (body as {complete?:boolean}).complete),false);
+    if(!failRecordingMetadataOnce) assert.equal(recordingBodies.length,0);
+    allowUpload=true;
+    await page.locator('[data-tour="voice-progress"] button').nth(2).click();
+    await page.getByRole('button',{name:'结束面试',exact:true}).click();
+  }
   await waitForCondition(
     async () => (await page.getByTestId("parent-complete").textContent()) === "true",
     15_000,
@@ -704,8 +817,107 @@ test("recruitment completes only after eight distinct scored answers", async () 
     (body) => (body as { complete?: boolean }).complete === true,
   );
   assert.equal(completionWrites.length, 1);
+  assert.equal(recordingBodies.length,failRecordingMetadataOnce ? 2 : 1);
+  assert.equal(typeof recordingBodies[0].audioRecordingUrl,'string');
+  if (failRecordingMetadataOnce) assert.deepEqual(recordingBodies[1],recordingBodies[0]);
+  if (mediaFailure==='recording' || mediaFailure==='screenshot') {
+    const retries=uploads.filter(upload=>upload.type===mediaFailure);
+    assert.ok(retries.length>=2);
+    assert.equal(new Set(retries.map(upload=>upload.hash)).size,1);
+    assert.ok((recordingBodies[0].screenshots as unknown[]).length>0);
+  }
 
   await context.close();
+});
+}
+
+test("switching sessions isolates old transcript state and a late completion response", async () => {
+  const context=await browser.newContext({locale:'en-US'});
+  const page=await context.newPage();
+  let release: (()=>void) | undefined;
+  let started=false;
+  await page.route('**/api/voice/save',async route => {
+    const body=JSON.parse(route.request().postData() || '{}');
+    if (body.complete && body.sessionId === 'functional-session') {
+      started=true;
+      await new Promise<void>(resolve => {release=resolve;});
+    }
+    await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});
+  });
+  try {
+    await page.goto(`${baseUrl}/functional-tests/voice?language=en&scenario=farewell-complete`);
+    await waitForCondition(async () => (await page.getByTestId('harness-ready').textContent()) === 'true',5000);
+    await startVoiceInterview(page);
+    await waitForCondition(async () => started,10000);
+    await page.getByTestId('switch-synthetic-session').click();
+    await delay(200);
+    assert.equal((await page.locator('body').textContent())?.includes("Understood, we're all set."),false);
+    release!();
+    await delay(500);
+    assert.equal(await page.getByTestId('parent-complete').textContent(),'false');
+  } finally {
+    release?.();
+    await delay(100);
+    await context.close();
+  }
+});
+
+test("completion retry after a UI timeout does not send a second completion request", async () => {
+  const context = await browser.newContext({locale:'en-US'});
+  const page = await context.newPage();
+  let release: (()=>void) | undefined;
+  let requests = 0;
+  await page.route('**/api/voice/save', async route => {
+    const body = JSON.parse(route.request().postData() || '{}');
+    if (body.complete) {
+      requests++;
+      await new Promise<void>(resolve => {release=resolve;});
+    }
+    await route.fulfill({status:200,contentType:'application/json',body:JSON.stringify({ok:true})});
+  });
+  try {
+    await page.goto(`${baseUrl}/functional-tests/voice?language=en&scenario=farewell-complete`);
+    await waitForCondition(async () => (await page.getByTestId('harness-ready').textContent()) === 'true',5000);
+    await startVoiceInterview(page);
+    await waitForCondition(async () => requests===1,10000);
+    await waitForText(page,'voice disconnect timed out',12000);
+    assert.equal(await page.getByTestId('parent-complete').textContent(),'false');
+    await page.locator('[data-tour="voice-progress"] button').nth(2).click();
+    await page.getByRole('button',{name:'结束面试',exact:true}).click();
+    await delay(200);
+    assert.equal(requests,1);
+    release!();
+    await waitForCondition(async () => (await page.getByTestId('parent-complete').textContent()) === 'true',5000);
+    assert.equal(requests,1);
+  } finally {
+    release?.();
+    await context.close();
+  }
+});
+
+test('invitation reaches voice init and authenticated final save without another start step',async()=>{
+  const context=await browser.newContext({locale:'en-US'});
+  const page=await context.newPage();
+  let saved=false;
+  await page.route('**/api/voice/save',async route=>{
+    const token=route.request().headers()['x-interview-invite'];
+    const body=JSON.parse(route.request().postData() || '{}');
+    assert.equal(token,'synthetic-invite');
+    assert.equal(body.sessionId,'functional-session');
+    saved=body.complete===true || saved;
+    await route.fulfill({status:200,contentType:'application/json',body:'{"ok":true}'});
+  });
+  try {
+    await page.goto(`${baseUrl}/functional-tests/voice?language=en&scenario=farewell-complete`);
+    await waitForCondition(async()=>(await page.getByTestId('harness-ready').textContent())==='true',5000);
+    await page.evaluate(()=>window.history.replaceState(null,'','/i/invite/synthetic-invite/session?language=en&scenario=farewell-complete'));
+    await startVoiceInterview(page);
+    await waitForCondition(async()=>(await page.getByTestId('parent-complete').textContent())==='true',15000);
+    assert.equal(saved,true);
+    const inits=(await readRelaySentMessages(page)).filter(message=>message.type==='init');
+    assert.ok(inits.length>0);
+    assert.ok(inits.every(message=>(message.context as {inviteToken?:string})?.inviteToken==='synthetic-invite'));
+  } finally {await context.close();}
 });
 
 test("voice completion shows the farewell, waits for final save, and only then notifies the parent", async () => {

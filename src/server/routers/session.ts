@@ -1,9 +1,29 @@
 import { createLogger } from "@/lib/logger";
+import { requireVoiceStorageResult } from "@/app/api/voice/save/logic";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
+import {assertSessionAccess} from '../session-access';
+import {SessionAccessError} from '@/lib/voice/session-access';
 import { filterAccessibleProjectIds, hasProjectAccess, protectedProcedure, publicProcedure, router } from "../trpc";
 
 const log = createLogger("router/session");
+
+function checkedSessionProcedure(write:boolean) {
+  return publicProcedure.use(async ({ctx,rawInput,next}) => {
+    const input=rawInput as {id?:unknown;sessionId?:unknown}|null;
+    try {await assertSessionAccess(ctx,input?.sessionId ?? input?.id,write);}
+    catch(error) {
+      if(error instanceof SessionAccessError)throw new TRPCError({
+        code:error.status===403?'FORBIDDEN':error.status===404?'NOT_FOUND':error.status===400?'BAD_REQUEST':'INTERNAL_SERVER_ERROR',
+        message:error.message,
+      });
+      throw error;
+    }
+    return next();
+  });
+}
+const sessionReadProcedure=checkedSessionProcedure(false);
+const sessionWriteProcedure=checkedSessionProcedure(true);
 
 export const sessionRouter = router({
   create: publicProcedure
@@ -31,6 +51,9 @@ export const sessionRouter = router({
       }
 
       // Enforce invite-only access via candidates table
+      if (/^数君招聘\s*·\s*/.test(String(interview.title ?? ''))) {
+        throw new TRPCError({code:'FORBIDDEN',message:'请使用本场面试的原邀请链接进入'});
+      }
       if (interview.requireInvite) {
         const email = input.participantEmail?.trim().toLowerCase();
         if (!email) {
@@ -220,7 +243,7 @@ export const sessionRouter = router({
       return { sessionId: session.id, interview, isExisting: false };
     }),
 
-  getById: publicProcedure
+  getById: sessionReadProcedure
     .input(z.object({ id: z.string() }))
     .query(async ({ ctx, input }) => {
       const { data: session } = await ctx.supabase
@@ -243,7 +266,7 @@ export const sessionRouter = router({
       return session;
     }),
 
-  sendMessage: publicProcedure
+  sendMessage: sessionWriteProcedure
     .input(
       z.object({
         sessionId: z.string(),
@@ -297,7 +320,7 @@ export const sessionRouter = router({
       return { userMessage };
     }),
 
-  saveWhiteboard: publicProcedure
+  saveWhiteboard: sessionWriteProcedure
     .input(
       z.object({
         sessionId: z.string(),
@@ -342,26 +365,26 @@ export const sessionRouter = router({
 
       let message;
       if (existing) {
-        const { data } = await ctx.supabase
+        const result = await ctx.supabase
           .from("messages")
           .update(msgData)
           .eq("id", existing.id)
           .select()
           .single();
-        message = data;
+        message = requireVoiceStorageResult('update whiteboard evidence', result);
       } else {
-        const { data } = await ctx.supabase
+        const result = await ctx.supabase
           .from("messages")
           .insert(msgData)
           .select()
           .single();
-        message = data;
+        message = requireVoiceStorageResult('insert whiteboard evidence', result);
       }
 
       return { message };
     }),
 
-  deleteWhiteboard: publicProcedure
+  deleteWhiteboard: sessionWriteProcedure
     .input(
       z.object({
         sessionId: z.string(),
@@ -369,17 +392,18 @@ export const sessionRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      await ctx.supabase
+      const result = await ctx.supabase
         .from("messages")
         .delete()
         .eq("sessionId", input.sessionId)
         .eq("contentType", "WHITEBOARD")
         .eq("content", input.drawingId);
+      requireVoiceStorageResult('delete whiteboard evidence', result);
 
       return { success: true };
     }),
 
-  saveCode: publicProcedure
+  saveCode: sessionWriteProcedure
     .input(
       z.object({
         sessionId: z.string(),
@@ -421,26 +445,26 @@ export const sessionRouter = router({
 
       let message;
       if (existing) {
-        const { data } = await ctx.supabase
+        const result = await ctx.supabase
           .from("messages")
           .update(msgData)
           .eq("id", existing.id)
           .select()
           .single();
-        message = data;
+        message = requireVoiceStorageResult('update code evidence', result);
       } else {
-        const { data } = await ctx.supabase
+        const result = await ctx.supabase
           .from("messages")
           .insert(msgData)
           .select()
           .single();
-        message = data;
+        message = requireVoiceStorageResult('insert code evidence', result);
       }
 
       return { message };
     }),
 
-  deleteCode: publicProcedure
+  deleteCode: sessionWriteProcedure
     .input(
       z.object({
         sessionId: z.string(),
@@ -448,17 +472,18 @@ export const sessionRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      await ctx.supabase
+      const result = await ctx.supabase
         .from("messages")
         .delete()
         .eq("sessionId", input.sessionId)
         .eq("contentType", "CODE")
         .eq("content", input.snippetId);
+      requireVoiceStorageResult('delete code evidence', result);
 
       return { success: true };
     }),
 
-  updateCurrentQuestion: publicProcedure
+  updateCurrentQuestion: sessionWriteProcedure
     .input(
       z.object({
         sessionId: z.string(),
@@ -466,28 +491,45 @@ export const sessionRouter = router({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      await ctx.supabase
+      const sessionResult = await ctx.supabase.from("sessions")
+        .select("id, interviewId, status").eq("id", input.sessionId).single();
+      requireVoiceStorageResult('load interview progress', sessionResult);
+      const session = sessionResult.data;
+      if (!session) throw new Error('Interview session no longer exists');
+      if (session.status !== 'IN_PROGRESS') throw new Error('Interview session is not active');
+      const questionResult = await ctx.supabase.from("questions")
+        .select("id").eq("id", input.questionId).eq("interviewId", session.interviewId).maybeSingle();
+      requireVoiceStorageResult('verify interview question', questionResult);
+      if (!questionResult.data) throw new Error('Question does not belong to this interview');
+      const result = await ctx.supabase
         .from("sessions")
         .update({
           currentQuestionId: input.questionId,
           lastActivityAt: new Date().toISOString(),
         })
-        .eq("id", input.sessionId);
+        .eq("id", input.sessionId)
+        .eq("interviewId", session.interviewId)
+        .eq("status", "IN_PROGRESS")
+        .select("id").maybeSingle();
+      requireVoiceStorageResult('save interview progress', result);
+      if (!result.data) throw new Error('Interview session no longer active');
       return { success: true };
     }),
 
-  complete: publicProcedure
+  complete: sessionWriteProcedure
     .input(z.object({ id: z.string() }))
     .mutation(async ({ ctx, input }) => {
-      const { data: session } = await ctx.supabase
+      const sessionResult = await ctx.supabase
         .from("sessions")
-        .select("id, startedAt")
+        .select("id, startedAt, status, voiceRevision")
         .eq("id", input.id)
         .single();
+      const session = requireVoiceStorageResult('load session completion version', sessionResult);
 
       if (!session) {
         throw new TRPCError({ code: "NOT_FOUND" });
       }
+      if (session.status === 'COMPLETED') return {success: true};
 
       const { data: firstMsg } = await ctx.supabase
         .from("messages")
@@ -503,20 +545,23 @@ export const sessionRouter = router({
       const now = new Date();
       const duration = Math.round((now.getTime() - actualStart) / 1000);
 
-      await ctx.supabase
+      const completionResult = await ctx.supabase
         .from("sessions")
         .update({
           status: "COMPLETED" as const,
+          completedVoiceRevision: session.voiceRevision,
           completedAt: now.toISOString(),
           startedAt: new Date(actualStart).toISOString(),
           totalDurationSeconds: duration,
         })
-        .eq("id", input.id);
+        .eq("id", input.id).select('id').maybeSingle();
+      requireVoiceStorageResult('complete interview session', completionResult);
+      if (!completionResult.data) throw new TRPCError({code:'NOT_FOUND',message:'Interview session no longer exists'});
 
       return { success: true };
     }),
 
-  reportAntiCheatingViolation: publicProcedure
+  reportAntiCheatingViolation: sessionWriteProcedure
     .input(
       z.object({
         sessionId: z.string(),
@@ -682,7 +727,7 @@ export const sessionRouter = router({
       return { sessions, nextCursor };
     }),
 
-  saveRecording: publicProcedure
+  saveRecording: sessionWriteProcedure
     .input(
       z.object({
         sessionId: z.string(),
@@ -713,13 +758,15 @@ export const sessionRouter = router({
       }
 
       if (Object.keys(updateData).length === 0) {
-        return { success: true };
+        throw new TRPCError({ code: "BAD_REQUEST", message: "No recording metadata supplied" });
       }
 
-      const { error } = await ctx.supabase
+      const { data, error } = await ctx.supabase
         .from("sessions")
         .update(updateData)
-        .eq("id", input.sessionId);
+        .eq("id", input.sessionId)
+        .select("id")
+        .maybeSingle();
 
       if (error) {
         throw new TRPCError({
@@ -728,7 +775,10 @@ export const sessionRouter = router({
         });
       }
 
-      return { success: true };
+      if (!data) {
+        throw new TRPCError({ code: "NOT_FOUND", message: "Recording session no longer exists" });
+      }
+      return { success: true, sessionId: data.id };
     }),
 
   deleteMany: protectedProcedure

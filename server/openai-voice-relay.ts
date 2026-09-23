@@ -11,6 +11,8 @@ import { randomUUID } from "crypto";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
+import {authorizeRelayContext} from './relay-session-access';
+import {socketOpenAttempt} from './socket-open-attempt';
 import { createLogger } from "../src/lib/logger";
 import {
   isProgressiveOpeningOnly,
@@ -208,6 +210,7 @@ function isCodingDoneSignal(text: string): boolean {
 interface InterviewContext {
   interviewId?: string;
   sessionId?: string;
+  inviteToken?: string;
   title: string;
   objective?: string | null;
   aiName: string;
@@ -494,7 +497,14 @@ wss.on("connection", (browserWs) => {
       } else if (msg.type === "init" && msg.context) {
         clearTimeout(timeout);
         browserWs.removeListener("message", handler);
-        handleInterview(browserWs, msg.context as InterviewContext);
+        void authorizeRelayContext(dynamicQuestionClient,msg.context as InterviewContext).then(context=>{
+          if(browserWs.readyState===WebSocket.OPEN)return handleInterview(browserWs,context);
+        }).catch(()=>{
+          if(browserWs.readyState===WebSocket.OPEN) {
+            browserWs.send(JSON.stringify({type:'error',message:'本场面试暂时无法验证，请使用原邀请链接重试或联系 HR。'}));
+            browserWs.close(1008,'session_access_denied');
+          }
+        });
       }
     } catch { /* not JSON */ }
   };
@@ -1578,6 +1588,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
 
   // ── Volcengine Big-Model streaming ASR ──────────────────────────────
   let volcWs: WebSocket | null = null;
+  let volcConnectAttempt:ReturnType<typeof socketOpenAttempt>|null=null;
   let volcAlive = false;
   let volcAsrAccumulator = "";
   let volcAsrPreFlushed = false;
@@ -1585,9 +1596,13 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   let volcSessionErrorLogged = false;
   let volcAudioSeq = 1;
 
+  browserWs.once('close',()=>{browserClosed=true;cleanupVolcAsr();});
+
   async function connectVolcAsr() {
-    if (!USE_VOLC_ASR_INTERIMS) return;
+    if (!USE_VOLC_ASR_INTERIMS || browserClosed || interviewDone || browserWs.readyState!==WebSocket.OPEN || volcConnectAttempt) return;
+    if(volcAlive && volcWs?.readyState===WebSocket.OPEN)return;
     if (volcKeepAliveTimer) { clearInterval(volcKeepAliveTimer); volcKeepAliveTimer = null; }
+    let socket:WebSocket|null=null;
     try {
       const reqid = randomUUID().replace(/-/g, "");
       volcAudioSeq = 1;
@@ -1609,17 +1624,18 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       };
 
       const wsHeaders = buildBigModelHeaders(VOLC_ASR_APPID, VOLC_ASR_TOKEN, reqid);
-      volcWs = new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
-
-      await new Promise<void>((resolve, reject) => {
-        const t = setTimeout(() => reject(new Error("Volcengine ASR connect timeout")), 10_000);
-        volcWs!.on("open", () => { clearTimeout(t); resolve(); });
-        volcWs!.on("error", (e) => { clearTimeout(t); reject(e); });
-      });
+      socket = new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
+      volcWs=socket;
+      const attempt=socketOpenAttempt(socket);
+      volcConnectAttempt=attempt;
+      try {await attempt.promise;}
+      finally {if(volcConnectAttempt===attempt)volcConnectAttempt=null;}
+      if(volcWs!==socket || browserClosed || interviewDone || browserWs.readyState!==WebSocket.OPEN) {socket.close();return;}
 
       // Register message handler BEFORE sending the init request so we
       // don't miss the ACK or an early error.
       volcWs.on("message", (data: Buffer) => {
+        if(volcWs!==socket || browserClosed || interviewDone)return;
         try {
           const resp = parseAsrResponse(Buffer.from(data));
 
@@ -1686,6 +1702,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
       volcAlive = true;
 
       volcWs.on("close", () => {
+        if(volcWs!==socket)return;
         volcAlive = false;
         setOpenAiTranscriptionEnabled(true, "Volcengine ASR closed");
         if (!browserClosed && !interviewDone) reconnectVolcAsr();
@@ -1703,6 +1720,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
 
       log.info("Volcengine Big-Model ASR WebSocket open, waiting for ACK...");
     } catch (err) {
+      if(volcWs!==socket || browserClosed || interviewDone)return;
       log.error("Volcengine ASR connection failed:", err instanceof Error ? err.message : err);
       volcAlive = false;
       setOpenAiTranscriptionEnabled(true, "Volcengine ASR connection failed");
@@ -1715,6 +1733,7 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
   }
 
   function cleanupVolcAsr() {
+    volcConnectAttempt?.cancel();
     volcAlive = false;
     setOpenAiTranscriptionEnabled(true, "Volcengine ASR cleanup");
     if (volcKeepAliveTimer) { clearInterval(volcKeepAliveTimer); volcKeepAliveTimer = null; }
@@ -2616,7 +2635,9 @@ async function handleInterview(browserWs: WebSocket, ctx: InterviewContext) {
           log.warn("Rejected browser question refresh for a different interview");
           return;
         }
-        applyDynamicQuestionSet(msg.questions, "browser");
+        if (/^数君招聘\s*·\s*/.test(ctx.title)) {
+          void refreshDynamicQuestions().catch(() => log.warn('Verified question refresh failed'));
+        } else applyDynamicQuestionSet(msg.questions, "browser");
         return;
       }
       if (msg.type === "next_question") {

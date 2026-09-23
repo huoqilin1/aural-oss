@@ -29,6 +29,7 @@ export async function createContext() {
 
   return {
     user,
+    inviteToken: headers().get('x-interview-invite'),
     supabase: supabaseAdmin,
   };
 }

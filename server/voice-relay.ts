@@ -22,6 +22,12 @@ import { randomUUID } from "crypto";
 import { config } from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
 import { createClient } from "@supabase/supabase-js";
+import {authorizeRelayContext} from './relay-session-access';
+import {socketOpenAttempt} from './socket-open-attempt';
+import {answerRevisionMessage} from '../src/lib/voice/answer-revision';
+import {persistVoiceMessages, type StoredVoiceMessage} from '../src/app/api/voice/save/message-storage';
+import {RevisionWriteBarrier} from './revision-write-barrier';
+import {AsrUtteranceReplayGuard} from './asr-utterance-replay';
 import { bt } from "../src/lib/i18n";
 import { createLogger } from "../src/lib/logger";
 import type { RelayLlmRoute } from "../src/lib/relay-llm-route";
@@ -53,6 +59,7 @@ import {
     responseInvitesUserReply,
     shouldHoldBargeInInterimForFinal,
     shouldSuppressAnsweredAsrFinal,
+    answeredAsrRevision,
     shouldSuppressRecentAsrFinal,
     summarizeRecruitmentResumeBudget,
     trimCrossTurnOverlap,
@@ -272,6 +279,7 @@ interface InterviewContext {
   interviewId?: string;
   /** 真实会话 ID(tRPC 建的 sessions 行):relay 据此做服务端收尾落库 */
   sessionId?: string;
+  inviteToken?: string;
   /** 面试硬限(分钟):服务端兜底,浏览器关掉/后台挂着也必须按时结束 */
   timeLimitMinutes?: number | null;
   title: string;
@@ -841,9 +849,9 @@ wss.on("connection", (browserWs) => {
       } else if (msg.type === "init" && msg.context) {
         clearTimeout(timeout);
         browserWs.removeListener("message", handler);
-        const context = msg.context as InterviewContext;
-        void loadInterviewRelayLlmRoute(dynamicQuestionClient, context.interviewId)
-          .then(async (llmRoute) => {
+        void authorizeRelayContext(dynamicQuestionClient,msg.context as InterviewContext)
+          .then(async (context) => {
+            const llmRoute=await loadInterviewRelayLlmRoute(dynamicQuestionClient, context.interviewId);
             await assertRelayLlmReady({ route: llmRoute });
             if (browserWs.readyState !== WebSocket.OPEN) return;
             // 终态会话(COMPLETED/ABANDONED)拒绝重新 init:不能因为刷新或
@@ -1292,6 +1300,21 @@ async function handleBrowserConnection(
 
   // ── ASR state ──────────────────────────────────────────────────
   let asrWs: WebSocket | null = null;
+  let asrConnectAttempt:ReturnType<typeof socketOpenAttempt>|null=null;
+  browserWs.once('close',cancelPendingAsrConnection);
+  function cancelPendingAsrConnection() {
+    if(!asrConnectAttempt)return;
+    const attempt=asrConnectAttempt;
+    const socket=asrWs;
+    asrConnectAttempt=null;
+    asrWs=null;
+    asrAlive=false;
+    attempt.cancel();
+    if(socket) {
+      socket.once('error',()=>{});
+      try {socket.close();}catch{/* already closed */}
+    }
+  }
   let asrAlive = false;
   let asrAudioSeq = 1;
   let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
@@ -1802,6 +1825,7 @@ async function handleBrowserConnection(
    * Prevents mid-sentence cutoff while refreshing a degraded ASR session.
    */
   function rotateAsrSession() {
+    cancelPendingAsrConnection();
     asrIntentionalClose = true;
     if (keepAliveInterval) {
       clearInterval(keepAliveInterval);
@@ -2195,8 +2219,28 @@ async function handleBrowserConnection(
 
   // ── Interview lifecycle ────────────────────────────────────────
 
-  function endInterview() {
+  let finalizingInterview = false;
+  const revisionWriteBarrier = new RevisionWriteBarrier();
+  async function endInterview() {
     if (interviewDone) return;
+    if (finalizingInterview) return;
+    finalizingInterview = true;
+    // Revisions are written directly by the relay as well as retried by the
+    // browser. Do not signal completion while those durable writes are pending.
+    try {
+      await revisionWriteBarrier.flush();
+    } catch {
+      finalizingInterview = false;
+      // Keep the session recoverable. A failed revision is not a completed
+      // interview; the next finalization attempt retries only failed writes.
+      if (browserWs.readyState === WebSocket.OPEN) {
+        browserWs.send(JSON.stringify({type: 'error', code: 'revision_save_pending',
+          message: isZh ? '回答修订尚未保存成功，请保持页面打开并重试保存。' :
+            'An answer correction is not saved yet. Keep this page open and retry saving.'}));
+      }
+      log.error('Interview completion withheld: answer revision persistence failed');
+      return;
+    }
     if (!ownsPersistedSession()) {
       interviewDone = true;
       return;
@@ -2213,7 +2257,9 @@ async function handleBrowserConnection(
       clearTimeout(pendingLastQuestionTimeout);
       pendingLastQuestionTimeout = null;
     }
-    browserWs.send(JSON.stringify({ type: "interview_complete" }));
+    if (browserWs.readyState === WebSocket.OPEN) {
+      browserWs.send(JSON.stringify({ type: "interview_complete" }));
+    }
     log.info("Interview complete signal sent");
     farewellCompleted = true;
     // Recruitment completion is authoritative only after /api/voice/save has
@@ -2930,13 +2976,41 @@ async function handleBrowserConnection(
     return text.replace(/\s+/g, " ").trim().toLowerCase();
   }
 
+  function deliverAnswerRevision(text: string) {
+    const questionIndex=currentQuestionIndex;
+    const questionId=sortedQuestions[questionIndex]?.id;
+    const event={type:'asr_revision',text,questionIndex,questionId,
+      messageId:randomUUID(),timestamp:new Date().toISOString()};
+    if (browserWs.readyState === WebSocket.OPEN) browserWs.send(JSON.stringify(event));
+    const message=answerRevisionMessage(event,index=>sortedQuestions[index]?.id);
+    const client=dynamicQuestionClient;
+    if (!message || !ctxSessionId || !client) return;
+    const revisionSessionId = ctxSessionId;
+    const write=revisionWriteBarrier.track(() => persistVoiceMessages(revisionSessionId,[message],{
+      async insertIfAbsent(rows) {
+        const {error}=await client.from('messages').upsert(rows,{onConflict:'id',ignoreDuplicates:true})
+          .abortSignal(AbortSignal.timeout(10000));
+        if (error) throw new Error('Relay revision persistence failed');
+      },
+      async read(sessionId,ids) {
+        const {data,error}=await client.from('messages').select('*').eq('sessionId',sessionId).in('id',ids)
+          .abortSignal(AbortSignal.timeout(10000));
+        if (error) throw new Error('Relay revision acknowledgement failed');
+        return (data??[]) as StoredVoiceMessage[];
+      },
+    },randomUUID));
+    // Attach a rejection handler immediately; the browser outbox retains the
+    // identical message ID for retry if this independent write fails.
+    void write.catch(()=>log.error('Answer revision write failed; browser retry remains pending'));
+  }
+
   /**
    * Volcengine sometimes emits a second definite for the same utterance while ASR results are
    * suppressed (or two finals race before generatingResponse is set). If we already stored this
    * user line and an assistant reply followed, skip — otherwise the flush/queue paths call
    * handleUserUtterance again and the agent speaks twice.
    */
-  function isDuplicateUserFinal(userText: string): boolean {
+  function isDuplicateUserFinal(userText: string, forwardRevision = false): boolean {
     const key = normalizeUserUtteranceKey(userText);
     if (!key) return false;
 
@@ -2947,16 +3021,20 @@ async function handleBrowserConnection(
         break;
       }
     }
+    if (forwardRevision && lastUserIdx >= 0 && lastUserIdx === questionTranscript.length - 1) {
+      return isReplayOfPendingUserTurn(userText);
+    }
     if (lastUserIdx >= 0 && lastUserIdx !== questionTranscript.length - 1) {
       const hasAssistantAfter = questionTranscript.slice(lastUserIdx + 1).some(e => e.role === "assistant");
 
       if (hasAssistantAfter) {
         const lastUserText = questionTranscript[lastUserIdx].text;
         if (shouldSuppressAnsweredAsrFinal(lastUserText, userText)) {
-          const merged = mergeAsrSegments(lastUserText, userText);
-          if (normalizeUserUtteranceKey(merged).length > normalizeUserUtteranceKey(lastUserText).length) {
-            questionTranscript[lastUserIdx] = { role: "user", text: merged };
-            rememberAcceptedUserFinal(merged);
+          const revision = answeredAsrRevision(lastUserText, userText);
+          if (forwardRevision && revision) {
+            deliverAnswerRevision(revision);
+            questionTranscript[lastUserIdx] = { role: "user", text: revision };
+            rememberAcceptedUserFinal(revision);
           }
           return true;
         }
@@ -2971,10 +3049,11 @@ async function handleBrowserConnection(
     if (lastEntry?.role !== "user") return false;
     if (!shouldSuppressAnsweredAsrFinal(lastEntry.text, userText)) return false;
 
-    const merged = mergeAsrSegments(lastEntry.text, userText);
-    if (normalizeUserUtteranceKey(merged).length > normalizeUserUtteranceKey(lastEntry.text).length) {
-      questionTranscript[questionTranscript.length - 1] = { role: "user", text: merged };
-      rememberAcceptedUserFinal(merged);
+    const revision = answeredAsrRevision(lastEntry.text, userText);
+    if (revision) {
+      deliverAnswerRevision(revision);
+      questionTranscript[questionTranscript.length - 1] = { role: "user", text: revision };
+      rememberAcceptedUserFinal(revision);
     }
     return true;
   }
@@ -3060,7 +3139,7 @@ async function handleBrowserConnection(
       !options?.isChatInput &&
       !options?.allowRecentReplay &&
       !retryingPendingUserTurnCandidate &&
-      isDuplicateUserFinal(userText)
+      isDuplicateUserFinal(userText, true)
     ) {
       log.info(
         `Skipping duplicate USER final (reply already recorded): "${userText.slice(0, 72)}..."`,
@@ -3080,7 +3159,7 @@ async function handleBrowserConnection(
       const duplicateWhileGenerating =
         !options?.isChatInput &&
         (isReplayOfPendingUserTurn(userText) ||
-          (!options?.allowRecentReplay && isDuplicateUserFinal(userText)));
+          (!options?.allowRecentReplay && isDuplicateUserFinal(userText, true)));
       if (duplicateWhileGenerating) {
         log.info(
           `Skipping duplicate USER final while response is generating: "${userText.slice(0, 72)}..."`,
@@ -3254,6 +3333,7 @@ async function handleBrowserConnection(
 
   /** Gracefully close the current ASR session (send end-of-stream). */
   function disconnectAsr() {
+    cancelPendingAsrConnection();
     asrIntentionalClose = true;
     clearPendingAsrFinal();
     clearHeldBargeInInterim();
@@ -3494,6 +3574,7 @@ async function handleBrowserConnection(
   }
 
   async function connectAsrUngated() {
+    if (interviewDone || !ownsPersistedSession() || browserWs.readyState!==WebSocket.OPEN) return;
     asrIntentionalClose = false;
     const reqid = randomUUID().replace(/-/g, "");
     asrAudioSeq = 1;
@@ -3525,29 +3606,24 @@ async function handleBrowserConnection(
       ASR_APP_ID, ASR_ACCESS_TOKEN, reqid, ASR_RESOURCE_ID,
       ASR_API_KEY || undefined,
     );
-    asrWs = new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
-
-    await new Promise<void>((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error("ASR connect timeout")), 10000);
-      asrWs!.on("open", () => { clearTimeout(t); resolve(); });
-      asrWs!.on("error", (e) => { clearTimeout(t); reject(e); });
-      asrWs!.on("unexpected-response", (_req, res) => {
-        let body = "";
-        res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
-        res.on("end", () => {
-          clearTimeout(t);
-          log.error(`ASR WebSocket rejected: HTTP ${res.statusCode} — ${body}`);
-          reject(new Error(`ASR server responded ${res.statusCode}: ${body}`));
-        });
-      });
-    });
+    const socket = new WebSocket(BIGMODEL_ASR_URL, { headers: wsHeaders });
+    asrWs=socket;
+    const attempt=socketOpenAttempt(socket);
+    asrConnectAttempt=attempt;
+    try {await attempt.promise;}
+    finally {if(asrConnectAttempt===attempt)asrConnectAttempt=null;}
+    if(asrWs!==socket || interviewDone || !ownsPersistedSession() || browserWs.readyState!==WebSocket.OPEN) {
+      socket.close();return;
+    }
     log.info(`ASR connected: resource=${ASR_RESOURCE_ID}`);
 
     asrWs.send(buildBigModelFullRequest(asrConfig, reqid));
     asrAlive = true;
     armSilenceAutoSkip();
+    const utteranceReplayGuard = new AsrUtteranceReplayGuard();
 
     asrWs.on("message", (data: Buffer) => {
+      if(asrWs!==socket || interviewDone || !ownsPersistedSession())return;
       try {
         const resp = parseAsrResponse(Buffer.from(data));
 
@@ -3562,7 +3638,9 @@ async function handleBrowserConnection(
         const results: { text: string; definite: boolean }[] = [];
         if (resp.utterances) {
           for (const utt of resp.utterances) {
-            if (utt.text) results.push({ text: utt.text, definite: !!utt.definite });
+            if (utt.text && !utteranceReplayGuard.isDuplicate(utt)) {
+              results.push({ text: utt.text, definite: !!utt.definite });
+            }
           }
         } else if (resp.text) {
           results.push({ text: resp.text, definite: !!resp.isLastPackage });
@@ -3635,7 +3713,7 @@ async function handleBrowserConnection(
                   continue;
                 }
                 const prevPending = pendingUserUtteranceWhileSuppressed.trim();
-                const incomingDup = isDuplicateUserFinal(suppressedFinal);
+                const incomingDup = isDuplicateUserFinal(suppressedFinal, true);
                 const sameAsPending =
                   normalizeUserUtteranceKey(suppressedFinal)
                   === normalizeUserUtteranceKey(prevPending);
@@ -3724,6 +3802,7 @@ async function handleBrowserConnection(
     });
 
     asrWs.on("close", (code: number, reason: Buffer) => {
+      if(asrWs!==socket || !ownsPersistedSession())return;
       const reasonStr = reason?.toString() || "";
       log.warn(`ASR WS closed (code=${code}, reason="${reasonStr}")`);
       asrAlive = false;
@@ -3891,7 +3970,9 @@ async function handleBrowserConnection(
           log.warn("Rejected browser question refresh for a different interview");
           return;
         }
-        applyDynamicQuestionSet(msg.questions, "browser");
+        if (/^数君招聘\s*·\s*/.test(ctx.title)) {
+          void refreshDynamicQuestions().catch(() => log.warn('Verified question refresh failed'));
+        } else applyDynamicQuestionSet(msg.questions, "browser");
       } else if (msg.type === "next_question") {
         log.info("Browser requested next question");
         const latestEntry = questionTranscript[questionTranscript.length - 1];
@@ -3958,6 +4039,7 @@ async function handleBrowserConnection(
 
   browserWs.on("close", () => {
     log.info("Browser disconnected");
+    cancelPendingAsrConnection();
     if (ctxSessionId && connectionClaim) {
       browserSessionConnections.release(ctxSessionId, connectionClaim.lease);
     }

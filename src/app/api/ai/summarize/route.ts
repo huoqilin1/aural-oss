@@ -1,3 +1,4 @@
+import { resolveHrModelChain } from "../../../../../server/hr-model-control";
 import { svgDataUrlToPng } from "@/lib/ai/convert-svg";
 import { extractJson } from "@/lib/ai/extract-json";
 import { createLogger } from "@/lib/logger";
@@ -81,7 +82,7 @@ export async function POST(req: Request) {
       }))
       .filter((s) => s.code.trim().length > 0);
 
-    const reportChain = [REPORT_MODEL, ...REPORT_FALLBACK_CHAIN];
+    const reportChain = await resolveHrModelChain([REPORT_MODEL, ...REPORT_FALLBACK_CHAIN]);
     const textMessages = msgs
       .filter((m) => m.contentType === "TEXT")
       .map((m) => ({ role: m.role, content: m.content }));

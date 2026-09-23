@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { NextResponse } from "next/server";
+import {sessionAccessResponse} from '@/server/session-access-http';
 
 export async function POST(req: Request) {
   try {
@@ -9,6 +10,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Missing sessionId" }, { status: 400 });
     }
 
+    const denied=await sessionAccessResponse(sessionId);
+    if(denied)return denied;
     const { data: session } = await supabaseAdmin
       .from("sessions")
       .select("activitySegments")

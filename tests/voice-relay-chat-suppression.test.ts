@@ -37,7 +37,7 @@ describe("server/voice-relay.ts chat input bypasses ASR replay suppression", () 
     const src = readVoiceRelaySource();
     assert.match(src, /isChatInput\?: boolean/);
     const topGuard = src.match(
-      /const retryingPendingUserTurnCandidate[\s\S]{0,220}?isDuplicateUserFinal\(userText\)/,
+      /const retryingPendingUserTurnCandidate[\s\S]{0,220}?isDuplicateUserFinal\(userText, true\)/,
     );
     assert.ok(topGuard, "top dedup guard must exist");
     assert.match(

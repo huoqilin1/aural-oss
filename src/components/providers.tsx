@@ -10,6 +10,7 @@ import { OrgProvider } from "@/components/org-provider";
 import { ProjectProvider } from "@/components/project-provider";
 import { ThemeProvider } from "next-themes";
 import superjson from "superjson";
+import {invitationHeaders} from '@/lib/voice/candidate-fetch';
 
 function getBaseUrl() {
   if (typeof window !== "undefined") return "";
@@ -24,6 +25,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       links: [
         httpBatchLink({
           url: `${getBaseUrl()}/api/trpc`,
+          headers: () => invitationHeaders(),
         }),
       ],
     }),

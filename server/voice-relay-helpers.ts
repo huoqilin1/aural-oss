@@ -922,6 +922,14 @@ export function shouldSuppressAnsweredAsrFinal(
   return answeredKey === textKey || isAsrRollingRevision(answered, text);
 }
 
+/** A related final may contain new evidence even when dialogue replay is suppressed. */
+export function answeredAsrRevision(existing: string, incoming: string): string | null {
+  const before = normalizeAsrComparisonText(existing);
+  const after = normalizeAsrComparisonText(incoming);
+  if (!before || !after || before === after || before.includes(after)) return null;
+  return isAsrRollingRevision(existing, incoming) ? incoming.trim() : null;
+}
+
 export interface RecentAsrFinal {
   text: string;
   at: number;

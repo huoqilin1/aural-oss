@@ -1,4 +1,5 @@
 "use client";
+import {candidateFetch as fetch} from '@/lib/voice/candidate-fetch';
 
 import { CodeBlock } from "@/components/code-editor/code-block";
 import {
@@ -205,7 +206,7 @@ export function ChatInterface({
             },
           };
           const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-          navigator.sendBeacon("/api/trpc/session.saveWhiteboard", blob);
+          void fetch("/api/trpc/session.saveWhiteboard",{method:'POST',body:blob,keepalive:true}).catch(()=>{});
         }
       }
 
@@ -224,7 +225,7 @@ export function ChatInterface({
             },
           };
           const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
-          navigator.sendBeacon("/api/trpc/session.saveCode", blob);
+          void fetch("/api/trpc/session.saveCode",{method:'POST',body:blob,keepalive:true}).catch(()=>{});
         }
       }
     };

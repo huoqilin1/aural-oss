@@ -22,8 +22,17 @@ test("accepts one primary plus two unique supported fallbacks", () => {
 
 test("rejects duplicate, missing, and unknown providers", () => {
   assert.equal(parseRelayLlmRoute({ primary: "deepseek", fallbacks: ["kimi", "kimi"] }), null);
-  assert.equal(parseRelayLlmRoute({ primary: "deepseek", fallbacks: ["kimi"] }), null);
+  assert.equal(parseRelayLlmRoute({ primary: "deepseek" }), null);
   assert.equal(parseRelayLlmRoute({ primary: "openai", fallbacks: ["kimi", "zhipu"] }), null);
+});
+
+test("omitted providers stay disabled rather than being restored as fallbacks", () => {
+  for (const fallbacks of [[], ["kimi"]]) {
+    const route = parseRelayLlmRoute({primary: "zhipu", fallbacks});
+    assert.ok(route);
+    assert.deepEqual(relayLlmRouteOrder(route), ["zhipu", ...fallbacks]);
+    assert.equal(relayLlmRouteOrder(route).includes("deepseek"), false);
+  }
 });
 
 test("reads only the namespaced route from interview metadata", () => {

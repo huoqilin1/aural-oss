@@ -11,6 +11,8 @@ import {
 } from "@/lib/media-stream-store";
 import fixWebmDuration from "fix-webm-duration";
 import { useCallback, useEffect, useRef, useState } from "react";
+import {MediaUploadQueue, uploadInterviewMedia} from '@/lib/voice/media-upload-queue';
+import {SingleFlightSave} from '@/lib/voice/progress-save';
 
 const log = createLogger("recording");
 
@@ -108,6 +110,10 @@ export function useInterviewRecording({
   const cameraStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const stoppedRef = useRef(false);
+  const uploadsRef = useRef(new MediaUploadQueue());
+  const captureStopRef = useRef<Promise<void> | null>(null);
+  const stopFlightRef = useRef(new SingleFlightSave<{audioUrl?:string;audioDuration?:number;screenshots:ScreenshotEntry[]}>());
+  const audioResultRef = useRef<{audioUrl?:string;audioDuration?:number}>({});
   const ttsPlayTimeRef = useRef(0);
   const ttsSourcesRef = useRef<AudioBufferSourceNode[]>([]);
 
@@ -211,7 +217,7 @@ export function useInterviewRecording({
 
   /** Capture a screenshot from a video element and upload it. */
   const captureAndUpload = useCallback(
-    async (video: HTMLVideoElement, type: "camera" | "screen") => {
+    (video: HTMLVideoElement, type: "camera" | "screen") => {
       if (video.readyState < 2 || video.videoWidth === 0) return;
 
       const canvas = document.createElement("canvas");
@@ -226,28 +232,17 @@ export function useInterviewRecording({
       }
       ctx2d.drawImage(video, 0, 0);
 
-      const blob = await new Promise<Blob | null>((resolve) =>
+      const captured = new Promise<Blob | null>((resolve) =>
         canvas.toBlob((b) => resolve(b), "image/jpeg", 0.7),
       );
-      if (!blob) return;
 
       const timestamp = new Date().toISOString();
       const filename = `${timestamp.replace(/[:.]/g, "-")}-${type}.jpg`;
 
-      try {
-        const form = new FormData();
-        form.append("file", blob, filename);
-        form.append("sessionId", sessionId);
-        form.append("type", "screenshot");
-        form.append("filename", filename);
-
-        const res = await fetch("/api/session/upload", {
-          method: "POST",
-          body: form,
-        });
-
-        if (res.ok) {
-          const data = await res.json();
+      uploadsRef.current.add(async () => {
+          const blob = await captured;
+          if (!blob) throw Error('截图采集未完成');
+          const data = await uploadInterviewMedia({sessionId,blob,type:'screenshot',filename});
           screenshotsRef.current.push({
             url: data.url,
             path: data.path,
@@ -255,10 +250,7 @@ export function useInterviewRecording({
             type,
           });
           log.info(`Screenshot uploaded: ${type}`);
-        }
-      } catch (err) {
-        log.error("Screenshot upload failed:", err);
-      }
+      });
     },
     [sessionId],
   );
@@ -276,7 +268,7 @@ export function useInterviewRecording({
   /** Start recording audio and periodic screenshots. */
   const start = useCallback(
     async (micStream?: MediaStream) => {
-      if (!enabled || isRecording) return;
+      if (!enabled || isRecording || stoppedRef.current) return;
       stoppedRef.current = false;
       ttsPlayTimeRef.current = 0;
 
@@ -365,10 +357,8 @@ export function useInterviewRecording({
     audioUrl?: string;
     audioDuration?: number;
     screenshots: ScreenshotEntry[];
-  }> => {
-    if (stoppedRef.current) {
-      return { screenshots: screenshotsRef.current };
-    }
+  }> => stopFlightRef.current.run(async () => {
+    if (!captureStopRef.current) captureStopRef.current = (async () => {
     stoppedRef.current = true;
 
     // Stop screenshot timer
@@ -377,23 +367,27 @@ export function useInterviewRecording({
       screenshotTimerRef.current = null;
     }
 
+    try {
     // Take one final set of screenshots
     takeScreenshots();
 
     // Stop MediaRecorder and collect audio
-    let audioUrl: string | undefined;
     let audioDuration: number | undefined;
     const recorder = recorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      await new Promise<void>((resolve) => {
+    if (!recorder) throw Error('录音尚未采集完成，请保留页面并联系 HR');
+    if (recorder.state !== "inactive") {
+      await new Promise<void>((resolve,reject) => {
         recorder.onstop = () => resolve();
+        recorder.onerror = () => reject(Error('录音停止时发生错误，尚未完成保存，请联系 HR'));
         recorder.stop();
       });
 
+    }
       const mime = audioMimeRef.current || "audio/webm";
       const isWebm = mime.includes("webm");
       const ext = isWebm ? "webm" : "m4a";
       const rawBlob = new Blob(chunksRef.current, { type: mime });
+      if (!rawBlob.size) throw Error('录音内容为空，尚未完成保存，请联系 HR');
       if (rawBlob.size > 0) {
         audioDuration = await resolveBlobDuration(rawBlob);
 
@@ -402,29 +396,16 @@ export function useInterviewRecording({
           ? await fixWebmDuration(rawBlob, audioDuration * 1000)
           : rawBlob;
 
-        try {
           const fname = `recording-${Date.now()}.${ext}`;
-          const form = new FormData();
-          form.append("file", audioBlob, fname);
-          form.append("sessionId", sessionId);
-          form.append("type", "recording");
-          form.append("filename", fname);
-
-          const res = await fetch("/api/session/upload", {
-            method: "POST",
-            body: form,
+          audioResultRef.current.audioDuration = audioDuration;
+          uploadsRef.current.add(async () => {
+            const data = await uploadInterviewMedia({sessionId,blob:audioBlob,type:'recording',filename:fname});
+            audioResultRef.current.audioUrl = data.url;
+            chunksRef.current = [];
+            log.info('Audio upload confirmed');
           });
-          if (res.ok) {
-            const data = await res.json();
-            audioUrl = data.url;
-            log.info("Audio uploaded:", audioUrl);
-          }
-        } catch (err) {
-          log.error("Audio upload failed:", err);
-        }
       }
-    }
-
+    } finally {
     // Disconnect mic source
     try { micSourceRef.current?.disconnect(); } catch { /* noop */ }
     micSourceRef.current = null;
@@ -455,13 +436,15 @@ export function useInterviewRecording({
 
     setIsRecording(false);
     log.info("Stopped");
-
+    }
+    })();
+    await captureStopRef.current;
+    await uploadsRef.current.flush();
     return {
-      audioUrl,
-      audioDuration,
-      screenshots: screenshotsRef.current,
+      ...audioResultRef.current,
+      screenshots: [...screenshotsRef.current],
     };
-  }, [sessionId, takeScreenshots]);
+  }), [sessionId, takeScreenshots]);
 
   // Cleanup on unmount
   useEffect(() => {
