@@ -5,6 +5,8 @@ export type VoiceSavePayload = {
     content: string;
     questionId?: string;
     source?: string;
+    timestamp?: string;
+    messageId?: string;
   }>;
   complete?: boolean;
   validateOnly?: boolean;
