@@ -166,6 +166,26 @@ export async function handleVoiceSave(
   if (!sessionId) {
     return { status: 400, body: { error: "Missing sessionId" } };
   }
+  // Reject malformed batches before any write: wrong-shape payloads, null
+  // entries, non-candidate roles and whitespace-only content must never reach
+  // storage or crash the handler.
+  if (
+    typeof sessionId !== "string" ||
+    (complete !== undefined && typeof complete !== "boolean") ||
+    (currentQuestionIndex !== undefined &&
+      (!Number.isInteger(currentQuestionIndex) || currentQuestionIndex < 0)) ||
+    (messages !== undefined &&
+      (!Array.isArray(messages) ||
+        messages.some(
+          (message) =>
+            !message ||
+            !["user", "assistant"].includes(message.role) ||
+            typeof message.content !== "string" ||
+            !message.content.trim(),
+        )))
+  ) {
+    return { status: 400, body: { error: "Invalid voice save payload" } };
+  }
 
   try {
     if (messages && Array.isArray(messages) && messages.length > 0) {

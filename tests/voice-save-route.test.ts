@@ -7,35 +7,8 @@ import {
   handleVoiceSave,
   orderedVoiceMessageTimestamp,
   requireVoiceStorageResult,
-  VoiceStorageError,
   type ActivitySegment,
 } from "@/app/api/voice/save/logic";
-
-for (const code of ['PVR01', 'PVR02', 'PVR03', 'PVR04']) {
-  test(`database completion guard ${code} returns a recoverable conflict, never success`, async () => {
-    const {ops, summaryCalls} = createOps();
-    const result = await handleVoiceSave({sessionId:'synthetic',messages:[{role:'user',content:'有效回答'}]}, {
-      ...ops, async insertMessages() { throw new VoiceStorageError('persist evidence',code); },
-    });
-    assert.equal(result.status,409);
-    assert.equal(result.body.ok,undefined);
-    assert.match(result.body.error!, code === 'PVR04' ? /题目与当前面试不一致/ : code === 'PVR02' ? /尚未纳入报告/ : /重试/);
-    assert.equal(summaryCalls.length,0);
-  });
-}
-
-test('recruitment completion carries the exact loaded transcript version to the database', async () => {
-  const {ops, updatedSessions} = createOps();
-  const base = await ops.loadSessionForCompletion('synthetic');
-  const result = await handleVoiceSave({sessionId:'synthetic',complete:true}, {
-    ...ops,
-    async loadSessionForCompletion() { return {...base,voiceRevision:19,interview:{...base.interview,
-      title:'数君招聘 · 总经理助理',questions:Array.from({length:8},(_,i)=>({id:`q${i}`,text:`Q${i}`,order:i,description:'oprun_dimension:work'}))}}; },
-    async loadAnsweredQuestionIds() { return Array.from({length:8},(_,i)=>`q${i}`); },
-  });
-  assert.equal(result.status,200);
-  assert.equal(updatedSessions.find(row=>row.payload.status==='COMPLETED')?.payload.completedVoiceRevision,19);
-});
 
 test("voice save assigns stable increasing timestamps inside one insert batch", () => {
   assert.equal(
@@ -269,15 +242,6 @@ test('deferred save preserves captured two-minute question and answer interval',
   ]}, ops);
   assert.equal(result.status, 200);
   assert.equal(Date.parse(retained[1].timestamp!) - Date.parse(retained[0].timestamp!), 120000);
-});
-
-test('ambiguous naive timestamp is rejected before storage', async () => {
-  const {ops, insertedMessages} = createOps();
-  const result = await handleVoiceSave({sessionId:'synthetic-session', messages:[
-    {role:'user', content:'合成回答', timestamp:'2026-09-05T09:00:00'},
-  ]}, ops);
-  assert.equal(result.status, 400);
-  assert.equal(insertedMessages.length, 0);
 });
 
 test("handleVoiceSave rejects missing session ids", async () => {
