@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import { zhipuBaseUrl } from "../../relay-llm-route";
+import { zhipuBaseUrl, zhipuModel } from "../../relay-llm-route";
 import { acquireGlmSlot, withGlmSlot } from "../../../../server/glm-capacity";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
@@ -17,7 +17,7 @@ const THINKING_CONTROL_MODELS = /^glm-(4\.[56]|5)/;
 export class ZhipuProvider implements LLMProvider {
   id = "zhipu";
   name = "智谱 GLM";
-  models = ["glm-4.6", "glm-4.5", "glm-4.5-air", "glm-5.3"];
+  models = Array.from(new Set(["glm-4.6", "glm-4.5", "glm-4.5-air", "glm-5.3", zhipuModel()]));
   defaultModel = "glm-4.6";
 
   private client: OpenAI;

@@ -24,6 +24,7 @@ export async function getHrTextPolicy(request:typeof fetch=fetch):Promise<HrText
     redirect:'error',cache:'no-store',signal:AbortSignal.timeout(5000)});
   if(!response.ok)throw new Error(`HR model control unavailable (${response.status})`);
   const data=await response.json();
+  if (data.schema_version !== undefined && data.schema_version !== 1) throw new Error("HR_model_contract_version_unsupported");
   const route=parseRelayLlmRoute(data.route);
   if(!data.success || !route || !data.models)throw new Error('HR model control returned an invalid policy');
   for(const provider of [route.primary,...route.fallbacks]) {

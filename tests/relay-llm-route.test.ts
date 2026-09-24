@@ -8,6 +8,8 @@ import {
   recruitGlmOnlyEnabled,
   recruitTestModelRoutingEnabled,
   zhipuBaseUrl,
+  zhipuModel,
+  relayLlmProviderModel,
 } from "../src/lib/relay-llm-route";
 import { relayLlmRouteFromInterview } from "../server/interview-llm-route";
 
@@ -63,10 +65,10 @@ test("new route accepts exactly four unique providers", () => {
   assert.equal(parseRelayLlmRoute({primary: "zhipu", fallbacks: ["kimi", "deepseek", "zhipu"]}), null);
 });
 
-test("explicit GLM single-model route has no implicit fallback", () => {
+test("any supported single-model route has no implicit fallback", () => {
   assert.deepEqual(parseRelayLlmRoute({primary:"zhipu",fallbacks:[]}),{primary:"zhipu",fallbacks:[]});
-  assert.equal(parseRelayLlmRoute({primary:"kimi",fallbacks:[]}),null);
-  assert.equal(parseRelayLlmRoute({primary:"deepseek",fallbacks:[]}),null);
+  assert.deepEqual(parseRelayLlmRoute({primary:"kimi",fallbacks:[]}),{primary:"kimi",fallbacks:[]});
+  assert.deepEqual(parseRelayLlmRoute({primary:"deepseek",fallbacks:[]}),{primary:"deepseek",fallbacks:[]});
 });
 
 test("accepts one primary plus two unique supported fallbacks", () => {
@@ -114,4 +116,63 @@ test("reads only the namespaced route from interview metadata", () => {
     primary: "zhipu",
     fallbacks: ["kimi", "deepseek", "doubao"],
   });
+});
+
+
+test("all 15 ordered HR three-provider selections preserve exactly the selected chain", () => {
+  const providers = ["zhipu", "kimi", "deepseek"];
+  const orders: string[][] = [];
+  const visit = (prefix: string[], rest: string[]) => {
+    if (prefix.length) orders.push(prefix);
+    for (const provider of rest) visit([...prefix, provider], rest.filter(p => p !== provider));
+  };
+  visit([], providers);
+  assert.equal(orders.length, 15);
+  for (const order of orders) {
+    const route = parseRelayLlmRoute({primary: order[0], fallbacks: order.slice(1)});
+    assert.ok(route);
+    assert.deepEqual(relayLlmRouteOrder(route), order);
+  }
+  for (const invalid of [null, [], {}, {primary: "kimi", fallbacks: "zhipu"},
+    {primary: "kimi", fallbacks: ["kimi"]}, {primary: "kimi", fallbacks: ["unknown"]}]) {
+    assert.equal(parseRelayLlmRoute(invalid), null);
+  }
+});
+
+
+test("explicit isolated gateway preserves actual model identity and fails closed outside test mode", () => {
+  const keys = ["RECRUIT_MODEL_MODE", "RECRUIT_TEST_GLM_BASE_URL", "RECRUIT_TEST_GLM_MODEL"];
+  const previous = keys.map(key => process.env[key]);
+  try {
+    Object.assign(process.env, { RECRUIT_MODEL_MODE: "test",
+      RECRUIT_TEST_GLM_BASE_URL: "https://models.example.invalid/v1/", RECRUIT_TEST_GLM_MODEL: "glm-5.3-flash" });
+    assert.equal(zhipuBaseUrl(), "https://models.example.invalid/v1");
+    assert.equal(zhipuModel(), "glm-5.3-flash");
+    assert.equal(relayLlmProviderModel("zhipu"), "glm-5.3-flash");
+    assert.equal(recruitGlmOnlyEnabled(), true);
+    for (const mode of ["production", ""]) {
+      process.env.RECRUIT_MODEL_MODE = mode;
+      for (const resolve of [zhipuBaseUrl, zhipuModel, recruitGlmOnlyEnabled]) {
+        assert.throws(resolve, /requires RECRUIT_MODEL_MODE=test/);
+      }
+    }
+    process.env.RECRUIT_MODEL_MODE = "test";
+    for (const [base, model] of [
+      ["https://models.example.invalid/v1", ""], ["", "glm-5.3-flash"],
+      ["http://models.example.invalid/v1", "glm-5.3-flash"],
+      ["https://user:secret@models.example.invalid/v1", "glm-5.3-flash"],
+      ["https://models.example.invalid/v1?key=secret", "glm-5.3-flash"],
+      ["https://models.example.invalid/v1#fragment", "glm-5.3-flash"],
+      ["https://models.example.invalid/v1", "different-provider"],
+    ]) {
+      process.env.RECRUIT_TEST_GLM_BASE_URL = base;
+      process.env.RECRUIT_TEST_GLM_MODEL = model;
+      assert.throws(zhipuBaseUrl, /HTTPS base URL and explicit GLM model/);
+    }
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  }
 });

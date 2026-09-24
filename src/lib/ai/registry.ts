@@ -1,3 +1,4 @@
+import { zhipuModel } from "../relay-llm-route";
 import { type LLMProvider } from "./types";
 import { OpenAIProvider } from "./providers/openai";
 import { GeminiProvider } from "./providers/gemini";
@@ -47,7 +48,7 @@ export function listProviders(): LLMProvider[] {
 /** Model used for post-interview report generation.
  *  王总 2026-09-05:主线 GLM-5.3(Coding Plan 包月额度),失败走 REPORT_FALLBACK_CHAIN。 */
 export const REPORT_MODEL = process.env.ZHIPU_API_KEY
-  ? "glm-5.3"
+  ? zhipuModel()
   : process.env.DEEPSEEK_API_KEY
     ? "deepseek-chat"
     : process.env.OPENAI_API_KEY

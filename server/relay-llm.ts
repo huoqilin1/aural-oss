@@ -47,14 +47,14 @@ function deepseekRelayModel(): string {
   return process.env.DEEPSEEK_MODEL?.trim() || "deepseek-v4-flash";
 }
 function zhipuRelayModel(): string {
-  if (recruitGlmOnlyEnabled()) return "glm-5.3";
+  if (recruitGlmOnlyEnabled()) return zhipuModel();
   return process.env.ZHIPU_MODEL?.trim() || process.env.GLM_MODEL?.trim() || "glm-5.3";
 }
 function kimiRelayModel(): string {
   const configured = process.env.KIMI_MODEL?.trim();
   return !configured || configured === "kimi-latest" ? "kimi-k3" : configured;
 }
-import { zhipuBaseUrl } from "../src/lib/relay-llm-route";
+import { zhipuBaseUrl, zhipuModel } from "../src/lib/relay-llm-route";
 const DEEPSEEK_DEFAULT_BASE_URL = "https://api.deepseek.com/v1";
 const KIMI_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1";
 

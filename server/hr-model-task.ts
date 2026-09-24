@@ -6,9 +6,9 @@ import { runtimeStateDirectory } from "./voice-online-state";
 import { parseRelayLlmRoute, type RelayLlmRoute } from "../src/lib/relay-llm-route";
 
 export type TaskIdentity = { interview_id?: string; session_id?: string; stage: string };
-type Control = { success: boolean; task_key: string; round: number; state: string; route: RelayLlmRoute };
+type Control = { success: boolean; task_key: string; round: number; state: string; route: RelayLlmRoute; route_grant?: string };
 type Attempt = { provider: string; model: string; state: string; error: string };
-type Event = TaskIdentity & { id: string; action: "failure" | "success"; round: number; attempts?: Attempt[] };
+type Event = TaskIdentity & { id: string; action: "failure" | "success"; round: number; attempts?: Attempt[]; route_grant?: string; route_snapshot?: string[] };
 export class HrTaskHalted extends Error {
   readonly code = "all_models_failed";
   constructor() { super("all_models_failed"); }
@@ -38,6 +38,7 @@ async function control(body: unknown): Promise<Control> {
     headers: { "Content-Type": "application/json", "X-HR-Model-Timestamp": timestamp, "X-HR-Model-Signature": signature }, signal: AbortSignal.timeout(5000) });
   if (!response.ok) throw new Error("HR_model_task_control_unavailable");
   const data = await response.json();
+  if (data.schema_version !== undefined && data.schema_version !== 1) throw new Error("HR_model_contract_version_unsupported");
   const route = parseRelayLlmRoute(data.route);
   if (!data.success || !route || !/^aural:\d+$/.test(data.task_key) || !Number.isSafeInteger(data.round) || data.round < 1 || !["active", "halted"].includes(data.state)) {
     throw new Error("HR_model_task_control_invalid");
@@ -70,6 +71,9 @@ export async function runHrModelTask<T>(identity: TaskIdentity, operation: (rout
   await events.ready();
   void events.flush().catch(() => {});
   const state = await control({ ...identity, action: "begin" });
+  const grant = typeof state.route_grant === "string" ? {
+    route_grant: state.route_grant, route_snapshot: [state.route.primary, ...state.route.fallbacks],
+  } : {};
   const key = `${state.task_key}:${state.round}`;
   const operationKey = `${key}:${identity.stage}`;
   const haltDirectory = join(root, "model-task-halts");
@@ -88,7 +92,7 @@ export async function runHrModelTask<T>(identity: TaskIdentity, operation: (rout
   running.add(operationKey);
   try {
     const result = await operation(state.route);
-    await events.enqueue({ ...identity, id: randomUUID(), action: "success", round: state.round });
+    await events.enqueue({ ...identity, ...grant, id: randomUUID(), action: "success", round: state.round });
     void events.flush().catch(() => {});
     return result;
   } catch (error) {
@@ -98,7 +102,7 @@ export async function runHrModelTask<T>(identity: TaskIdentity, operation: (rout
       && attempts.every(item => item.provider === "zhipu" && item.model === "glm-5.3")
       && attempts.slice(0, -1).every(item => item.error === "http_429_code_1305");
     if (Array.isArray(attempts) && (boundedOverload || attempts.length === state.route.fallbacks.length + 1)) {
-      const event: Event = { ...identity, id: randomUUID(), action: "failure", round: state.round, attempts };
+      const event: Event = { ...identity, ...grant, id: randomUUID(), action: "failure", round: state.round, attempts };
       // Stop locally even if the network fails before HR acknowledges the event.
       const temporary = join(haltDirectory, randomUUID() + ".tmp");
       await writeFile(temporary, JSON.stringify(event), { flag: "wx", mode: 0o600 });

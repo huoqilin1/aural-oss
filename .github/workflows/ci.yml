@@ -15,7 +15,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "24.18.1"
           cache: npm
 
       - run: npm ci
@@ -30,7 +30,7 @@ jobs:
         run: npm run typecheck:ratchet
 
       - name: Unit and contract tests
-        run: npm run test:web --if-present
+        run: npm run test:web
 
       - name: Install Chromium for browser gate
         run: npx playwright install --with-deps chromium
